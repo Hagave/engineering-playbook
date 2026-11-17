@@ -179,6 +179,13 @@ def main() -> None:
         context += '\n\n' + notice
 
     try:
+        language = playbook_core.language_notice(str(input_data.get('cwd') or os.getcwd()))
+    except Exception:
+        language = ''  # fail-open: a detection hint is never worth losing context
+    if language:
+        context += '\n\n' + language
+
+    try:
         sast = playbook_core.sast_notice(str(input_data.get('cwd') or os.getcwd()))
     except Exception:
         sast = ''  # fail-open: detection is a convenience, never a reason to lose context

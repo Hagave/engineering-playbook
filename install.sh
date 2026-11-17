@@ -118,6 +118,30 @@ install_claude() {
   say "  /plugin -> Marketplaces -> ${MARKETPLACE} -> Enable auto-update"
 }
 
+# Print a short first-run guide, once per install dir. The marker records that
+# the playbook was installed here before, so an update stays quiet.
+maybe_tour() {
+  local harness="$1" dir="$2"
+  mkdir -p "${dir}"
+  local marker="${dir}/.installed"
+  [[ -e "${marker}" ]] && return 0
+  : > "${marker}"
+  say ""
+  say "First install -- quick start:"
+  case "${harness}" in
+    claude)
+      say "  - Open or restart Claude Code; the playbook loads at session start."
+      say "  - /playbook-config          settings, status and the output-filter totals"
+      say "  - /playbook-off, /playbook-on   suspend or resume the rules for a session"
+      ;;
+    *)
+      say "  - The playbook is installed under ${dir}/current."
+      say "  - Start a new ${harness} session; the rules load from there."
+      ;;
+  esac
+  say "  - Update anytime: run this same command again."
+}
+
 usage() {
   cat <<'USAGE'
 Engineering Playbook installer. Run it again to update.
@@ -164,6 +188,7 @@ main() {
 
   if [[ "${download_only}" -eq 0 && "${harness:-claude}" == "claude" ]]; then
     install_claude "${version}"
+    maybe_tour "claude" "${dir}"
     return 0
   fi
 
@@ -187,6 +212,7 @@ main() {
       bash "${root}/adapters/antigravity/install.sh" "${antigravity_flags[@]+"${antigravity_flags[@]}"}" "${target}"
       ;;
   esac
+  maybe_tour "${harness}" "${dir}"
   say "done. Run the same command again to update."
 }
 
