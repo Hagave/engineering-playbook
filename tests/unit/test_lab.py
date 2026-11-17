@@ -203,8 +203,11 @@ class TestSqlmap(_LabCase):
         config = self.build_sqlmap()
         scanner = config['services'][lab.SCANNER]
         self.assertEqual(scanner['image'], lab.SQLMAP_IMAGE)
-        self.assertEqual(scanner['command'][:2], ['sqlmap', '-u'])
-        self.assertIn('http://app:8080/items?id=1', scanner['command'])
+        # -m (bulk) not -u: that is what makes sqlmap write the results CSV. The
+        # endpoint URL travels in the targets file, never on the command line.
+        self.assertEqual(scanner['command'][:2], ['sqlmap', '-m'])
+        self.assertIn(f'{lab.REPORT_MOUNT}/{lab.SQLMAP_TARGETS_FILE}', scanner['command'])
+        self.assertNotIn('http://app:8080/items?id=1', scanner['command'])
         self.assertIn('--batch', scanner['command'])
         self.assertIn('--level', scanner['command'])
 
@@ -238,6 +241,72 @@ class TestSqlmap(_LabCase):
         self.assertEqual(lab.parse_sqlmap_results(self.report_dir), [])
         text = lab.format_sqlmap_findings([], self.sqlmap_target())
         self.assertIn('not injectable', text)
+
+    def _run_sqlmap_scan(self, scanner_run):
+        """Drive scan()'s sqlmap branch with Docker mocked. `scanner_run` gets
+        the report dir, may write the results CSV, and returns the scanner run's
+        CompletedProcess. scan() returns an exit code or raises LabError."""
+        made: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def mkdtemp(**kwargs: str) -> str:
+            made.append(real_mkdtemp(**kwargs))
+            return made[-1]
+
+        def compose(_project, _config, *args, timeout=900, capture=True):
+            if 'down' in args:
+                return mock.Mock(returncode=0, stdout='', stderr='')
+            if 'config' in args:
+                return mock.Mock(returncode=0, stdout='{}', stderr='')
+            if 'up' in args:
+                return mock.Mock(returncode=0, stdout='', stderr='')
+            return scanner_run(os.path.join(made[-1], 'report'))
+
+        args = lab.argparse.Namespace(
+            service='app', port=8080, path='/', minutes=1, startup_seconds=0,
+            project_dir='.', compose_file=None, allow_bind_mounts=False, active=False,
+            active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=True, endpoint='/items?id=1',
+            level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC)
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'resolved_config', return_value={}), \
+                mock.patch.object(lab, 'build_lab_config', return_value={}), \
+                mock.patch.object(lab, 'validate_lab_config', return_value=[]), \
+                mock.patch.object(lab, '_compose', side_effect=compose), \
+                mock.patch.object(lab.tempfile, 'mkdtemp', side_effect=mkdtemp):
+            return lab.scan(args)
+
+    def test_a_run_that_cannot_reach_the_target_is_an_error_not_clean(self):
+        def run(_report_dir):  # no CSV; sqlmap still exits 0 on a connection failure
+            return mock.Mock(returncode=0, stdout='[CRITICAL] ' + lab.SQLMAP_UNREACHABLE,
+                             stderr='')
+        with self.assertRaises(lab.LabError) as ctx:
+            self._run_sqlmap_scan(run)
+        self.assertEqual(ctx.exception.code, lab.EXIT_ERROR)
+
+    def test_a_run_that_writes_no_results_file_is_an_error(self):
+        def run(_report_dir):
+            return mock.Mock(returncode=0, stdout='sqlmap finished', stderr='')
+        with self.assertRaises(lab.LabError) as ctx:
+            self._run_sqlmap_scan(run)
+        self.assertEqual(ctx.exception.code, lab.EXIT_ERROR)
+
+    def test_a_results_file_with_an_injection_is_a_finding(self):
+        def run(report_dir):
+            with open(os.path.join(report_dir, lab.SQLMAP_RESULTS_FILE), 'w', newline='') as fh:
+                fh.write('Target URL,Place,Parameter,Technique(s),Note(s)\n')
+                fh.write('http://app:8080/items?id=1,GET,id,BEUST,\n')
+            return mock.Mock(returncode=0, stdout='identified the following injection',
+                             stderr='')
+        self.assertEqual(self._run_sqlmap_scan(run), lab.EXIT_FINDINGS)
+
+    def test_a_results_file_with_only_a_header_is_clean(self):
+        def run(report_dir):
+            with open(os.path.join(report_dir, lab.SQLMAP_RESULTS_FILE), 'w', newline='') as fh:
+                fh.write('Target URL,Place,Parameter,Technique(s),Note(s)\n')
+            return mock.Mock(returncode=0, stdout='all tested parameters do not appear',
+                             stderr='')
+        self.assertEqual(self._run_sqlmap_scan(run), lab.EXIT_CLEAN)
 
 
 class TestValidation(_LabCase):

@@ -78,6 +78,11 @@ SQLMAP_DOCKERFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sq
 # candidate. --time-sec bounds each time-based probe; the outer timeout the run.
 SQLMAP_LEVEL, SQLMAP_RISK, SQLMAP_TIME_SEC = 1, 1, 5
 SQLMAP_RESULTS_FILE = 'sqlmap.csv'
+SQLMAP_TARGETS_FILE = 'targets.txt'
+# sqlmap exits 0 whether or not it reached the target (1.10.9: a connection
+# failure is logged and start() returns, the exit status is never set), so a
+# failed scan is told from a clean one by this critical line in its output.
+SQLMAP_UNREACHABLE = 'unable to connect to the target URL'
 SQLMAP_RUN_MINUTES = 15  # outer cap on one sqlmap run against one endpoint
 # ZAP's -T, in minutes beyond the spider budget. zap-baseline applies it twice,
 # each phase on its own clock: once to wait for ZAP to start, once to wait for
@@ -326,11 +331,16 @@ def scanner_command(url: str, minutes: int, active: bool, active_minutes: int) -
                   f'-config scanner.maxRuleDurationInMins={ACTIVE_RULE_MINUTES}']
 
 
-def sqlmap_command(url: str, level: int, risk: int, time_sec: int) -> list[str]:
+def sqlmap_command(level: int, risk: int, time_sec: int) -> list[str]:
     """sqlmap against one endpoint of the isolated target, non-interactive and
-    bounded. --output-dir and --results-file land under the mounted report dir;
-    the CSV names each injectable parameter and the technique that proved it."""
-    return ['sqlmap', '-u', url, '--batch', '--disable-coloring',
+    bounded. The endpoint is passed through a one-line targets file (-m), not
+    -u: only bulk mode makes sqlmap write the --results-file CSV that the lab
+    reads back (sqlmap 1.10.9 _setResultsFile returns early unless
+    conf.multipleTargets, which -u alone never sets). The targets file, the CSV
+    and sqlmap's output-dir all land under the mounted report dir; the CSV names
+    each injectable parameter and the technique that proved it."""
+    return ['sqlmap', '-m', f'{REPORT_MOUNT}/{SQLMAP_TARGETS_FILE}',
+            '--batch', '--disable-coloring',
             '--level', str(level), '--risk', str(risk),
             '--time-sec', str(time_sec), '--flush-session',
             '--output-dir', REPORT_MOUNT,
@@ -397,7 +407,7 @@ def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
         network['internal'] = True
     lab_networks[NETWORK] = {'internal': True}
     if tool == 'sqlmap':
-        image, command = SQLMAP_IMAGE, sqlmap_command(target.url, level, risk, time_sec)
+        image, command = SQLMAP_IMAGE, sqlmap_command(level, risk, time_sec)
     else:
         # -m bounds the spider; -T bounds ZAP's start-up and, separately, the
         # passive scan; an active scan is capped by ZAP config in scanner_command.
@@ -701,9 +711,26 @@ def scan(args: argparse.Namespace) -> int:
         if args.startup_seconds:
             time.sleep(args.startup_seconds)
         if tool == 'sqlmap':
+            # The endpoint reaches sqlmap through a one-line targets file in the
+            # mounted report dir, not on the command line: only -m makes sqlmap
+            # write the results CSV that is read back below (see sqlmap_command).
+            with open(os.path.join(report_dir, SQLMAP_TARGETS_FILE), 'w',
+                      encoding='utf-8') as fh:
+                fh.write(target.url + '\n')
             print(f'Running a SQL-injection scan of {target.url}...', flush=True)
-            _compose(project, config_file, '--profile', NETWORK, 'run', '--rm', '--no-deps',
-                     SCANNER, timeout=SQLMAP_RUN_MINUTES * 60 + SCANNER_MARGIN_SECONDS)
+            done = _compose(project, config_file, '--profile', NETWORK, 'run', '--rm',
+                            '--no-deps', SCANNER,
+                            timeout=SQLMAP_RUN_MINUTES * 60 + SCANNER_MARGIN_SECONDS)
+            # sqlmap exits 0 even when it never reached the target, so without
+            # this a failed scan would be reported as "not injectable". Tell a
+            # transport failure and a scan that never ran from a real clean
+            # result by the critical line and by the results file existing.
+            if SQLMAP_UNREACHABLE in (done.stdout or '') + (done.stderr or ''):
+                raise LabError('sqlmap could not reach the target on that port and path; '
+                               'nothing was tested.', EXIT_ERROR)
+            if not os.path.exists(os.path.join(report_dir, SQLMAP_RESULTS_FILE)):
+                raise LabError('sqlmap produced no results file; the scan did not complete.',
+                               EXIT_ERROR)
             found = parse_sqlmap_results(report_dir)
             print(format_sqlmap_findings(found, target))
             return EXIT_FINDINGS if found else EXIT_CLEAN
