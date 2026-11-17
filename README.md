@@ -4,7 +4,7 @@
 > Built for Claude Code. Codex CLI and Google Antigravity adapters are experimental.
 
 [![License: MIT + Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-4.0.1-blueviolet.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-4.0.2-blueviolet.svg)](.claude-plugin/plugin.json)
 [![Harnesses](https://img.shields.io/badge/harnesses-Claude_Code%20%7C%20Codex%20CLI%20%7C%20Antigravity-2ea44f.svg)](#supported-harnesses)
 [![Skills](https://img.shields.io/badge/skills-40-orange.svg)](skills/)
 [![PRs target develop](https://img.shields.io/badge/PRs-target%20%60develop%60-blueviolet.svg)](#contributing)
@@ -36,6 +36,7 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 | Context loss | Non-negotiable rules anchored in every skill via identical prefix blocks — KV cache hits across sessions |
 | Context overflow | At 70% the model finishes the task and writes a handoff; at 85% every tool call is denied. Either way the exit is `/clear` + "resume", never `/compact` |
 | Destructive operations | Hook intercepts `rm -r*`, `git push --force`, `git reset --hard`, `DROP TABLE`, and similar — requires explicit user confirmation |
+| Vulnerable code | 13 vulnerability fiches, a security review whose every candidate is confirmed, ruled out or left as a named proof gap, and a local lab that scans your own running app |
 | Leaked secrets | Hook scans what a write adds, what a commit records and what a push publishes with gitleaks' rules — tokens with a known shape are denied |
 | Repeated errors | `engineering-learn` mines real session logs and writes specific corrections back into the project |
 | Token waste | Skills loaded on demand — only what the current task requires |
@@ -46,9 +47,9 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 
 | Harness | Status | Manifest | Install | Hooks |
 | --- | --- | --- | --- | --- |
-| **Claude Code** | Supported | [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) | `claude plugin install` from this repository's marketplace ([below](#claude-code)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`, `SubagentStop` |
-| **Codex CLI** | Experimental | [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) | `scripts/install-codex.sh` OR `codex plugin add` ([below](#codex-cli)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `SubagentStop`, `PreCompact`, `PostCompact` |
-| **Google Antigravity** | Experimental | [`adapters/antigravity/`](adapters/antigravity/) | `adapters/antigravity/install.sh <project>` ([below](#google-antigravity)) | Optional git-hook enforcement (`--git-hooks`) |
+| **Claude Code** | Supported | [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) | `install.sh` or `claude plugin install` ([Quick install](#quick-install)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`, `SubagentStop` |
+| **Codex CLI** | Experimental | [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) | `install.sh --codex`, `scripts/install-codex.sh` or `codex plugin add` ([Quick install](#quick-install)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `SubagentStop`, `PreCompact`, `PostCompact` |
+| **Google Antigravity** | Experimental | [`adapters/antigravity/`](adapters/antigravity/) | `install.sh --antigravity <project>` or `adapters/antigravity/install.sh <project>` ([Quick install](#quick-install)) | Optional git-hook enforcement (`--git-hooks`) |
 
 **Claude Code is the target harness.** Every gate, the settings menu and the
 learn loop are designed and verified there first. The Codex CLI and Google
@@ -66,7 +67,34 @@ contract, but the engineering rules are identical.
 
 ## Quick install
 
-### Claude Code
+One command for every harness, no clone. Run the same command again to update.
+
+```bash
+# Claude Code
+curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash
+
+# Codex CLI
+curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash -s -- --codex
+
+# Google Antigravity, into a workspace (git hooks and CI check recommended)
+curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash -s -- --antigravity /path/to/your-project --git-hooks --ci
+```
+
+What [`install.sh`](install.sh) does:
+
+- **Claude Code:** adds this repository as a plugin marketplace and installs
+  the plugin through the `claude` CLI; a second run updates it. It does not
+  download anything itself.
+- **Codex and Antigravity:** downloads the latest release's archive, checks
+  it against the SHA-256 published with it, unpacks it into
+  `~/.local/share/engineering-playbook/<version>` and links it as `current`,
+  then runs the harness's own installer from there. An update only moves the
+  link. Python 3.10+ is required for the hooks.
+- `--version X.Y.Z` installs a given release, `--dir` changes where releases
+  are kept, `--download-only` stops after the verified download. Nothing runs
+  with `sudo`. To read the script before running it, open the link above.
+
+### Claude Code without the script
 
 ```bash
 claude plugin install engineering-playbook --marketplace Hagave/engineering-playbook
@@ -80,39 +108,305 @@ inside a session:
 /plugin install engineering-playbook@engineering-playbook
 ```
 
-No clone is needed. To receive new releases automatically, turn on
-auto-update once: `/plugin` → Marketplaces → `engineering-playbook` →
-Enable auto-update (it is off by default for marketplaces outside Anthropic's).
-Without it, `claude plugin update engineering-playbook@engineering-playbook`
-updates by hand. A release reaches users when its version changes in
-`.claude-plugin/plugin.json`, which happens only on a merge into `main`.
+To receive new releases automatically, turn on auto-update once: `/plugin` →
+Marketplaces → `engineering-playbook` → Enable auto-update (it is off by
+default for marketplaces outside Anthropic's). Without it, re-run the script or
+`claude plugin update engineering-playbook@engineering-playbook`. A release
+reaches users when its version changes in `.claude-plugin/plugin.json`, which
+happens only on a merge into `main`.
 
-### Codex CLI
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/Hagave/engineering-playbook.git ~/.engineering-playbook
-
-# 2. Install via the marketplace (recommended)
-~/.engineering-playbook/scripts/install-codex.sh --dev
-
-# OR install directly through the Codex CLI:
-codex plugin marketplace add /path/to/engineering-playbook
-codex plugin add playbook@playbook
-```
-
-### Google Antigravity
+### From a clone (development)
 
 ```bash
-# 1. Clone the repository (skip if already cloned)
 git clone https://github.com/Hagave/engineering-playbook.git ~/.engineering-playbook
 
-# 2. Run the installer against the target workspace
-~/.engineering-playbook/adapters/antigravity/install.sh /path/to/your-project
-
-# recommended — adds mechanical enforcement via git hooks:
-~/.engineering-playbook/adapters/antigravity/install.sh --git-hooks --ci /path/to/your-project
+claude --plugin-dir ~/.engineering-playbook                                   # Claude Code, loads the clone
+~/.engineering-playbook/scripts/install-codex.sh --dev                        # Codex, symlinked to the clone
+~/.engineering-playbook/adapters/antigravity/install.sh --git-hooks --ci /path/to/your-project   # Antigravity
 ```
+
+---
+
+## How to use it
+
+Everything below works in Claude Code with the plugin installed. Each part
+says what it is, how it works, and what you do. You mostly talk to the agent
+as usual: the playbook loads the right rules and the hooks enforce them. The
+[Reference](#reference) has the details.
+
+| You want to | Do this |
+| --- | --- |
+| Build a feature or fix a bug | Ask for it; confirm the checklist the agent posts |
+| Start a new project | Ask for it ("create a Go API for orders") and answer the stack checklist |
+| Clean up an existing codebase | Ask to refactor it, or report the bug |
+| Review a change | Ask for a review; one also runs before every `git push` |
+| Check the security of your code | Ask for a security review; scan the running app with the lab ([Security](#security-red-playbook)) |
+| Run the security tests | [Running the red-playbook tests](#running-the-red-playbook-tests) |
+| Change how the playbook behaves | `/playbook-config` |
+| Work without the rules for a while | `/playbook-off`, then `/playbook-on` |
+| Recover from a full context | `/clear`, then "resume where we left off" |
+
+### Everyday flow
+
+**What it is.** The governance that is on in every session: rules the agent
+must follow, loaded only when the task needs them, and hooks that block what
+breaks them.
+
+**How it works.** At session start a hook announces the playbook. When the
+work involves code, the agent loads `engineering-playbook`, whose routing
+table picks the skills the task needs (language, architecture, security,
+testing...). Writing source is denied until `engineering-governance` is
+loaded. Every decision must trace to your request, code read in the repo, or
+a rule; anything else is a question for you.
+
+**How to use it.** Nothing to do. Expect the agent to ask before it guesses,
+to reuse code before creating more, and to run your type check, lint and tests
+before it ends a turn that changed code. To make it read the project faster,
+give the project a manifest (see [Per-project setup](#per-project-setup)).
+
+### Implementing a feature or a fix
+
+**What it is.** `engineering-implement`: a fixed workflow with a hard stop
+before any code.
+
+**How it works.** The agent reads the relevant code, asks all its open
+questions in one message, then posts a checklist: every file it will touch,
+what changes, and which tests cover it. It stops there. After your go-ahead it
+writes `[SPEC CONFIRMED]`, implements exactly the checklist, runs validation
+and updates the registries. Two hooks back this up: the **spec gate** blocks
+the end of a turn that wrote code without the confirmation, and the
+**validation gate** blocks the end of a turn that wrote code and ran no type
+check, lint or test.
+
+**How to use it.** Ask for the change ("add pagination to the orders
+endpoint"). Answer the questions, read the checklist, reply "ok", "go" or
+"sim". To change the plan, say what to change instead of confirming.
+
+### Starting a new project
+
+**What it is.** `engineering-scaffold`: the stack is decided before any code.
+
+**How it works.** For a greenfield request the agent presents a fixed list of
+stack questions (language, framework, database and access layer, messaging,
+Docker, linting...), in order. Anything you do not choose defaults to none or
+no. Only after the stack is set does it load the language and framework skills
+and scaffold.
+
+**How to use it.** Ask for the project ("create a NestJS API for invoices")
+and answer the list. Then continue as in *Implementing a feature*.
+
+### Refactoring and bug hunting in existing code
+
+**What it is.** `engineering-refactor`: a phased cleanup for codebases that
+grew without the rules.
+
+**How it works.** Phase 0 deletes dead code only, phase 1 sets the strictest
+tooling baseline (type checker, linter) and turns its errors into a backlog,
+phase 2 restructures, phase 3 fixes the bugs. A bug in a dirty codebase is
+fixed after the purge and the baseline, because before them it cannot be
+scoped reliably.
+
+**How to use it.** Say "refactor this project", or describe the bug ("the
+login returns 500 after a password change"). Confirm each phase as the agent
+proposes it.
+
+### Code review and the push gate
+
+**What it is.** `engineering-code-review`: a checklist-driven review whose
+findings are Blocker, Major or Minor, and a hook that makes it mandatory
+before a push.
+
+**How it works.** The review reads the whole diff, loads the skills the diff
+touches and runs every checklist section (layers, security, concurrency,
+performance, repeated logic, dead code...). A `git push` is denied until the
+current `HEAD` has been reviewed; a new commit needs a new review. Blockers
+are fixed before the push. Blocker and Major findings in code the agent wrote
+arm the learn gate (see *Learning from mistakes*).
+
+**How to use it.** Ask "review this diff" or "review PR 42", or just ask for a
+push and the review runs first. Only you can skip it: say "pode pushar sem
+review" / "skip review", or set `PLAYBOOK_SKIP_REVIEW=1`.
+
+### Safety gates
+
+**What it is.** Hooks that stop what cannot be undone or should not leave the
+machine: destructive commands, AI attribution in history, and secrets.
+
+**How it works.**
+- **Destructive commands** (`rm -r`, `git reset --hard`, force push,
+  `git clean`, `DROP TABLE`, and their respellings) are denied until you
+  authorize that act in your own message. The permission lasts one turn. An
+  `rm` inside the session's own scratchpad needs none.
+- **AI attribution** (`Co-Authored-By: Claude`, "Generated with Claude") is
+  denied in commits, tags, pull requests and their bodies.
+- **Secrets** with a known token shape (AWS, GitHub, Stripe, private keys and
+  about a hundred more, from gitleaks' rules) are denied in what a write adds,
+  a commit records or a push publishes. Generic patterns only warn.
+
+**How to use it.** When a destructive command is denied, the agent shows it
+and what it destroys. Answer naming the act: "pode apagar", "confirmo o
+reset", "go ahead and delete it"; a plain "ok" does not count. For a secret
+false positive, add the fingerprint from the denial to
+`.playbook/secrets-allow` yourself; the agent cannot write that file. If your
+team allows attribution, set `PLAYBOOK_ALLOW_AI_ATTRIBUTION=1` in your own
+environment.
+
+### Security (red-playbook)
+
+**What it is.** The playbook's cybersecurity layer, called red-playbook while
+it was built. The playbook ships defense. The proof that a defense holds is an
+attack, and it is run against two local targets only: the playbook itself,
+and your application running on your machine. Nothing published (production,
+staging, any host you do not run in the lab) is ever a target, and there is
+no override for that.
+
+**How it works.** Four parts:
+- **Knowledge.** `engineering-security` holds the rules for input,
+  injection, secrets, auth and HTTP, plus 13 vulnerability fiches in
+  `references/` (injection, XSS, SSRF, access control, tokens and sessions,
+  files, redirects, untrusted parsing, business logic, GraphQL, crypto,
+  supply chain, LLM apps). Each fiche gives the invariant, the dangerous sinks,
+  the control, the hostile inputs that become negative tests, and what a
+  review looks for.
+- **Review.** A security candidate in a review ends in one of three states:
+  confirmed (the path from input to sink, `file:line` by `file:line`), ruled
+  out (the control that holds, with its `file:line`), or an open proof gap.
+  Nothing is dropped silently.
+- **Lab.** `lab/run.py` runs an isolated copy of your compose stack on
+  internal Docker networks and scans one service with OWASP ZAP baseline
+  (passive). Nothing in the copy reaches your machine, your network or the
+  internet, and your running stack is not touched. The hook denies scanners
+  (`nmap`, `sqlmap`, ZAP...) run anywhere else.
+- **Static analysis and self-tests.** When `semgrep` or `opengrep` is
+  installed, a scan of the changed files becomes part of validation. The
+  playbook's own gates are attacked by a corpus of evasion attempts
+  (`tests/unit/test_gate_evasion.py`), run with the test suite.
+
+**How to use it.**
+1. Ask: "do a security review of this diff", or "is this endpoint safe against
+   SSRF?". The agent loads the matching fiches and reports each candidate in
+   one of the three states.
+2. For a confirmed finding, the fix comes with the fiche's negative tests,
+   written first. The test, not the report, keeps it fixed.
+3. To scan the running application, install Docker with Compose 2.20+ and
+   ask the agent to "scan the app in the lab". The lab ships with the plugin
+   as `lab/run.py`, and the agent knows where it is. From a clone of this
+   repository you can also run it yourself, from the project directory:
+
+   ```bash
+   python3 <playbook>/lab/run.py --setup                    # once: downloads the pinned ZAP image (about 1.2 GB)
+   python3 <playbook>/lab/run.py --service app --port 8080  # scan the compose service `app`
+   ```
+
+   A Medium or High alert is a review candidate, confirmed in the code before
+   it is fixed. Exit codes: `0` clean, `1` findings, `2` refused (isolation or
+   environment, with the reason), `3` Docker or scanner error.
+4. Optional: install `semgrep` and the next sessions use it.
+
+#### Running the red-playbook tests
+
+These prove the defenses above. Run them from a clone of this repository, at
+its root; `python3 tests/run_all.py` runs all of them except the two opt-in
+rows at the end.
+
+| What it proves | Command | Needs |
+| --- | --- | --- |
+| The gates cannot be talked past: a corpus of evasion attempts (respelled commands, `eval`, `sh -c`, `find -exec`, interpreter one-liners, heredocs, script files) against the destructive-command, code-write, AI-attribution and scanner-outside-the-lab checks, plus the gaps left open on purpose | `python3 -m unittest tests.unit.test_gate_evasion -v` | Python 3.10+ |
+| The secret scanner loads and compiles gitleaks' rules, denies distinctive tokens and only warns on keyword-shaped ones, honors the allow file, redacts what it shows, and blocks a write, a commit or a push that carries a secret | `python3 -m unittest tests.unit.test_secret_scan tests.e2e.test_secret_gate -v` | Python 3.10+, git |
+| Static analysis is offered with the exact command when `semgrep`/`opengrep` is installed, and its scan counts as validation | `python3 -m unittest tests.unit.test_sast -v` | Python 3.10+ |
+| The lab refuses every unsafe compose configuration (host network, privileged, devices, host namespaces, bind mounts, external networks...) and cleans up after itself | `python3 -m unittest tests.unit.test_lab -v` | Python 3.10+ (no Docker) |
+| Every vulnerability fiche has its sections (invariant, sinks, control, negative proof, dynamic proof, review signal) | `python3 -m unittest tests.structural.test_security_fiches -v` | Python 3.10+ |
+| **Opt-in:** a real lab run against a throwaway app scans it and leaves no container, network or volume behind | `python3 lab/run.py --setup`, then `PLAYBOOK_LAB_IT=1 python3 -m unittest tests.e2e.test_lab_integration -v` | Docker with Compose 2.20+, the ZAP image (about 1.2 GB), a few minutes |
+| **Opt-in:** a review of 13 intentionally vulnerable diffs (one per fiche) names the findings each one expects | `bash tests/behavioral/run_behavioral.sh 06` (one fixture; `06` to `18`), or `bash tests/behavioral/run_behavioral.sh` for every prompt | the `claude` CLI, an API key, the plugin at `~/.engineering-playbook`; spends tokens, and results are probabilistic (a miss in most of 10 runs is a regression) |
+
+### Context limits and handoff
+
+**What it is.** The hook that measures the session's context and decides when
+it must end.
+
+**How it works.** At 70% of the model's window the agent stops taking new
+work, finishes the step in progress and writes a handoff: goal, what is
+done, the next step, decisions and files. At 85% every tool call is denied and
+it writes the handoff at once. The hook saves the handoff and an automatic
+carry-over note (request, files written, commands run, gates still owed). The
+playbook never recommends `/compact`, which does not reliably get back under
+the threshold.
+
+**How to use it.** When the agent asks for it, type `/clear`, then "resume
+where we left off" ("retome de onde paramos"). The next session starts with
+the handoff injected. To cut cost earlier on large windows, set a context
+budget in `/playbook-config` (for example 250k tokens).
+
+### Learning from mistakes
+
+**What it is.** A loop that turns a repeated mistake into a written rule in
+the project's `CLAUDE.md`.
+
+**How it works.** Every failed tool call goes to a journal for the session.
+When you say the previous turn was wrong, when the same call fails three
+times, or when a review finds Blocker or Major issues in the agent's code, the
+**learn gate** keeps the turn open until the agent names the premise it got
+wrong, states what is true and writes the rule into `CLAUDE.md` with
+`[LEARNED]`. **Learn**, in `/playbook-config`, mines the journal and the
+project's session logs for repeated failure-then-fix patterns and writes them
+as rules. **Known-failure warnings**, when on, warn before a command or a
+write touches something that already failed in this project.
+
+**How to use it.** Correct the agent in plain words ("that's wrong, the tests
+live in `test/`"). Open `/playbook-config` → Learn after a rough session, and
+turn on Known-failure warnings there if you want the reminders.
+
+### Settings and switching the rules off
+
+**What it is.** `/playbook-config`, `/playbook-off` and `/playbook-on`.
+
+**How it works.** `/playbook-config` opens a numbered menu above the prompt:
+
+| Entry | What it changes | Default |
+| --- | --- | --- |
+| Prose level | How much explanation a response carries: `low`, `mid`, `high` (from the next session) | `mid` |
+| Known-failure warnings | Warn before touching something that failed before | off |
+| Context budget | Token count after which the session wraps up and hands off | off |
+| CLAUDE.md budget | Size the project `CLAUDE.md` may grow to before a turn is blocked | 40,000 characters |
+| Status | The session's configuration and the output filter's savings | |
+| Learn | Mine this project's failures into rules | |
+
+`/playbook-off` suspends every gate and rule for the session, including the
+safety blocks; `/playbook-on` brings them back.
+
+**How to use it.** Type `/playbook-config`, a number, Enter; `0` goes back.
+You can also just ask ("shorter answers"). Use `/playbook-off` for throwaway
+exploration only.
+
+### Keeping cost down
+
+**What it is.** Three things that cut tokens without cutting checks.
+
+**How it works.**
+- **Output filter.** Read-only commands (`grep`, `ls -l`, `git log`) have
+  their output shortened before the agent reads it: matches grouped by file,
+  noise dropped. `cat` and the Read tool are never filtered.
+- **Runner agent.** `engineering-playbook:runner` runs test suites, builds and
+  long jobs on the cheapest model and reports only the result. A validation it
+  runs after the agent's last write counts for the validation gate.
+- **Budgets.** The context budget and the `CLAUDE.md` budget above.
+
+**How to use it.** Nothing to do for the filter; prefix a command with
+`PLAYBOOK_RAW=1` to see its raw output. Ask the agent to "run the tests with
+the runner". See the savings in `/playbook-config` → Status.
+
+### Per-project memory: manifest and registries
+
+**What it is.** A project manifest in `CLAUDE.md` and a `registries/` folder
+that lists every artifact.
+
+**How it works.** The agent reads the manifest (stack, commands, aliases,
+architecture) instead of asking for it again. Before creating a service,
+DTO or utility it checks the registry, and it updates the registry after every
+change, so nothing gets written twice.
+
+**How to use it.** Write the manifest once and `mkdir registries`, as in
+[Per-project setup](#per-project-setup).
 
 ---
 
@@ -137,7 +431,7 @@ concurrent sessions in the same project never interfere; a subagent gets its
 own state (`session_id` + `agent_id`) and is gated at `SubagentStop`, so its
 writes never block the parent session's turn.
 
-**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.0.1`.
+**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.0.2`.
 
 **For a team:** commit the marketplace and the plugin to the project's
 `.claude/settings.json`; each teammate still accepts the folder's trust dialog
@@ -616,8 +910,8 @@ validation command (tsc, lint, tests) ran afterwards. At Stop the spec gate
 is checked first, then the validation gate; `stop_hook_active` breaks any
 loop after a single block.
 
-Both the spec gate and skill gate are suspended while
-`/playbook-off` is active. Context and safety checks always run.
+Every gate, the safety blocks included, is suspended while `/playbook-off`
+is active: off is a full pass-through until `/playbook-on`.
 
 #### Destructive operations
 
@@ -936,37 +1230,6 @@ the language opt-in) along when an implementation starts.
 | MVC | `engineering-arch-mvc` |
 | SOLID / naming / design patterns | `engineering-design-patterns` |
 | Extract session learnings | `engineering-learn` |
-
-### Implementation workflow
-
-When `engineering-implement` loads, the flow is:
-
-1. **Read** — read all relevant files.
-2. **Clarify** — list open questions in a single message.
-3. **Spec checklist** — produce a checklist of every file that will be touched,
-   what changes, and what tests cover it.
-4. **STOP** — post the checklist and wait for explicit confirmation (`"proceed"`,
-   `"ok"`, `"sim"`, `"go"`) before writing a single line of code.
-5. **Build** — implement exactly the checklist, nothing more.
-6. **Validate** — run lint, type check, and tests.
-7. **Register** — update registry entries.
-
-No code is written before step 4 confirmation.
-
-### Session learning
-
-After a session with errors or corrections, open `/playbook-config` and pick
-**Learn**.
-
-The agent will:
-
-1. Read the failure journal the hooks keep for this project, then the session
-   logs at `~/.claude/projects/<project-path-slug>/*.jsonl`.
-2. Extract every tool call that returned an error and the fix that followed.
-3. Correlate patterns: wrong file paths, failed commands, wrong search scope,
-   rejected tool calls.
-4. Write specific corrections into the project `CLAUDE.md` with idempotent
-   markers — re-running always replaces, never duplicates.
 
 ---
 
