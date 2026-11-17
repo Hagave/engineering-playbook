@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
 Local validation lab: scan the project's own application, running on this
-machine, with OWASP ZAP baseline (passive) — and nothing else.
+machine, with OWASP ZAP — passive by default, active (attack payloads) with
+--active — against an isolated copy of its stack, and nothing else.
 
-    python3 lab/run.py --setup                       # check Docker, download the scanner image
-    python3 lab/run.py --service app --port 8080     # scan the `app` service of ./docker-compose
-    python3 lab/run.py --uninstall                   # remove the scanner image
+    python3 lab/run.py --setup                        # check Docker, download the scanner image
+    python3 lab/run.py --service app --port 8080      # passive scan of the `app` service
+    python3 lab/run.py --service app --port 8080 --active   # active scan (sends payloads)
+    python3 lab/run.py --uninstall                    # remove the scanner image
+
+Both modes run only against the isolated target on the internal network; the
+isolation below is identical for each. Active only sends payloads to that
+target, a throwaway copy, and never reaches anything outside the lab.
 
 How the scope is enforced, outermost first:
 
@@ -31,9 +37,9 @@ How the scope is enforced, outermost first:
 Nothing is kept. The report is written to a temporary directory, printed,
 and deleted; the lab's containers, network, volumes and locally built images
 are removed when the run ends, also on error or Ctrl-C; a removal that fails
-is reported with the command that finishes it. Only the scanner
-image stays in Docker's cache, so the next run does not download it again;
-`--uninstall` removes it.
+is reported with the command that finishes it. Only the scanner images (ZAP,
+pulled; sqlmap, built from pinned source) stay in Docker's cache, so the next
+run does not fetch them again; `--uninstall` removes them.
 
 Exit codes: 0 no Medium/High finding, 1 findings, 2 refused (environment or
 scope), 3 Docker or scanner error.
@@ -41,6 +47,7 @@ scope), 3 Docker or scanner error.
 Python 3.10+, standard library only.
 """
 import argparse
+import csv
 import json
 import os
 import platform
@@ -59,12 +66,36 @@ ZAP_IMAGE = ('ghcr.io/zaproxy/zaproxy@sha256:'
              '9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af')
 ZAP_DOWNLOAD_HINT = 'about 1.2 GB to download, 3.8 GB on disk once extracted'
 MIN_FREE_BYTES = 5 * 1024 ** 3
+
+# The SQL-injection scanner, built locally from a pinned, official source
+# (sqlmap on PyPI, published by the sqlmap project) by lab/sqlmap.Dockerfile.
+# The base image it builds on is pinned by digest there. Deeper on SQLi than the
+# ZAP active rule: it confirms, fingerprints the DBMS and characterises the flaw.
+SQLMAP_VERSION = '1.10.9'
+SQLMAP_IMAGE = f'redlab-sqlmap:{SQLMAP_VERSION}'
+SQLMAP_DOCKERFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sqlmap.Dockerfile')
+# Modest defaults: one endpoint, no crawl. The user raises them on a confirmed
+# candidate. --time-sec bounds each time-based probe; the outer timeout the run.
+SQLMAP_LEVEL, SQLMAP_RISK, SQLMAP_TIME_SEC = 1, 1, 5
+SQLMAP_RESULTS_FILE = 'sqlmap.csv'
+SQLMAP_TARGETS_FILE = 'targets.txt'
+# sqlmap exits 0 whether or not it reached the target (1.10.9: a connection
+# failure is logged and start() returns, the exit status is never set), so a
+# failed scan is told from a clean one by this critical line in its output.
+SQLMAP_UNREACHABLE = 'unable to connect to the target URL'
+SQLMAP_RUN_MINUTES = 15  # outer cap on one sqlmap run against one endpoint
 # ZAP's -T, in minutes beyond the spider budget. zap-baseline applies it twice,
 # each phase on its own clock: once to wait for ZAP to start, once to wait for
 # the passive scan of what the spider found. The spider (-m) runs in between.
 SCAN_OVERHEAD_MINUTES = 5
 # Beyond ZAP's own bounds: `compose run` start-up and writing the report.
 SCANNER_MARGIN_SECONDS = 120
+# Active scan (zap-full-scan) sends payloads and runs to completion on its own
+# clock -- neither -m nor -T bounds it -- so the lab caps it with ZAP config:
+# the whole active scan, and any single rule, stop at these minute budgets.
+# The outer timeout covers this budget on top of the spider and the waits.
+ACTIVE_SCAN_MINUTES = 10
+ACTIVE_RULE_MINUTES = 2
 
 # Capabilities a project service may add in the lab: Docker's default set
 # (adding one is a no-op) and the few that act only inside the container.
@@ -93,6 +124,9 @@ MIN_COMPOSE = (2, 20, 0)
 EXIT_CLEAN, EXIT_FINDINGS, EXIT_REFUSED, EXIT_ERROR = 0, 1, 2, 3
 
 _PATH_RE = re.compile(r'^/(?!/)[A-Za-z0-9._~!$&\'()*+,;=:%/-]*$')
+# A query string (sqlmap needs one, e.g. `id=1`): the path charset plus `?` and
+# `&`, still with no way to name another host.
+_QUERY_RE = re.compile(r'^[A-Za-z0-9._~!$&\'()*+,;=:%/?&=-]*$')
 _SERVICE_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]*$')
 
 # CWE of a ZAP alert -> where the playbook explains the fix.
@@ -122,10 +156,12 @@ class Target:
     service: str
     port: int
     path: str
+    query: str = ''
 
     @property
     def url(self) -> str:
-        return f'http://{self.service}:{self.port}{self.path}'
+        suffix = f'?{self.query}' if self.query else ''
+        return f'http://{self.service}:{self.port}{self.path}{suffix}'
 
 
 # ─── Docker environment ──────────────────────────────────────────────────────
@@ -179,57 +215,83 @@ def check_docker() -> None:
                        f'{wanted} or newer.\n' + install_hint())
 
 
-def image_present() -> bool:
-    return _run(['docker', 'image', 'inspect', ZAP_IMAGE]).returncode == 0
+def image_present(image: str = ZAP_IMAGE) -> bool:
+    return _run(['docker', 'image', 'inspect', image]).returncode == 0
+
+
+def build_sqlmap_image() -> None:
+    """Build the SQLi scanner locally from the pinned Dockerfile (online: pip
+    fetches sqlmap). Context is the Dockerfile's own directory, sent empty via
+    stdin so nothing else is copied in."""
+    print(f'Building the SQLi scanner from source (sqlmap {SQLMAP_VERSION}, pinned):\n'
+          f'  {SQLMAP_IMAGE}', flush=True)
+    built = _run(['docker', 'build', '-f', SQLMAP_DOCKERFILE,
+                  '--build-arg', f'SQLMAP_VERSION={SQLMAP_VERSION}',
+                  '-t', SQLMAP_IMAGE, os.path.dirname(SQLMAP_DOCKERFILE)],
+                 timeout=1800, capture=False)
+    if built.returncode != 0 or not image_present(SQLMAP_IMAGE):
+        raise LabError('Building the SQLi scanner image failed (see the output above).', EXIT_ERROR)
 
 
 def setup() -> int:
     check_docker()
-    if image_present():
-        print(f'Ready. The scanner image is already in Docker\'s cache:\n  {ZAP_IMAGE}')
+    if image_present() and image_present(SQLMAP_IMAGE):
+        print('Ready. Both scanner images are already in Docker\'s cache:\n'
+              f'  {ZAP_IMAGE}\n  {SQLMAP_IMAGE}')
         return EXIT_CLEAN
-    root = _run(['docker', 'info', '--format', '{{.DockerRootDir}}']).stdout.strip()
-    try:
-        free = shutil.disk_usage(root).free if root else None
-    except OSError:
-        free = None  # Docker Desktop keeps it inside a VM: not measurable from here
-    if free is not None and free < MIN_FREE_BYTES:
-        raise LabError(f'Not enough free disk space under {root}: '
-                       f'{free / 1024 ** 3:.1f} GB free, the scanner image needs about '
-                       f'{MIN_FREE_BYTES // 1024 ** 3} GB.')
-    print(f'Downloading the OWASP ZAP image ({ZAP_DOWNLOAD_HINT}), pinned by digest:\n'
-          f'  {ZAP_IMAGE}\nIt stays in Docker\'s cache until `lab/run.py --uninstall`.',
-          flush=True)
-    pulled = _run(['docker', 'pull', ZAP_IMAGE], timeout=3600, capture=False)
-    if pulled.returncode != 0 or not image_present():
-        raise LabError('Downloading the scanner image failed (see the output above).', EXIT_ERROR)
+    if not image_present():
+        root = _run(['docker', 'info', '--format', '{{.DockerRootDir}}']).stdout.strip()
+        try:
+            free = shutil.disk_usage(root).free if root else None
+        except OSError:
+            free = None  # Docker Desktop keeps it inside a VM: not measurable from here
+        if free is not None and free < MIN_FREE_BYTES:
+            raise LabError(f'Not enough free disk space under {root}: '
+                           f'{free / 1024 ** 3:.1f} GB free, the scanner image needs about '
+                           f'{MIN_FREE_BYTES // 1024 ** 3} GB.')
+        print(f'Downloading the OWASP ZAP image ({ZAP_DOWNLOAD_HINT}), pinned by digest:\n'
+              f'  {ZAP_IMAGE}\nIt stays in Docker\'s cache until `lab/run.py --uninstall`.',
+              flush=True)
+        pulled = _run(['docker', 'pull', ZAP_IMAGE], timeout=3600, capture=False)
+        if pulled.returncode != 0 or not image_present():
+            raise LabError('Downloading the scanner image failed (see the output above).', EXIT_ERROR)
+    if not image_present(SQLMAP_IMAGE):
+        build_sqlmap_image()
     print('Ready.')
     return EXIT_CLEAN
 
 
 def uninstall() -> int:
     check_docker()
-    if not image_present():
-        print('The scanner image is not installed; nothing to remove.')
+    present = [img for img in (ZAP_IMAGE, SQLMAP_IMAGE) if image_present(img)]
+    if not present:
+        print('The scanner images are not installed; nothing to remove.')
         return EXIT_CLEAN
-    removed = _run(['docker', 'image', 'rm', ZAP_IMAGE])
+    removed = _run(['docker', 'image', 'rm', *present])
     if removed.returncode != 0:
-        raise LabError(f'Could not remove the image: {removed.stderr.strip()}', EXIT_ERROR)
-    print('Scanner image removed. `lab/run.py --setup` downloads it again.')
+        raise LabError(f'Could not remove the images: {removed.stderr.strip()}', EXIT_ERROR)
+    print('Scanner images removed. `lab/run.py --setup` installs them again.')
     return EXIT_CLEAN
 
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-def parse_target(service: str, port: int, path: str) -> Target:
+def parse_target(service: str, port: int, path: str, endpoint: str | None = None) -> Target:
     if not _SERVICE_RE.match(service or ''):
         raise LabError(f'Invalid service name: {service!r}.')
     if not 1 <= port <= 65535:
         raise LabError(f'Invalid port: {port}.')
-    if not _PATH_RE.match(path) or '@' in path or '\\' in path:
-        raise LabError(f'Invalid path {path!r}: it must start with a single "/" and name a '
+    # An endpoint (for sqlmap) is a path plus an optional ?query; a plain path
+    # has no query. Either way it must name a path on the target, never a host.
+    raw = endpoint if endpoint is not None else path
+    path_part, _, query = raw.partition('?')
+    if not _PATH_RE.match(path_part) or '@' in path_part or '\\' in path_part:
+        raise LabError(f'Invalid path {path_part!r}: it must start with a single "/" and name a '
                        'path on the target service, not another host.')
-    return Target(service, port, path)
+    if query and (not _QUERY_RE.match(query) or '@' in query or '\\' in query or '//' in query):
+        raise LabError(f'Invalid query {query!r}: it must be a query string on the target '
+                       'service, not another host.')
+    return Target(service, port, path_part, query)
 
 
 def bind_mounts(config: dict) -> list[str]:
@@ -254,14 +316,51 @@ def bind_mounts(config: dict) -> list[str]:
     return found
 
 
+def scanner_command(url: str, minutes: int, active: bool, active_minutes: int) -> list[str]:
+    """ZAP's command line. Passive (`zap-baseline.py`) crawls and reads; active
+    (`zap-full-scan.py`) also sends attack payloads to the target. Both run only
+    against the isolated target on the internal network: active changes the scan,
+    never the isolation. The active scan is capped by ZAP config, since -m/-T do
+    not bound it."""
+    common = ['-t', url, '-J', REPORT_FILE, '-I',
+              '-m', str(minutes), '-T', str(minutes + SCAN_OVERHEAD_MINUTES)]
+    if not active:
+        return ['zap-baseline.py', *common]
+    return ['zap-full-scan.py', *common,
+            '-z', f'-config scanner.maxScanDurationInMins={active_minutes} '
+                  f'-config scanner.maxRuleDurationInMins={ACTIVE_RULE_MINUTES}']
+
+
+def sqlmap_command(level: int, risk: int, time_sec: int) -> list[str]:
+    """sqlmap against one endpoint of the isolated target, non-interactive and
+    bounded. The endpoint is passed through a one-line targets file (-m), not
+    -u: only bulk mode makes sqlmap write the --results-file CSV that the lab
+    reads back (sqlmap 1.10.9 _setResultsFile returns early unless
+    conf.multipleTargets, which -u alone never sets). The targets file, the CSV
+    and sqlmap's output-dir all land under the mounted report dir; the CSV names
+    each injectable parameter and the technique that proved it."""
+    return ['sqlmap', '-m', f'{REPORT_MOUNT}/{SQLMAP_TARGETS_FILE}',
+            '--batch', '--disable-coloring',
+            '--level', str(level), '--risk', str(risk),
+            '--time-sec', str(time_sec), '--flush-session',
+            '--output-dir', REPORT_MOUNT,
+            '--results-file', f'{REPORT_MOUNT}/{SQLMAP_RESULTS_FILE}']
+
+
 def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
-                     minutes: int) -> dict:
+                     minutes: int, active: bool = False,
+                     active_minutes: int = ACTIVE_SCAN_MINUTES,
+                     tool: str = 'zap', level: int = SQLMAP_LEVEL,
+                     risk: int = SQLMAP_RISK, time_sec: int = SQLMAP_TIME_SEC) -> dict:
     """The project's resolved compose configuration, turned into the lab.
 
     Ports, fixed names, subnets, addresses and image tags of built services
     are dropped so that nothing collides with, or reuses, the developer's own
     stack; every network becomes internal, so no service reaches past the lab;
-    the target joins the scanner's network; the scanner is added on it alone."""
+    the target joins the scanner's network; the scanner is added on it alone.
+    `tool` picks the scanner (ZAP or sqlmap) and `active` the ZAP scan; neither
+    loosens any of the above -- the scanner is the same locked-down service, on
+    the internal network alone, mounting only the report dir, whichever it is."""
     config = json.loads(json.dumps(base))  # deep copy of plain JSON data
     config['name'] = project
     for item in (config.get('volumes') or {}).values():
@@ -307,30 +406,34 @@ def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
             network['driver_opts'].pop(_BRIDGE_NAME_OPT, None)
         network['internal'] = True
     lab_networks[NETWORK] = {'internal': True}
+    if tool == 'sqlmap':
+        image, command = SQLMAP_IMAGE, sqlmap_command(level, risk, time_sec)
+    else:
+        # -m bounds the spider; -T bounds ZAP's start-up and, separately, the
+        # passive scan; an active scan is capped by ZAP config in scanner_command.
+        # The outer timeout (scanner_timeout_seconds) covers every phase.
+        image, command = ZAP_IMAGE, scanner_command(target.url, minutes, active, active_minutes)
     services[SCANNER] = {
-        'image': ZAP_IMAGE,
+        'image': image,
         'networks': {NETWORK: None},
         'cap_drop': ['ALL'],
         'security_opt': ['no-new-privileges:true'],
         'volumes': [{'type': 'bind', 'source': report_dir, 'target': REPORT_MOUNT}],
-        # -m bounds the spider; -T bounds ZAP's start-up and, separately, the
-        # passive scan of everything the spider found, so a target with a huge
-        # or endless page set cannot keep the scanner running. The outer
-        # timeout (scanner_timeout_seconds) covers all three.
-        'command': ['zap-baseline.py', '-t', target.url, '-J', REPORT_FILE, '-I',
-                    '-m', str(minutes), '-T', str(minutes + SCAN_OVERHEAD_MINUTES)],
+        'command': command,
         'profiles': [NETWORK],
     }
     return config
 
 
-def scanner_timeout_seconds(minutes: int) -> int:
+def scanner_timeout_seconds(minutes: int, active: bool = False,
+                            active_minutes: int = ACTIVE_SCAN_MINUTES) -> int:
     """How long `compose run` of the scanner may take: ZAP's start-up wait and
-    its passive-scan wait (each bounded by -T on its own) plus the spider (-m).
-    A shorter limit killed a scan ZAP was still allowed to finish, and its
-    report was lost."""
+    its passive-scan wait (each bounded by -T on its own), the spider (-m), and
+    for an active scan its capped duration on top. A shorter limit killed a scan
+    ZAP was still allowed to finish, and its report was lost."""
     zap_limit = minutes + SCAN_OVERHEAD_MINUTES
-    return (2 * zap_limit + minutes) * 60 + SCANNER_MARGIN_SECONDS
+    total = 2 * zap_limit + minutes + (active_minutes if active else 0)
+    return total * 60 + SCANNER_MARGIN_SECONDS
 
 
 def _host_reach(name: str, service: dict) -> list[str]:
@@ -369,9 +472,10 @@ def _host_reach(name: str, service: dict) -> list[str]:
 
 
 def validate_lab_config(config: dict, target_service: str, report_dir: str,
-                        allow_bind_mounts: bool) -> list[str]:
+                        allow_bind_mounts: bool, scanner_image: str = ZAP_IMAGE) -> list[str]:
     """Every way `config` could let the scanner reach beyond the lab, or let the
-    lab reach into the developer's environment. [] when it is safe to start."""
+    lab reach into the developer's environment. [] when it is safe to start.
+    `scanner_image` is the pinned image the scanner must be (ZAP or sqlmap)."""
     problems: list[str] = []
     networks = config.get('networks') or {}
     services = config.get('services') or {}
@@ -396,8 +500,8 @@ def validate_lab_config(config: dict, target_service: str, report_dir: str,
     if not scanner:
         problems.append('the scanner service is missing')
     else:
-        if scanner.get('image') != ZAP_IMAGE:
-            problems.append('the scanner image is not the pinned digest')
+        if scanner.get('image') != scanner_image:
+            problems.append('the scanner image is not the pinned one')
         if set((scanner.get('networks') or {}).keys()) != {NETWORK}:
             problems.append(f'the scanner must be on {NETWORK!r} only')
         # Stricter than any project service: the scanner adds no capability at all.
@@ -468,9 +572,10 @@ def parse_report(report: dict) -> list[dict]:
     return sorted(alerts, key=lambda a: (-a['risk'], a['name']))
 
 
-def format_findings(alerts: list[dict], target: Target) -> str:
+def format_findings(alerts: list[dict], target: Target, active: bool = False) -> str:
     serious = [a for a in alerts if a['risk'] >= 2]
-    lines = [f'Lab scan of {target.url} (OWASP ZAP baseline, passive):']
+    mode = 'OWASP ZAP full scan, active' if active else 'OWASP ZAP baseline, passive'
+    lines = [f'Lab scan of {target.url} ({mode}):']
     if not alerts:
         return '\n'.join(lines + ['  no alerts.'])
     for alert in alerts:
@@ -486,6 +591,35 @@ def format_findings(alerts: list[dict], target: Target) -> str:
     lines.append(f'{len(serious)} Medium/High finding(s). Each confirmed finding gets the '
                  'negative test from its fiche (engineering-testing) before it is fixed.'
                  if serious else 'No Medium/High findings.')
+    return '\n'.join(lines)
+
+
+def parse_sqlmap_results(report_dir: str) -> list[dict]:
+    """sqlmap's results CSV as a list of injectable parameters. Empty when the
+    endpoint is not injectable (no CSV, or only a header)."""
+    path = os.path.join(report_dir, SQLMAP_RESULTS_FILE)
+    if not os.path.exists(path):
+        return []
+    found = []
+    with open(path, newline='', encoding='utf-8', errors='replace') as fh:
+        for row in csv.DictReader(fh):
+            place = (row.get('Place') or '').strip()
+            parameter = (row.get('Parameter') or '').strip()
+            if parameter:
+                found.append({'place': place, 'parameter': parameter,
+                              'technique': (row.get('Technique(s)') or '').strip()})
+    return found
+
+
+def format_sqlmap_findings(found: list[dict], target: Target) -> str:
+    lines = [f'Lab SQL-injection scan of {target.url} (sqlmap {SQLMAP_VERSION}):']
+    if not found:
+        return '\n'.join(lines + ['  not injectable on the parameters tested.'])
+    for hit in found:
+        lines.append(f'- [High] SQL injection in {hit["place"]} parameter '
+                     f'{hit["parameter"]!r} (CWE-89, technique {hit["technique"] or "?"})')
+    lines += ['', f'{len(found)} injectable parameter(s). Confirmed SQL injection: write the '
+              'negative test from injection.md (engineering-testing), then fix the query.']
     return '\n'.join(lines)
 
 
@@ -514,13 +648,26 @@ def resolved_config(project_dir: str, compose_files: list[str]) -> dict:
 
 
 def scan(args: argparse.Namespace) -> int:
-    target = parse_target(args.service, args.port, args.path)
+    tool = 'sqlmap' if args.sqlmap else 'zap'
+    if args.sqlmap and args.active:
+        raise LabError('--active is a ZAP option; --sqlmap is a separate SQL-injection scan.')
+    if tool == 'sqlmap':
+        if not args.endpoint:
+            raise LabError('--sqlmap needs --endpoint, e.g. --endpoint "/items?id=1".')
+        if not 1 <= args.level <= 5 or not 1 <= args.risk <= 3 or args.time_sec < 1:
+            raise LabError('--level must be 1-5, --risk 1-3, --time-sec 1 or more.')
+        target = parse_target(args.service, args.port, args.path, endpoint=args.endpoint)
+    else:
+        target = parse_target(args.service, args.port, args.path)
     if args.minutes < 1 or args.startup_seconds < 0:
         raise LabError('--minutes must be 1 or more and --startup-seconds 0 or more.')
+    if args.active_minutes < 1:
+        raise LabError('--active-minutes must be 1 or more.')
     check_docker()
-    if not image_present():
-        raise LabError('The scanner image is not installed. Run `lab/run.py --setup` first '
-                       f'({ZAP_DOWNLOAD_HINT}).')
+    needed = SQLMAP_IMAGE if tool == 'sqlmap' else ZAP_IMAGE
+    if not image_present(needed):
+        raise LabError('The scanner image is not installed. Run `lab/run.py --setup` first'
+                       + (f' ({ZAP_DOWNLOAD_HINT}).' if tool == 'zap' else '.'))
     base = resolved_config(args.project_dir, args.compose_file)
     project = _project_name(args.project_dir)
 
@@ -533,9 +680,12 @@ def scan(args: argparse.Namespace) -> int:
     config_file = os.path.join(workdir, 'compose.json')
     started = interrupted = False
     try:
-        config = build_lab_config(base, target, project, report_dir, args.minutes)
+        config = build_lab_config(base, target, project, report_dir, args.minutes,
+                                  active=args.active, active_minutes=args.active_minutes,
+                                  tool=tool, level=args.level, risk=args.risk,
+                                  time_sec=args.time_sec)
         problems = validate_lab_config(config, target.service, report_dir,
-                                       args.allow_bind_mounts)
+                                       args.allow_bind_mounts, needed)
         with open(config_file, 'w', encoding='utf-8') as fh:
             json.dump(config, fh)
         os.chmod(config_file, 0o600)  # resolved environment values live in it
@@ -546,7 +696,7 @@ def scan(args: argparse.Namespace) -> int:
                 raise LabError('Docker Compose rejected the lab configuration:\n'
                                + effective.stderr.strip(), EXIT_ERROR)
             problems = validate_lab_config(json.loads(effective.stdout), target.service,
-                                           report_dir, args.allow_bind_mounts)
+                                           report_dir, args.allow_bind_mounts, needed)
         if problems:
             raise LabError('Refused — the lab would not be isolated:\n  - '
                            + '\n  - '.join(problems))
@@ -560,16 +710,42 @@ def scan(args: argparse.Namespace) -> int:
                            EXIT_ERROR)
         if args.startup_seconds:
             time.sleep(args.startup_seconds)
-        print(f'Scanning {target.url} for up to {args.minutes} minute(s)...', flush=True)
+        if tool == 'sqlmap':
+            # The endpoint reaches sqlmap through a one-line targets file in the
+            # mounted report dir, not on the command line: only -m makes sqlmap
+            # write the results CSV that is read back below (see sqlmap_command).
+            with open(os.path.join(report_dir, SQLMAP_TARGETS_FILE), 'w',
+                      encoding='utf-8') as fh:
+                fh.write(target.url + '\n')
+            print(f'Running a SQL-injection scan of {target.url}...', flush=True)
+            done = _compose(project, config_file, '--profile', NETWORK, 'run', '--rm',
+                            '--no-deps', SCANNER,
+                            timeout=SQLMAP_RUN_MINUTES * 60 + SCANNER_MARGIN_SECONDS)
+            # sqlmap exits 0 even when it never reached the target, so without
+            # this a failed scan would be reported as "not injectable". Tell a
+            # transport failure and a scan that never ran from a real clean
+            # result by the critical line and by the results file existing.
+            if SQLMAP_UNREACHABLE in (done.stdout or '') + (done.stderr or ''):
+                raise LabError('sqlmap could not reach the target on that port and path; '
+                               'nothing was tested.', EXIT_ERROR)
+            if not os.path.exists(os.path.join(report_dir, SQLMAP_RESULTS_FILE)):
+                raise LabError('sqlmap produced no results file; the scan did not complete.',
+                               EXIT_ERROR)
+            found = parse_sqlmap_results(report_dir)
+            print(format_sqlmap_findings(found, target))
+            return EXIT_FINDINGS if found else EXIT_CLEAN
+        kind = 'active scan' if args.active else 'passive scan'
+        print(f'Running a {kind} of {target.url}...', flush=True)
         _compose(project, config_file, '--profile', NETWORK, 'run', '--rm', '--no-deps',
-                 SCANNER, timeout=scanner_timeout_seconds(args.minutes))
+                 SCANNER, timeout=scanner_timeout_seconds(args.minutes, args.active,
+                                                          args.active_minutes))
         report_path = os.path.join(report_dir, REPORT_FILE)
         if not os.path.exists(report_path):
             raise LabError('The scanner produced no report (the target may not have '
                            'answered on that port and path).', EXIT_ERROR)
         with open(report_path, encoding='utf-8') as fh:
             alerts = parse_report(json.load(fh))
-        print(format_findings(alerts, target))
+        print(format_findings(alerts, target, args.active))
         return EXIT_FINDINGS if any(a['risk'] >= 2 for a in alerts) else EXIT_CLEAN
     except KeyboardInterrupt:
         interrupted = True
@@ -620,8 +796,9 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGHUP, _terminate)
     parser = argparse.ArgumentParser(
         description='Scan your own application, running locally in an isolated copy of its '
-                    'compose stack, with OWASP ZAP baseline. Nothing outside the lab can be '
-                    'targeted, and nothing is kept after the run.')
+                    'compose stack, with OWASP ZAP (passive by default, --active for attack '
+                    'payloads). Nothing outside the lab can be targeted, and nothing is kept '
+                    'after the run.')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--setup', action='store_true',
                       help='check Docker and download the pinned scanner image')
@@ -637,6 +814,22 @@ def main(argv: list[str] | None = None) -> int:
                         help='extra wait after the service reports started (default: 5)')
     parser.add_argument('--allow-bind-mounts', action='store_true',
                         help='scan even though the project mounts folders of this computer')
+    parser.add_argument('--active', action='store_true',
+                        help='send attack payloads (ZAP full scan), not only a passive read; '
+                             'slower, and still only against the isolated target')
+    parser.add_argument('--active-minutes', type=int, default=ACTIVE_SCAN_MINUTES,
+                        help=f'cap on the active scan (default: {ACTIVE_SCAN_MINUTES})')
+    parser.add_argument('--sqlmap', action='store_true',
+                        help='deep SQL-injection scan of one --endpoint with sqlmap, instead '
+                             'of ZAP; same isolation')
+    parser.add_argument('--endpoint',
+                        help='for --sqlmap: path with the parameter to test, e.g. "/items?id=1"')
+    parser.add_argument('--level', type=int, default=SQLMAP_LEVEL,
+                        help=f'sqlmap level 1-5 (default: {SQLMAP_LEVEL})')
+    parser.add_argument('--risk', type=int, default=SQLMAP_RISK,
+                        help=f'sqlmap risk 1-3 (default: {SQLMAP_RISK})')
+    parser.add_argument('--time-sec', type=int, default=SQLMAP_TIME_SEC, dest='time_sec',
+                        help=f'sqlmap time-based delay seconds (default: {SQLMAP_TIME_SEC})')
     args = parser.parse_args(argv)
     try:
         if args.setup:
