@@ -4,7 +4,7 @@
 > Built for Claude Code. Codex CLI and Google Antigravity adapters are experimental.
 
 [![License: MIT + Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-4.0.1-blueviolet.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-4.0.2-blueviolet.svg)](.claude-plugin/plugin.json)
 [![Harnesses](https://img.shields.io/badge/harnesses-Claude_Code%20%7C%20Codex%20CLI%20%7C%20Antigravity-2ea44f.svg)](#supported-harnesses)
 [![Skills](https://img.shields.io/badge/skills-40-orange.svg)](skills/)
 [![PRs target develop](https://img.shields.io/badge/PRs-target%20%60develop%60-blueviolet.svg)](#contributing)
@@ -46,9 +46,9 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 
 | Harness | Status | Manifest | Install | Hooks |
 | --- | --- | --- | --- | --- |
-| **Claude Code** | Supported | [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) | `claude plugin install` from this repository's marketplace ([below](#claude-code)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`, `SubagentStop` |
-| **Codex CLI** | Experimental | [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) | `scripts/install-codex.sh` OR `codex plugin add` ([below](#codex-cli)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `SubagentStop`, `PreCompact`, `PostCompact` |
-| **Google Antigravity** | Experimental | [`adapters/antigravity/`](adapters/antigravity/) | `adapters/antigravity/install.sh <project>` ([below](#google-antigravity)) | Optional git-hook enforcement (`--git-hooks`) |
+| **Claude Code** | Supported | [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) | `install.sh` or `claude plugin install` ([Quick install](#quick-install)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`, `SubagentStop` |
+| **Codex CLI** | Experimental | [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) | `install.sh --codex`, `scripts/install-codex.sh` or `codex plugin add` ([Quick install](#quick-install)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `SubagentStop`, `PreCompact`, `PostCompact` |
+| **Google Antigravity** | Experimental | [`adapters/antigravity/`](adapters/antigravity/) | `install.sh --antigravity <project>` or `adapters/antigravity/install.sh <project>` ([Quick install](#quick-install)) | Optional git-hook enforcement (`--git-hooks`) |
 
 **Claude Code is the target harness.** Every gate, the settings menu and the
 learn loop are designed and verified there first. The Codex CLI and Google
@@ -66,7 +66,34 @@ contract, but the engineering rules are identical.
 
 ## Quick install
 
-### Claude Code
+One command for every harness, no clone. Run the same command again to update.
+
+```bash
+# Claude Code
+curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash
+
+# Codex CLI
+curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash -s -- --codex
+
+# Google Antigravity, into a workspace (git hooks and CI check recommended)
+curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash -s -- --antigravity /path/to/your-project --git-hooks --ci
+```
+
+What [`install.sh`](install.sh) does:
+
+- **Claude Code:** adds this repository as a plugin marketplace and installs
+  the plugin through the `claude` CLI; a second run updates it. It does not
+  download anything itself.
+- **Codex and Antigravity:** downloads the latest release's archive, checks
+  it against the SHA-256 published with it, unpacks it into
+  `~/.local/share/engineering-playbook/<version>` and links it as `current`,
+  then runs the harness's own installer from there. An update only moves the
+  link. Python 3.10+ is required for the hooks.
+- `--version X.Y.Z` installs a given release, `--dir` changes where releases
+  are kept, `--download-only` stops after the verified download. Nothing runs
+  with `sudo`. To read the script before running it, open the link above.
+
+### Claude Code without the script
 
 ```bash
 claude plugin install engineering-playbook --marketplace Hagave/engineering-playbook
@@ -80,38 +107,21 @@ inside a session:
 /plugin install engineering-playbook@engineering-playbook
 ```
 
-No clone is needed. To receive new releases automatically, turn on
-auto-update once: `/plugin` → Marketplaces → `engineering-playbook` →
-Enable auto-update (it is off by default for marketplaces outside Anthropic's).
-Without it, `claude plugin update engineering-playbook@engineering-playbook`
-updates by hand. A release reaches users when its version changes in
-`.claude-plugin/plugin.json`, which happens only on a merge into `main`.
+To receive new releases automatically, turn on auto-update once: `/plugin` →
+Marketplaces → `engineering-playbook` → Enable auto-update (it is off by
+default for marketplaces outside Anthropic's). Without it, re-run the script or
+`claude plugin update engineering-playbook@engineering-playbook`. A release
+reaches users when its version changes in `.claude-plugin/plugin.json`, which
+happens only on a merge into `main`.
 
-### Codex CLI
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/Hagave/engineering-playbook.git ~/.engineering-playbook
-
-# 2. Install via the marketplace (recommended)
-~/.engineering-playbook/scripts/install-codex.sh --dev
-
-# OR install directly through the Codex CLI:
-codex plugin marketplace add /path/to/engineering-playbook
-codex plugin add playbook@playbook
-```
-
-### Google Antigravity
+### From a clone (development)
 
 ```bash
-# 1. Clone the repository (skip if already cloned)
 git clone https://github.com/Hagave/engineering-playbook.git ~/.engineering-playbook
 
-# 2. Run the installer against the target workspace
-~/.engineering-playbook/adapters/antigravity/install.sh /path/to/your-project
-
-# recommended — adds mechanical enforcement via git hooks:
-~/.engineering-playbook/adapters/antigravity/install.sh --git-hooks --ci /path/to/your-project
+claude --plugin-dir ~/.engineering-playbook                                   # Claude Code, loads the clone
+~/.engineering-playbook/scripts/install-codex.sh --dev                        # Codex, symlinked to the clone
+~/.engineering-playbook/adapters/antigravity/install.sh --git-hooks --ci /path/to/your-project   # Antigravity
 ```
 
 ---
@@ -403,7 +413,7 @@ concurrent sessions in the same project never interfere; a subagent gets its
 own state (`session_id` + `agent_id`) and is gated at `SubagentStop`, so its
 writes never block the parent session's turn.
 
-**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.0.1`.
+**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.0.2`.
 
 **For a team:** commit the marketplace and the plugin to the project's
 `.claude/settings.json`; each teammate still accepts the folder's trust dialog
