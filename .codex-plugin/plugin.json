@@ -1,6 +1,6 @@
 {
   "name": "playbook",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "AI Engineering Playbook — Codex adapter wrapping the engineering-* skill catalog (40 skills).",
   "author": {
     "name": "hagave"

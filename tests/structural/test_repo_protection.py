@@ -76,6 +76,25 @@ class TestRulesets(unittest.TestCase):
         with open(os.path.join(_ROOT, '.github', 'CODEOWNERS'), encoding='utf-8') as fh:
             self.assertIn('* @Hagave', fh.read())
 
+    def test_only_the_owner_creates_pushes_or_merges_into_any_branch(self):
+        """The owner's rule: no one else merges a pull request, into any branch,
+        even after being given write access. `update` covers a merge, since a
+        merge is an update of the base branch; only the admin role bypasses.
+        Dependabot's own branches are left out so it can open its pull
+        requests, which still need the owner to merge them."""
+        owner_only = [r for r in _rulesets().values()
+                      if r['target'] == 'branch' and '~ALL' in r['conditions']['ref_name']['include']]
+        self.assertEqual(len(owner_only), 1)
+        ruleset = owner_only[0]
+        self.assertEqual(ruleset['enforcement'], 'active')
+        self.assertTrue({'creation', 'update'} <= set(_rules(ruleset)))
+        self.assertEqual(ruleset['bypass_actors'],
+                         [{'actor_id': 5, 'actor_type': 'RepositoryRole', 'bypass_mode': 'always'}])
+        self.assertEqual(ruleset['conditions']['ref_name']['exclude'], ['refs/heads/dependabot/**'])
+
+    def test_no_auto_merge(self):
+        self.assertIs(protection.REPO_SETTINGS['allow_auto_merge'], False)
+
     def test_release_tags_cannot_be_moved_or_deleted(self):
         tags = [r for r in _rulesets().values() if r['target'] == 'tag']
         self.assertEqual(len(tags), 1)
