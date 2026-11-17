@@ -72,6 +72,10 @@ class TestConfigSkillLocalizationAndTour(unittest.TestCase):
         self.assertIn('## Guided setup (first run)', self.text)
         self.assertIn('skip', self.text.lower())
 
+    def test_status_surfaces_the_security_layer_so_it_is_discoverable(self) -> None:
+        self.assertIn('security layer', self.text.lower())
+        self.assertIn('lab/run.py', self.text)
+
 
 if __name__ == '__main__':
     unittest.main()

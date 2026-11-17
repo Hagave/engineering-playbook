@@ -71,6 +71,7 @@ Report the script's output lines as they come: the second one says when the chan
 1. Print the session configuration block from *Session configuration block*, when the session has one.
 2. Print the settings: `python3 <playbook>/scripts/playbook_config.py show --harness <harness>`.
 3. Print the output filter's totals: `python3 <playbook>/hooks/output_filter.py --report`, its single line as it comes. When the file does not exist (an adapter without hooks), skip it. The figure counts only what the model would have read: Claude Code already cuts Bash output above 30,000 characters.
+4. Name the security layer, so the user knows it is there: the always-on gates (secret scan, destructive-command confirmation, pre-push code review), the per-vulnerability fiches in `engineering-security`, static analysis when `semgrep`/`opengrep` is installed, and the local lab that scans the project's own app in an isolated copy of its stack — `python3 <playbook>/lab/run.py --setup`, then `--service <svc> --port <port>` (add `--active` or `--sqlmap --endpoint ...` for deeper scans).
 
 Then show the Status screen's entries: **Back**, **Exit**.
 
