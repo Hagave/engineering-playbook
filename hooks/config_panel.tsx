@@ -6,6 +6,10 @@
 // list of settings live in one place. The skill still answers when the model
 // is asked in words.
 //
+// Every string the person reads comes from that script too (`ui`, the labels),
+// in the language the `language` setting resolves to: the model's "reply in
+// the user's language" never reaches text this module draws.
+//
 // The menu is a numbered band above the prompt, not a pane: a pane needs the
 // keyboard, which the terminal (VS Code's included) did not hand it, so the
 // arrows went to the prompt. Here every entry is a number: the band's digit
@@ -15,11 +19,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ConfigSetting, ConfigSnapshot, MenuScreen, PanelNotice } from './config_panel_state'
+import type { ConfigSetting, ConfigSnapshot, MenuScreen, PanelNotice, PanelText } from './config_panel_state'
 
 const COMMAND = 'playbook-config'
 const EXIT = '0'
 const DIGIT_RE = /^\s*(\d)\s*$/
+const ENGLISH = 'en'
+// Settings shown on the main screen: with Status, Learn, red-lab-playbook and
+// Diff panel after them, five fill the digits 1-9.
+const MAX_SETTING_ROWS = 5
 // A gate's denial starts with its tag, sometimes behind the engine's own
 // prefix; a command whose output merely mentions a tag is not a denial.
 const GATE_TAG_RE = /^(?:PreToolUse:\S+ hook error: )?\[playbook:([\w-]+)\]/
@@ -27,7 +35,7 @@ const GATE_TAG_RE = /^(?:PreToolUse:\S+ hook error: )?\[playbook:([\w-]+)\]/
 // Change the tag when a stored value's fields change: an earlier version's
 // value is then read as the initial one instead of a wrong shape.
 const snapshot = atom({ plugin: 'engineering-playbook', key: 'snapshot' } as const, null, {
-  shape: 'snapshot-1',
+  shape: 'snapshot-2',
 })
 const notice = atom({ plugin: 'engineering-playbook', key: 'notice' } as const, null, {
   shape: 'notice-1',
@@ -36,47 +44,74 @@ const filterReport = atom({ plugin: 'engineering-playbook', key: 'filterReport' 
   shape: 'filter-report-1',
 })
 const screen = atom({ plugin: 'engineering-playbook', key: 'screen' } as const, null, {
-  shape: 'screen-1',
+  shape: 'screen-2',
 })
 
-// Status and Learn need the model: the session's configuration block lives in
-// its context, and Learn is a skill that reads transcripts and writes CLAUDE.md.
+// Status, Learn and the red-lab-playbook steps need the model: the session's
+// configuration block lives in its context, Learn is a skill that reads
+// transcripts and writes CLAUDE.md, and a lab step asks which service, port or
+// endpoint to scan and runs for minutes with its output in view (the setup
+// alone downloads about 1.2 GB, past this module's ten-minute process limit).
 // The menu hands those to the model in words; the skill takes it from there.
+// The words are for the model, so they stay English; `askText` adds the
+// language to answer in.
 const ASK_STATUS = 'Show the engineering playbook session status (playbook-config, Status).'
 const ASK_LEARN = 'Run the engineering-learn skill for this project (playbook-config, Learn).'
+
+type LabStep = 'setup' | 'passive' | 'active' | 'sqlmap' | 'uninstall'
+
+const LAB_STEPS: { step: LabStep; text: keyof PanelText }[] = [
+  { step: 'setup', text: 'lab_setup' },
+  { step: 'passive', text: 'lab_passive' },
+  { step: 'active', text: 'lab_active' },
+  { step: 'sqlmap', text: 'lab_sqlmap' },
+  { step: 'uninstall', text: 'lab_uninstall' },
+]
+
+function askLab(step: LabStep): string {
+  return `Run the red-lab-playbook step "${step}" for this project (playbook-config, red-lab-playbook).`
+}
 
 // What a numbered entry does, as data: the module may hand `$` only to named
 // functions, so one switch (`run`) turns an action into calls.
 type Action =
   | { kind: 'open'; key: string }
   | { kind: 'set'; key: string; value: string }
+  | { kind: 'lab' }
   | { kind: 'back' }
-  | { kind: 'status' }
-  | { kind: 'learn' }
+  | { kind: 'ask'; text: string }
   | { kind: 'diff' }
   | { kind: 'exit' }
 
 type Entry = { digit: string; label: string; action: Action }
 
 const MAIN: MenuScreen = { kind: 'main' }
+const LAB: MenuScreen = { kind: 'lab' }
 
 function configScript($: EngineInterface): string {
   return `${$.plugin.root}/scripts/playbook_config.py`
 }
 
 function isSnapshot(value: unknown): value is ConfigSnapshot {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const fields = value as { settings?: unknown; ui?: unknown; language_name?: unknown }
+
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    Array.isArray((value as { settings?: unknown }).settings)
+    Array.isArray(fields.settings) &&
+    typeof fields.ui === 'object' &&
+    fields.ui !== null &&
+    typeof fields.language_name === 'string'
   )
 }
 
-async function refresh($: EngineInterface): Promise<void> {
+// Reads the settings and the panel's strings; false when they could not be read.
+async function refresh($: EngineInterface): Promise<boolean> {
   const ran = await $.process.run(['python3', configScript($), 'show', '--json'])
   if (ran.exitCode !== 0) {
     await update($, notice, () => ({ text: ran.stderr.trim() || 'could not read the settings', isError: true }))
-    return
+    return false
   }
   let parsed: unknown
   try {
@@ -86,11 +121,13 @@ async function refresh($: EngineInterface): Promise<void> {
   }
   if (!isSnapshot(parsed)) {
     await update($, notice, () => ({ text: 'the settings script answered something unreadable', isError: true }))
-    return
+    return false
   }
   await update($, snapshot, () => parsed)
   const report = await $.process.run(['python3', `${$.plugin.root}/hooks/output_filter.py`, '--report'])
   await update($, filterReport, () => (report.exitCode === 0 ? report.stdout.trim() || null : null))
+
+  return true
 }
 
 async function apply($: EngineInterface, key: string, value: string): Promise<void> {
@@ -118,43 +155,70 @@ async function askModel($: EngineInterface, text: string): Promise<void> {
   await $.prompt.submit({ text })
 }
 
-function settingLine(setting: ConfigSetting): string {
-  const label = setting.choices.find(choice => choice.value === setting.value)?.label ?? setting.value
-  const marker = setting.value === setting.default ? '' : ` (default ${setting.default})`
+// A prompt for the model, told to answer in the person's language: an English
+// prompt would otherwise pull the reply into English.
+function askText(prompt: string, loaded: ConfigSnapshot): string {
+  return loaded.language === ENGLISH ? prompt : `${prompt} Answer in ${loaded.language_name}.`
+}
+
+function settingLine(setting: ConfigSetting, ui: PanelText): string {
+  const label = setting.choices.find((choice): boolean => choice.value === setting.value)?.label ?? setting.value
+  const marker = setting.value === setting.default ? '' : ` (${ui.default} ${setting.default})`
 
   return `${setting.label}: ${label}${marker}`
 }
 
+function noEntry(ui: PanelText, digit: string): string {
+  return `${ui.title}: ${ui.no_entry.replace('{digit}', digit)}`
+}
+
 // The numbered entries of the screen shown: one place decides what each digit
 // does, for the band's buttons and for a digit typed and sent alike.
-function entries(current: MenuScreen, settings: ConfigSetting[]): Entry[] {
-  const back: Entry = { digit: EXIT, label: 'Back', action: { kind: 'back' } }
+function entries(current: MenuScreen, loaded: ConfigSnapshot): Entry[] {
+  const { ui, settings } = loaded
+  const back: Entry = { digit: EXIT, label: ui.back, action: { kind: 'back' } }
   if (current.kind === 'setting') {
-    const setting = settings.find(one => one.key === current.key)
+    const setting = settings.find((one): boolean => one.key === current.key)
     if (!setting) {
       return [back]
     }
-    const picks: Entry[] = setting.choices.slice(0, 9).map((choice, index) => ({
-      digit: String(index + 1),
-      label: choice.value === setting.value ? `${choice.label} (current)` : choice.label,
-      action: { kind: 'set', key: setting.key, value: choice.value },
-    }))
+    const picks: Entry[] = setting.choices.slice(0, 9).map(
+      (choice, index): Entry => ({
+        digit: String(index + 1),
+        label: choice.value === setting.value ? `${choice.label} (${ui.current})` : choice.label,
+        action: { kind: 'set', key: setting.key, value: choice.value },
+      }),
+    )
 
     return [...picks, back]
   }
-  const rows: Entry[] = settings.slice(0, 6).map((setting, index) => ({
-    digit: String(index + 1),
-    label: settingLine(setting),
-    action: { kind: 'open', key: setting.key },
-  }))
+  if (current.kind === 'lab') {
+    const steps: Entry[] = LAB_STEPS.map(
+      ({ step, text }, index): Entry => ({
+        digit: String(index + 1),
+        label: ui[text],
+        action: { kind: 'ask', text: askText(askLab(step), loaded) },
+      }),
+    )
+
+    return [...steps, back]
+  }
+  const rows: Entry[] = settings.slice(0, MAX_SETTING_ROWS).map(
+    (setting, index): Entry => ({
+      digit: String(index + 1),
+      label: settingLine(setting, ui),
+      action: { kind: 'open', key: setting.key },
+    }),
+  )
   const after = rows.length + 1
 
   return [
     ...rows,
-    { digit: String(after), label: 'Status', action: { kind: 'status' } },
-    { digit: String(after + 1), label: 'Learn', action: { kind: 'learn' } },
-    { digit: String(after + 2), label: 'Diff panel', action: { kind: 'diff' } },
-    { digit: EXIT, label: 'Exit', action: { kind: 'exit' } },
+    { digit: String(after), label: ui.status, action: { kind: 'ask', text: askText(ASK_STATUS, loaded) } },
+    { digit: String(after + 1), label: ui.learn, action: { kind: 'ask', text: askText(ASK_LEARN, loaded) } },
+    { digit: String(after + 2), label: ui.lab, action: { kind: 'lab' } },
+    { digit: String(after + 3), label: ui.diff, action: { kind: 'diff' } },
+    { digit: EXIT, label: ui.exit, action: { kind: 'exit' } },
   ]
 }
 
@@ -166,14 +230,14 @@ async function run($: EngineInterface, action: Action): Promise<void> {
     case 'set':
       await apply($, action.key, action.value)
       return
+    case 'lab':
+      await update($, screen, () => LAB)
+      return
     case 'back':
       await update($, screen, () => MAIN)
       return
-    case 'status':
-      await askModel($, ASK_STATUS)
-      return
-    case 'learn':
-      await askModel($, ASK_LEARN)
+    case 'ask':
+      await askModel($, action.text)
       return
     case 'diff':
       await $.command.run({ command: 'diff' })
@@ -186,12 +250,12 @@ async function run($: EngineInterface, action: Action): Promise<void> {
 
 async function entryFor($: EngineInterface, digit: string): Promise<Entry | undefined> {
   const current = await read($, screen)
-  if (current === null) {
+  const loaded = await read($, snapshot)
+  if (current === null || loaded === null) {
     return undefined
   }
-  const loaded = await read($, snapshot)
 
-  return entries(current, loaded?.settings ?? []).find(one => one.digit === digit)
+  return entries(current, loaded).find((one): boolean => one.digit === digit)
 }
 
 async function choose($: EngineInterface, digit: string): Promise<void> {
@@ -206,7 +270,9 @@ export const register: Register = on => {
   // the skill. The skill's command may be namespaced
   // (`engineering-playbook:playbook-config`). With arguments (`/playbook-config
   // prose low`) or from anywhere but the composer it is a request for the
-  // skill, which handles it directly; taking it here dropped the request.
+  // skill, which handles it directly; taking it here dropped the request. When
+  // the settings cannot be read the menu has nothing to draw, not even its own
+  // words, so the skill's menu runs instead.
   on('command.run', async ($, e, next) => {
     if (e.command !== COMMAND && !e.command.endsWith(`:${COMMAND}`)) {
       return next(e)
@@ -214,18 +280,25 @@ export const register: Register = on => {
     if (e.args.trim() !== '' || e.origin?.kind !== 'composer') {
       return next(e)
     }
-    await refresh($)
+    if (!(await refresh($))) {
+      return next(e)
+    }
+    const loaded = await read($, snapshot)
+    if (loaded === null) {
+      return next(e)
+    }
     await update($, notice, () => null)
     await update($, screen, () => MAIN)
 
-    return { text: 'Playbook settings are above the prompt: type a number and Enter (0 exits).' }
+    return { text: loaded.ui.opened }
   }).catch(($, e, next) => next(e)) // the menu failed: the skill's menu runs instead
 
   // While the menu is open, a lone digit sent from the prompt picks its entry
-  // and never reaches the model; Status and Learn become the prompt itself (a
-  // prompt.submit hook may not submit another prompt). Anything else sent
-  // closes the menu and goes on as typed, so a later digit meant for the model
-  // (an answer to its numbered question) is never taken by a forgotten menu.
+  // and never reaches the model; Status, Learn and a lab step become the prompt
+  // itself (a prompt.submit hook may not submit another prompt). Anything else
+  // sent closes the menu and goes on as typed, so a later digit meant for the
+  // model (an answer to its numbered question) is never taken by a forgotten
+  // menu.
   on('prompt.submit', async ($, e, next) => {
     if ((await read($, screen)) === null) {
       return next(e)
@@ -236,20 +309,21 @@ export const register: Register = on => {
 
       return next(e)
     }
+    const loaded = await read($, snapshot)
     const entry = await entryFor($, digit)
-    if (!entry) {
-      return { drop: `Playbook settings: no entry ${digit} on this screen.` }
+    if (!entry || loaded === null) {
+      return { drop: loaded === null ? `no entry ${digit}` : noEntry(loaded.ui, digit) }
     }
-    if (entry.action.kind === 'status' || entry.action.kind === 'learn') {
+    if (entry.action.kind === 'ask') {
       await close($)
 
-      return next({ ...e, text: entry.action.kind === 'status' ? ASK_STATUS : ASK_LEARN })
+      return next({ ...e, text: entry.action.text })
     }
     await run($, entry.action)
     const last = await read($, notice)
     const isSet = entry.action.kind === 'set'
 
-    return { drop: (isSet && last?.text.split('\n').pop()) || `Playbook settings: ${entry.label}` }
+    return { drop: (isSet && last?.text.split('\n').pop()) || `${loaded.ui.title}: ${entry.label}` }
   }).catch(($, e, next) => next(e)) // never lose a prompt to the menu
 
   // A gate denial is shown to the person too, not only to the model.
@@ -266,24 +340,26 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const current = await read($, screen)
-    if (current === null || e.props.hasSurvey) {
+    const loaded = await read($, snapshot)
+    if (current === null || loaded === null || e.props.hasSurvey) {
       return next(e)
     }
     const { Box, Text, Button } = $.ui.resolve(e)
-    const loaded = await read($, snapshot)
     const last = await read($, notice)
     const report = await read($, filterReport)
-    const settings = loaded?.settings ?? []
-    const shown = current.kind === 'setting' ? settings.find(one => one.key === current.key) : undefined
+    const { ui } = loaded
+    const shown = current.kind === 'setting' ? loaded.settings.find((one): boolean => one.key === current.key) : undefined
+    const isMain = current.kind === 'main'
+    const title = shown ? shown.label : current.kind === 'lab' ? ui.lab_title : ui.title
+    const help = shown ? shown.help : current.kind === 'lab' ? ui.lab_help : undefined
 
     return (
       <Box flexDirection="column">
         <Text bold>
-          {shown ? shown.label : 'Engineering Playbook settings'}{' '}
-          <Text dimColor>type a number and Enter, {EXIT} {shown ? 'goes back' : 'exits'}</Text>
+          {title} <Text dimColor>{isMain ? ui.hint_main : ui.hint_sub}</Text>
         </Text>
-        {shown && <Text dimColor>{shown.help}</Text>}
-        {entries(current, settings).map(entry => (
+        {help !== undefined && <Text dimColor>{help}</Text>}
+        {entries(current, loaded).map(entry => (
           <Button
             key={`entry-${entry.digit}`}
             plain
@@ -292,7 +368,7 @@ export const register: Register = on => {
             onPress={() => void choose($, entry.digit)}
           />
         ))}
-        {!shown && report !== null && <Text dimColor>{report}</Text>}
+        {isMain && report !== null && <Text dimColor>{report}</Text>}
         {last !== null && (
           <Text color={last.isError ? 'red' : undefined} dimColor={!last.isError}>
             {last.text}

@@ -45,6 +45,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import playbook_core  # noqa: E402
+import playbook_i18n  # noqa: E402
 
 STATE_DIR = os.path.expanduser('~/.claude/hooks')
 
@@ -391,11 +392,14 @@ def record(session_id: str, before: int, after: int) -> None:
         fh.write(f'{before} {after}\n')
 
 
-def report() -> str:
-    """The latest session's totals, for /playbook-config (Status)."""
+def report(language: str | None = None) -> str:
+    """The latest session's totals, for /playbook-config (Status), in the
+    language the `language` preference resolves to."""
+    if language is None:
+        language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
     ledgers = glob.glob(os.path.join(STATE_DIR, LEDGER_GLOB))
     if not ledgers:
-        return 'Output filter: on, nothing filtered yet'
+        return playbook_i18n.text(language, 'filter_empty')
     count = before = after = 0
     with open(max(ledgers, key=os.path.getmtime), encoding='ascii') as fh:
         for line in fh:
@@ -405,9 +409,12 @@ def report() -> str:
                 before += int(parts[0])
                 after += int(parts[1])
     if not before:
-        return 'Output filter: on, nothing filtered yet'
-    return (f'Output filter: {count} outputs filtered, {before:,} -> {after:,} chars '
-            f'(-{100 * (before - after) / before:.0f} %, about {(before - after) // CHARS_PER_TOKEN:,} tokens)')
+        return playbook_i18n.text(language, 'filter_empty')
+    return playbook_i18n.text(
+        language, 'filter_totals', count=count,
+        before=playbook_i18n.number(before, language), after=playbook_i18n.number(after, language),
+        percent=f'{100 * (before - after) / before:.0f}',
+        tokens=playbook_i18n.number((before - after) // CHARS_PER_TOKEN, language))
 
 
 def main() -> None:

@@ -271,13 +271,21 @@ class TestHookContract(_RepoCase):
         out = json.loads(self.run_hook(self.payload()).stdout)
         after = len(out['hookSpecificOutput']['updatedToolOutput']['stdout'])
         report = subprocess.run([sys.executable, _HOOK, '--report'], capture_output=True, text=True,
-                                timeout=10, cwd=self.cwd, env={**os.environ, 'HOME': self.home}).stdout
+                                timeout=10, cwd=self.cwd, env={**os.environ, 'HOME': self.home, 'LANG': 'en_US.UTF-8', 'LC_ALL': ''}).stdout
         self.assertIn(f'2 outputs filtered, {2 * before:,} -> {2 * after:,} chars', report)
 
     def test_report_before_anything_is_filtered(self):
         report = subprocess.run([sys.executable, _HOOK, '--report'], capture_output=True, text=True,
-                                timeout=10, cwd=self.cwd, env={**os.environ, 'HOME': self.home}).stdout
+                                timeout=10, cwd=self.cwd, env={**os.environ, 'HOME': self.home, 'LANG': 'en_US.UTF-8', 'LC_ALL': ''}).stdout
         self.assertIn('nothing filtered yet', report)
+
+    def test_report_is_in_the_chosen_language(self):
+        state_dir = os.path.join(self.home, '.claude', 'hooks')
+        playbook_core.set_pref(state_dir, 'language', 'pt-br')
+        report = subprocess.run([sys.executable, _HOOK, '--report'], capture_output=True, text=True,
+                                timeout=10, cwd=self.cwd,
+                                env={**os.environ, 'HOME': self.home, 'LANG': 'en_US.UTF-8'}).stdout
+        self.assertIn('Filtro de saída: ligado, nada filtrado ainda', report)
 
     def test_old_ledgers_are_removed_when_a_session_starts(self):
         state_dir = os.path.join(self.home, '.claude', 'hooks')

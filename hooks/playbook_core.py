@@ -27,6 +27,7 @@ import time
 import warnings
 from typing import NamedTuple
 
+import playbook_i18n
 import secret_scan
 
 SPEC_TOKEN = '[SPEC CONFIRMED]'
@@ -2887,6 +2888,9 @@ PREFS_DEFAULTS: dict = {
     # thresholds only speak at 700k, long after the cost has been paid — every call
     # re-reads the whole context, so a session's cost grows with its size squared.
     'context_budget': 0,
+    # Language of the fixed text the settings menu shows (playbook_i18n). 'auto'
+    # follows the system locale; replies follow the language the user writes in.
+    'language': 'auto',
 }
 
 MEMORY_FILE = 'CLAUDE.md'
@@ -2930,6 +2934,8 @@ def load_prefs(state_dir: str) -> dict:
     tokens = stored.get('context_budget')
     if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
         prefs['context_budget'] = tokens
+    if stored.get('language') in playbook_i18n.LANGUAGES:
+        prefs['language'] = stored['language']
     return prefs
 
 
@@ -2973,6 +2979,12 @@ def set_pref(state_dir: str, key: str, value: str) -> tuple[dict, str | None]:
         if tokens is None:
             return prefs, f'context_budget must be a token count (250000, 250k) or off — got {value!r}'
         prefs['context_budget'] = tokens
+    elif key == 'language':
+        language = playbook_i18n.normalize(raw)
+        if language is None:
+            return prefs, (f'language must be one of {", ".join(playbook_i18n.LANGUAGES)} '
+                           f'— got {value!r}')
+        prefs['language'] = language
     else:
         return prefs, f'unknown preference {key!r} — valid keys: {", ".join(PREFS_DEFAULTS)}'
 

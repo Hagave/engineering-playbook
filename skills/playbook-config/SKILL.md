@@ -1,7 +1,7 @@
 ---
 name: playbook-config
-description: "The playbook's settings menu: response prose level, known-failure warnings, cost budgets, session status and learning from past failures. Use when the user says /playbook-config, asks for the playbook's settings, status or configuration, wants shorter or longer answers, wants warnings about past mistakes on or off, or asks the playbook to learn from this project's failures."
-version: 3.2.0
+description: "The playbook's settings menu: response prose level, known-failure warnings, cost budgets, menu language, session status, learning from past failures and the red-lab-playbook (security scans of the user's own app in an isolated local copy). Use when the user says /playbook-config, asks for the playbook's settings, status or configuration, wants shorter or longer answers, wants warnings about past mistakes on or off, asks the playbook to learn from this project's failures, or a prompt names a red-lab-playbook step."
+version: 3.3.0
 user-invocable: true
 ---
 
@@ -30,7 +30,7 @@ Show one screen at a time. Every screen lists its entries with a one-line explan
 
 Present a screen with the AskUserQuestion tool where it exists (Claude Code): one question, its options the screen's entries, each option's description the explanation. AskUserQuestion takes at most four options; when a screen has more, drop **Exit** from it and keep **Back** (the user can still type `exit`). In a harness without that tool, print the screen as a numbered list and wait for the user's answer.
 
-Render every screen — its title, the option labels and their explanations — and your own replies in the language the user writes in; a user writing Portuguese gets the menu in Portuguese. Keep the setting keys (`prose`, `watch`, `claude_md_budget`, `context_budget`), the command names (`/playbook-config`, `/playbook-off`) and the `playbook_config.py` arguments exactly as written — translate only what the user reads.
+Render every screen — its title, the option labels and their explanations — and your own replies in the language the user writes in; a user writing Portuguese gets the menu in Portuguese. Keep the setting keys (`prose`, `watch`, `claude_md_budget`, `context_budget`, `language`), the command names (`/playbook-config`, `/playbook-off`) and the `playbook_config.py` arguments exactly as written — translate only what the user reads.
 
 ### Main menu
 
@@ -39,6 +39,7 @@ Render every screen — its title, the option labels and their explanations — 
 | Settings | Change how the playbook behaves: prose level, warnings, cost budgets. |
 | Status | Show the session's configuration, the current settings and the output filter's totals. |
 | Learn | Mine this project's failure journal and sessions for repeated mistakes and write rules for them into the project `CLAUDE.md`. |
+| red-lab-playbook | Attack the user's own app in an isolated local copy of its Docker Compose stack. Opens the *red-lab-playbook* screen. |
 | Exit | Leave the menu. |
 
 ### Settings
@@ -50,6 +51,7 @@ Read the current values first: `python3 <playbook>/scripts/playbook_config.py sh
 | Prose level | `prose` | `low`, `mid` (default), `high` | How much explanation a response carries. See *Prose levels*. |
 | Known-failure warnings | `watch` | `on`, `off` (default) | Before a write or a command that touches something that already failed in this project, show the recorded failure. See *Known-failure warnings*. |
 | Cost budgets | | | Opens a screen with the two budgets below. |
+| Language | `language` | `auto` (default, follows the system locale), `en`, `pt-br`, `es` | Language of the fixed text in Claude Code's numbered settings menu. Replies always follow the language the user writes in. |
 
 Cost budgets screen:
 
@@ -71,7 +73,7 @@ Report the script's output lines as they come: the second one says when the chan
 1. Print the session configuration block from *Session configuration block*, when the session has one.
 2. Print the settings: `python3 <playbook>/scripts/playbook_config.py show --harness <harness>`.
 3. Print the output filter's totals: `python3 <playbook>/hooks/output_filter.py --report`, its single line as it comes. When the file does not exist (an adapter without hooks), skip it. The figure counts only what the model would have read: Claude Code already cuts Bash output above 30,000 characters.
-4. Name the security layer, so the user knows it is there: the always-on gates (secret scan, destructive-command confirmation, pre-push code review), the per-vulnerability fiches in `engineering-security`, static analysis when `semgrep`/`opengrep` is installed, and the local lab that scans the project's own app in an isolated copy of its stack — `python3 <playbook>/lab/run.py --setup`, then `--service <svc> --port <port>` (add `--active` or `--sqlmap --endpoint ...` for deeper scans).
+4. Name the security layer, so the user knows it is there: the always-on gates (secret scan, destructive-command confirmation, pre-push code review), the per-vulnerability fiches in `engineering-security`, static analysis when `semgrep`/`opengrep` is installed, and the red-lab-playbook, which scans the project's own app in an isolated copy of its stack (main menu → red-lab-playbook).
 
 Then show the Status screen's entries: **Back**, **Exit**.
 
@@ -79,14 +81,30 @@ Then show the Status screen's entries: **Back**, **Exit**.
 
 Load the `engineering-learn` skill and follow it. It reads this project's failure journal and session logs, extracts repeated failure patterns, and writes the corrections into the project `CLAUDE.md` (asking before creating that file). When it finishes, return to the main menu.
 
+### red-lab-playbook
+
+The local security lab: OWASP ZAP and sqlmap scan the user's own app inside an isolated copy of its Docker Compose stack, on an internal network the scanner cannot leave. The screen opens with that sentence, so the user knows what it is before choosing, then lists the steps below (plus **Back**). Claude Code's numbered menu sends the chosen step as a prompt naming it (`red-lab-playbook step "<step>"`); run that step the same way.
+
+Every step runs `python3 <playbook>/lab/run.py` from the project root with Bash, output in view. Never point it at anything but the project's own compose services: the script refuses any other target, and there is no override.
+
+| Step | What to do |
+|---|---|
+| `setup` | Run `--setup`. It checks Docker and Compose, downloads the pinned ZAP image (about 1.2 GB, 3.8 GB on disk) and builds the sqlmap image. Say the size before starting; it can take minutes. |
+| `passive` | Read the compose file, list its services with their container ports, and ask which service and port to scan (and a start path, default `/`). Run `--service <svc> --port <port>`. ZAP only reads responses; nothing is attacked. |
+| `active` | As `passive`, then add `--active`: ZAP sends attack payloads to the isolated copy. Say so before running. |
+| `sqlmap` | As `passive`, plus ask for one endpoint with the parameter to test (`/items?id=1`). Run `--sqlmap --service <svc> --port <port> --endpoint <path>`. |
+| `uninstall` | Say which images it removes (the ZAP and sqlmap scanner images) and that `setup` downloads them again, confirm, then run `--uninstall`. |
+
+When the project has no compose file, or `--setup` never ran, say what is missing and offer the step that fixes it. Report the script's findings as it prints them, with the fiche each one points to in `engineering-security`; exit code 0 with no findings means none were found in what was reached, not that the app is safe.
+
 ---
 
 ## Guided setup (first run)
 
 The SessionStart hook offers this once, on the first run on the machine (a first-run line in the session context). When the user accepts, walk them through the playbook in their language, and let them stop at any point:
 
-1. In two or three lines, say what the playbook gives them: the governance gates (spec, validation, review, secret and destructive-command gates), the security layer (fiches, SAST when installed, the local lab), and that every setting below is optional with a sensible default.
-2. Walk the **Settings** entries one at a time (prose level, known-failure warnings, the two budgets), each with its default, applying only what they choose — exactly as the menu does.
+1. In two or three lines, say what the playbook gives them: the governance gates (spec, validation, review, secret and destructive-command gates), the security layer (fiches, SAST when installed, the red-lab-playbook), and that every setting below is optional with a sensible default.
+2. Walk the **Settings** entries one at a time (prose level, known-failure warnings, the two budgets, and in Claude Code the menu language), each with its default, applying only what they choose — exactly as the menu does. For the language, offer the one they are writing in: `auto` follows the system locale, which is often English on a machine whose user writes in another language.
 3. Offer **Status** so they see the result, then leave.
 
 If the user skips, say that `/playbook-config` reopens this anytime, and do nothing else. Never block their first task on it.
