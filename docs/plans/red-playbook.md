@@ -204,6 +204,39 @@ the design below, all agreed with the user:
 - Hook: deny scanner binaries and images outside `run.py`, and deny
   `--network host`, `--privileged` or a Docker socket mount on them.
 
+### Scan modes added on `feat/red-playbook-active`
+
+The lab shipped (#71) with the ZAP passive baseline only. Two deeper modes were
+added on top of it, each isolated exactly like the passive scan — scanner on the
+internal `redlab` network alone, every capability dropped, no-new-privileges,
+only the report directory mounted — so an extended run still reaches nothing
+outside the lab. `validate_lab_config` is unchanged and the default stays
+passive.
+
+- **Active scan** (`--active`, `--active-minutes` default 10). ZAP full scan
+  (spider + active scan with attack payloads) instead of the passive baseline.
+  The active scan has no `-m`/`-T` bound of its own, so it is capped by ZAP
+  config (`scanner.maxScanDurationInMins`, `scanner.maxRuleDurationInMins`) and
+  the outer timeout covers that cap. `scanner_command` builds the right ZAP
+  command per mode; the report header names the mode.
+- **sqlmap** (`--sqlmap --endpoint '/items?id=1'`). Runs sqlmap against one
+  endpoint of the isolated target — deeper on SQLi than the ZAP active rule
+  (confirms the injection, fingerprints the DBMS, names the technique). The
+  scanner image is built locally at `--setup` from `lab/sqlmap.Dockerfile`
+  (sqlmap 1.10.9 from PyPI on `python:3.12-slim-bookworm` pinned by digest); no
+  sqlmap code lives in the repo, only the digest reference. `parse_target`
+  validates the `--endpoint` query so it still cannot name another host;
+  `validate_lab_config` takes the expected scanner image (ZAP or sqlmap); the
+  bounded command (`--batch`, `--level`/`--risk`/`--time-sec`,
+  `--flush-session`) writes a CSV that `parse_sqlmap_results` reads into CWE-89
+  findings pointing at `injection.md`. `--uninstall` removes both images.
+
+Tests: unit coverage for both modes (active command, the capped active scan,
+the default staying passive, the active timeout covering the cap; the sqlmap
+service image and bounded command, its isolation equal to ZAP's, a tampered
+image refused, CSV parsing and the not-injectable case), plus an active run in
+the opt-in Docker e2e. Full suite green (770).
+
 ## Phase 5 — native output filter
 
 Status: merged in #72 (branch `feat/red-playbook-output-filter`, 2026-11-16). Premise
