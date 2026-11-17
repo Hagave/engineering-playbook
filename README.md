@@ -986,6 +986,9 @@ pull requests: no direct push, no force push, no deletion, and the `tests`
 workflow must pass on the branch brought up to date. A pull request from
 anyone but the owner needs the owner's approval (`.github/CODEOWNERS`); the
 owner's own pull requests merge without one, but still as pull requests.
+Only the owner creates, pushes to or merges into any branch, whatever access
+anyone else is given (Dependabot's own branches excepted, so it can open its
+pull requests), and auto-merge is off: every merge is the owner's.
 `main` accepts pull requests from `develop` only. A merge into `main` tags
 `v<version>` from the plugin manifests and publishes a GitHub release, so the
 version bump belongs in the `develop` → `main` pull request; release tags
