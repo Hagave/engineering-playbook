@@ -368,8 +368,10 @@ turn on Known-failure warnings there if you want the reminders.
 | Known-failure warnings | Warn before touching something that failed before | off |
 | Context budget | Token count after which the session wraps up and hands off | off |
 | CLAUDE.md budget | Size the project `CLAUDE.md` may grow to before a turn is blocked | 40,000 characters |
+| Language | Language of the menu's own text: `auto` (system locale), `en`, `pt-br`, `es` | `auto` |
 | Status | The session's configuration and the output filter's savings | |
 | Learn | Mine this project's failures into rules | |
+| red-lab-playbook | Attack your own app in an isolated local copy: set up, passive scan, active scan, SQL injection scan, remove the scanner images | |
 
 `/playbook-off` suspends every gate and rule for the session, including the
 safety blocks; `/playbook-on` brings them back.
@@ -743,7 +745,7 @@ would have read, not against raw output Claude Code had already cut.
 
 ### User preferences
 
-Four behaviours are user-tunable. The plugin ships the defaults; each user's
+Five behaviours are user-tunable. The plugin ships the defaults; each user's
 choices are written to `~/.claude/hooks/.playbook-prefs.json` by
 `scripts/playbook_config.py` — nothing is hardcoded to one machine, and nothing
 personal travels with the plugin.
@@ -754,6 +756,7 @@ personal travels with the plugin.
 | Known-failure warnings | `watch` | `off` | Claude Code | Known-failure warnings before risky actions. |
 | Context budget | `context_budget` | `off` | Claude Code | Context size past which the session is told to wrap up, hand off and `/clear`. |
 | CLAUDE.md budget | `claude_md_budget` | `40000` | Claude Code | Characters the project `CLAUDE.md` may grow to before the turn end is blocked. |
+| Language | `language` | `auto` | Claude Code | Language of the numbered menu's own text; `auto` follows the system locale. Elsewhere the model writes the menu in the language the user writes in. |
 
 In Claude Code the menu is numbered, above the prompt: type a number and Enter.
 In Codex and Antigravity the `playbook-config` skill presents it (`/playbook-config`

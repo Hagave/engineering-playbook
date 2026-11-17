@@ -22,8 +22,9 @@ accepted and silently ignored. `session` prints the policy text a harness
 without a SessionStart hook (Antigravity) is told to read at session start.
 
 `show --json` is what the Claude Code settings panel (hooks/config_panel.tsx)
-draws from: each setting with its label, value and the choices it offers, so
-the panel holds no list of keys or values of its own.
+draws from: each setting with its label, value and the choices it offers, and
+the panel's own strings (`ui`), all in the language the `language` setting
+resolves to, so the panel holds no list of keys, values or text of its own.
 """
 
 import json
@@ -32,6 +33,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'hooks'))
 import playbook_core  # noqa: E402
+import playbook_i18n  # noqa: E402
 
 STATE_DIR = os.path.expanduser('~/.claude/hooks')
 
@@ -45,8 +47,10 @@ HARNESSES = ('claude', 'codex', 'antigravity')
 # - claude_md_budget: judged by the Stop hook from the sizes PreToolUse records
 #   on writes to CLAUDE.md; only Claude Code reads CLAUDE.md as its memory.
 # - context_budget: needs the token counts only Claude Code's transcript has.
+# - language: only Claude Code's settings panel draws fixed text; elsewhere the
+#   model writes the menu itself, in the language the user writes in.
 HARNESS_SETTINGS = {
-    'claude': ('prose', 'watch', 'claude_md_budget', 'context_budget'),
+    'claude': ('prose', 'watch', 'claude_md_budget', 'context_budget', 'language'),
     'codex': ('prose',),
     'antigravity': ('prose',),
 }
@@ -56,64 +60,46 @@ DESCRIPTIONS = {
     'watch': 'known-failure warnings before risky actions (on | off)',
     'claude_md_budget': 'characters the project CLAUDE.md may grow to (0 = off)',
     'context_budget': 'context tokens past which to wrap up and /clear (0 = off)',
+    'language': 'language of the settings menu (auto | en | pt-br | es)',
 }
 
 
-def effect_note(key: str, value: object) -> str:
-    """When a just-set preference takes effect, and what the user will notice.
+def effect_note(key: str, value: object, language: str = 'en') -> str:
+    """When a just-set preference takes effect, and what the user will notice,
+    in `language`.
 
     Per key because each one is read at a different moment: prose only by the
     SessionStart hook, watch by PreToolUse (warnings) and SessionStart (the
     instruction to the model), the budgets by context_guard on every call. One
     generic line told the user a prose change was already in force; it was not."""
+    say = playbook_i18n.text
     if key == 'prose':
-        return ('Applies from the next session start or compaction: the level is read '
-                'once at session start, so this session keeps the level it started with.')
+        return say(language, 'effect_prose')
     if key == 'watch':
-        state = 'start' if value else 'stop'
-        return (f'Warnings {state} now, at the next write or command that matches a recorded '
-                'failure; the instruction telling the model how to read them changes at the '
-                'next session start.')
-    if key == 'claude_md_budget':
+        return say(language, 'effect_watch_on' if value else 'effect_watch_off')
+    if key in ('claude_md_budget', 'context_budget'):
         if not value:
-            return 'In force now: the CLAUDE.md size check is off.'
-        return (f'In force now: a turn that grows the project CLAUDE.md past {value:,} '
-                'characters is blocked when it ends.')
-    if key == 'context_budget':
-        if not value:
-            return 'In force now: the context budget is off.'
-        return (f'In force now: past {value:,} context tokens the model is told, once per '
-                'multiple, to finish the step and hand off.')
-    return 'In force now.'
+            return say(language, f'effect_{key}_off')
+        return say(language, f'effect_{key}', value=playbook_i18n.number(value, language))
+    if key == 'language':
+        shown = playbook_i18n.LANGUAGE_LABELS.get(str(value), str(value))
+        return say(language, 'effect_language', value=shown)
+    return say(language, 'effect_generic')
 
-
-# What each setting does, in the words the settings panel shows under its name.
-HELP = {
-    'prose': 'How much explanation a response carries. Applies from the next session.',
-    'watch': ('Before a write or command that touches something that already failed in '
-              'this project, show the recorded failure. Warns, never blocks.'),
-    'claude_md_budget': ('Blocks the end of a turn that grew the project CLAUDE.md past this '
-                         'size: the file is re-sent to every session and every subagent.'),
-    'context_budget': ('Past this much context, the model is told once to finish the step, '
-                       'write the handoff and ask for /clear. Never blocks.'),
-}
-
-LABELS = {
-    'prose': 'Prose level',
-    'watch': 'Known-failure warnings',
-    'claude_md_budget': 'CLAUDE.md budget (characters)',
-    'context_budget': 'Context budget (tokens)',
-}
 
 # The values the panel offers as buttons. `set` accepts any valid value; these
-# are the common ones. Each is (value passed to `set`, label shown).
+# are the common ones. Each is (value passed to `set`, label shown). A label
+# that is a key of playbook_i18n.STRINGS ('on', 'off') is shown translated.
 CHOICES: dict[str, list[tuple[str, str]]] = {
     'prose': [(level, level) for level in playbook_core.PROSE_LEVELS],
     'watch': [('on', 'on'), ('off', 'off')],
     'claude_md_budget': [('0', 'off'), ('20000', '20k'), ('40000', '40k'), ('80000', '80k')],
     'context_budget': [('0', 'off'), ('250000', '250k'), ('400000', '400k'),
                        ('550000', '550k'), ('800000', '800k')],
+    'language': list(playbook_i18n.LANGUAGE_LABELS.items()),
 }
+
+_TRANSLATED_CHOICES = ('on', 'off')
 
 
 def _as_choice(value: object) -> str:
@@ -123,22 +109,33 @@ def _as_choice(value: object) -> str:
     return str(value)
 
 
-def snapshot(prefs: dict, harness: str = 'claude') -> dict:
-    """Every setting `harness` acts on, as the panel draws it: label,
-    description, current and default value, and the choices, in the order
-    DESCRIPTIONS lists them."""
-    return {'settings': [
-        {
-            'key': key,
-            'label': LABELS[key],
-            'description': description,
-            'help': HELP[key],
-            'value': _as_choice(prefs[key]),
-            'default': _as_choice(playbook_core.PREFS_DEFAULTS[key]),
-            'choices': [{'value': value, 'label': label} for value, label in CHOICES[key]],
-        }
-        for key, description in DESCRIPTIONS.items() if key in HARNESS_SETTINGS[harness]
-    ]}
+def _choice_label(label: str, language: str) -> str:
+    return playbook_i18n.text(language, label) if label in _TRANSLATED_CHOICES else label
+
+
+def snapshot(prefs: dict, harness: str = 'claude', environ: dict | None = None) -> dict:
+    """Every setting `harness` acts on, as the panel draws it, plus the panel's
+    own strings: everything in the language `prefs['language']` resolves to.
+    Settings come in the order DESCRIPTIONS lists them."""
+    language = playbook_i18n.resolve(prefs['language'], environ)
+    return {
+        'language': language,
+        'language_name': playbook_i18n.LANGUAGE_NAMES[language],
+        'ui': playbook_i18n.ui(language),
+        'settings': [
+            {
+                'key': key,
+                'label': playbook_i18n.text(language, f'label_{key}'),
+                'description': description,
+                'help': playbook_i18n.text(language, f'help_{key}'),
+                'value': _as_choice(prefs[key]),
+                'default': _as_choice(playbook_core.PREFS_DEFAULTS[key]),
+                'choices': [{'value': value, 'label': _choice_label(label, language)}
+                            for value, label in CHOICES[key]],
+            }
+            for key, description in DESCRIPTIONS.items() if key in HARNESS_SETTINGS[harness]
+        ],
+    }
 
 
 def _render(prefs: dict, harness: str = 'claude') -> str:
@@ -220,7 +217,7 @@ def main(argv: list[str]) -> int:
         value = prefs[key]
         shown = ('on' if value else 'off') if isinstance(value, bool) else value
         print(f'[playbook:config] {key} = {shown}')
-        print(effect_note(key, value))
+        print(effect_note(key, value, playbook_i18n.resolve(prefs['language'])))
         return 0
 
     print(f'unknown action {action!r} — use show, get, set or session', file=sys.stderr)
