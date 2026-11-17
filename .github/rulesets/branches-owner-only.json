@@ -1,0 +1,15 @@
+{
+  "name": "every branch: only the owner creates, pushes or merges",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": { "include": ["~ALL"], "exclude": ["refs/heads/dependabot/**"] }
+  },
+  "bypass_actors": [
+    { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
+  ],
+  "rules": [
+    { "type": "creation" },
+    { "type": "update" }
+  ]
+}
