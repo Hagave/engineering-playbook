@@ -51,6 +51,11 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 | **Codex CLI** | Experimental | [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) | `install.sh --codex`, `scripts/install-codex.sh` or `codex plugin add` ([Quick install](#quick-install)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `SubagentStop`, `PreCompact`, `PostCompact` |
 | **Google Antigravity** | Experimental | [`adapters/antigravity/`](adapters/antigravity/) | `install.sh --antigravity <project>` or `adapters/antigravity/install.sh <project>` ([Quick install](#quick-install)) | Optional git-hook enforcement (`--git-hooks`) |
 
+**Official plugin stores: soon.** The playbook is not listed yet in Claude
+Code's plugin directory, Codex's plugin registry or any Antigravity catalog;
+the listings are in progress. Until then every install path below gets it
+from this repository, which serves as its own plugin marketplace.
+
 **Claude Code is the target harness.** Every gate, the settings menu and the
 learn loop are designed and verified there first. The Codex CLI and Google
 Antigravity adapters are **experimental**: they reuse the same skills (and
@@ -497,8 +502,9 @@ from the repo, so all lifecycle events stay wired (`SessionStart`,
 script also verifies the installed `hooks.json` and refuses to proceed if any
 event is missing.
 
-**Official (`codex plugin add`)** — Codex's plugin registry is the
-production install path:
+**Plugin marketplace (`codex plugin add`)** — Codex's plugin commands,
+pointed at a clone of this repository as a local marketplace. A listing in
+Codex's official plugin registry is coming soon; it is not there yet.
 
 ```bash
 # 1. Register the marketplace (single SOURCE argument; the marketplace name
