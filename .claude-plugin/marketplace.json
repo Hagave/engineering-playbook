@@ -1,0 +1,12 @@
+{
+  "name": "engineering-playbook",
+  "owner": { "name": "Hagave", "url": "https://github.com/Hagave" },
+  "description": "The Engineering Playbook plugin for Claude Code, from its own repository.",
+  "plugins": [
+    {
+      "name": "engineering-playbook",
+      "source": "./",
+      "description": "Engineering governance for Claude Code: skills plus hooks that enforce them mechanically."
+    }
+  ]
+}
