@@ -179,6 +179,67 @@ class TestBuildLabConfig(_LabCase):
 _BRIDGE = 'com.docker.network.bridge.name'
 
 
+class TestSqlmap(_LabCase):
+
+    def sqlmap_target(self):
+        return lab.parse_target('app', 8080, '/', endpoint='/items?id=1')
+
+    def build_sqlmap(self):
+        return lab.build_lab_config(copy.deepcopy(BASE), self.sqlmap_target(), 'redlab-shop',
+                                    self.report_dir, 2, tool='sqlmap')
+
+    def test_endpoint_with_a_query_is_accepted_and_built_into_the_url(self):
+        t = self.sqlmap_target()
+        self.assertEqual(t.query, 'id=1')
+        self.assertEqual(t.url, 'http://app:8080/items?id=1')
+
+    def test_an_endpoint_that_names_another_host_is_refused(self):
+        for bad in ('/items?next=http://evil', '//evil/items?id=1', '/items?x=1@evil',
+                    '/items?u=//evil'):
+            with self.subTest(endpoint=bad), self.assertRaises(lab.LabError):
+                lab.parse_target('app', 8080, '/', endpoint=bad)
+
+    def test_sqlmap_service_is_the_built_image_with_a_bounded_command(self):
+        config = self.build_sqlmap()
+        scanner = config['services'][lab.SCANNER]
+        self.assertEqual(scanner['image'], lab.SQLMAP_IMAGE)
+        self.assertEqual(scanner['command'][:2], ['sqlmap', '-u'])
+        self.assertIn('http://app:8080/items?id=1', scanner['command'])
+        self.assertIn('--batch', scanner['command'])
+        self.assertIn('--level', scanner['command'])
+
+    def test_the_sqlmap_scanner_is_as_isolated_as_the_zap_one(self):
+        config = self.build_sqlmap()
+        self.assertEqual(lab.validate_lab_config(config, 'app', self.report_dir, False,
+                                                 lab.SQLMAP_IMAGE), [])
+        scanner = config['services'][lab.SCANNER]
+        self.assertEqual(scanner['cap_drop'], ['ALL'])
+        self.assertEqual(set(scanner['networks']), {lab.NETWORK})
+        self.assertEqual(scanner['security_opt'], ['no-new-privileges:true'])
+
+    def test_a_tampered_sqlmap_image_is_refused(self):
+        config = self.build_sqlmap()
+        config['services'][lab.SCANNER]['image'] = 'sqlmap:evil'
+        problems = lab.validate_lab_config(config, 'app', self.report_dir, False, lab.SQLMAP_IMAGE)
+        self.assertTrue(any('pinned' in p for p in problems), problems)
+
+    def test_results_csv_lists_injectable_parameters(self):
+        with open(os.path.join(self.report_dir, lab.SQLMAP_RESULTS_FILE), 'w', newline='') as fh:
+            fh.write('Target URL,Place,Parameter,Technique(s),Note(s)\n')
+            fh.write('http://app:8080/items?id=1,GET,id,BEUST,\n')
+        found = lab.parse_sqlmap_results(self.report_dir)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]['parameter'], 'id')
+        text = lab.format_sqlmap_findings(found, self.sqlmap_target())
+        self.assertIn("SQL injection in GET parameter 'id'", text)
+        self.assertIn('CWE-89', text)
+
+    def test_no_results_file_means_not_injectable(self):
+        self.assertEqual(lab.parse_sqlmap_results(self.report_dir), [])
+        text = lab.format_sqlmap_findings([], self.sqlmap_target())
+        self.assertIn('not injectable', text)
+
+
 class TestValidation(_LabCase):
 
     def assertRefused(self, config, fragment):
@@ -210,7 +271,7 @@ class TestValidation(_LabCase):
         self.assertRefused(config, 'Docker socket')
         config = self.build()
         config['services'][lab.SCANNER]['image'] = 'ghcr.io/zaproxy/zaproxy:stable'
-        self.assertRefused(config, 'pinned digest')
+        self.assertRefused(config, 'pinned')
 
     def test_third_service_on_the_lab_network(self):
         config = self.build()
@@ -430,7 +491,9 @@ class TestEnvironment(unittest.TestCase):
         args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
                                       startup_seconds=0, project_dir='.', compose_file=None,
                                       allow_bind_mounts=False, active=False,
-                                      active_minutes=lab.ACTIVE_SCAN_MINUTES)
+                                      active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
+                                      endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
+                                      time_sec=lab.SQLMAP_TIME_SEC)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
