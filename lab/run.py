@@ -221,8 +221,9 @@ def image_present(image: str = ZAP_IMAGE) -> bool:
 
 def build_sqlmap_image() -> None:
     """Build the SQLi scanner locally from the pinned Dockerfile (online: pip
-    fetches sqlmap). Context is the Dockerfile's own directory, sent empty via
-    stdin so nothing else is copied in."""
+    fetches sqlmap). The build context is the Dockerfile's own directory
+    (lab/), but nothing from it reaches the image: the Dockerfile has no COPY or
+    ADD, only the digest-pinned base and the pip install."""
     print(f'Building the SQLi scanner from source (sqlmap {SQLMAP_VERSION}, pinned):\n'
           f'  {SQLMAP_IMAGE}', flush=True)
     built = _run(['docker', 'build', '-f', SQLMAP_DOCKERFILE,
