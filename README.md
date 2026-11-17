@@ -36,6 +36,7 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 | Context loss | Non-negotiable rules anchored in every skill via identical prefix blocks — KV cache hits across sessions |
 | Context overflow | At 70% the model finishes the task and writes a handoff; at 85% every tool call is denied. Either way the exit is `/clear` + "resume", never `/compact` |
 | Destructive operations | Hook intercepts `rm -r*`, `git push --force`, `git reset --hard`, `DROP TABLE`, and similar — requires explicit user confirmation |
+| Vulnerable code | 13 vulnerability fiches, a security review whose every candidate is confirmed, ruled out or left as a named proof gap, and a local lab that scans your own running app |
 | Leaked secrets | Hook scans what a write adds, what a commit records and what a push publishes with gitleaks' rules — tokens with a known shape are denied |
 | Repeated errors | `engineering-learn` mines real session logs and writes specific corrections back into the project |
 | Token waste | Skills loaded on demand — only what the current task requires |
@@ -139,7 +140,8 @@ as usual: the playbook loads the right rules and the hooks enforce them. The
 | Start a new project | Ask for it ("create a Go API for orders") and answer the stack checklist |
 | Clean up an existing codebase | Ask to refactor it, or report the bug |
 | Review a change | Ask for a review; one also runs before every `git push` |
-| Check the security of your code | Ask for a security review; scan the running app with the lab |
+| Check the security of your code | Ask for a security review; scan the running app with the lab ([Security](#security-red-playbook)) |
+| Run the security tests | [Running the red-playbook tests](#running-the-red-playbook-tests) |
 | Change how the playbook behaves | `/playbook-config` |
 | Work without the rules for a while | `/playbook-off`, then `/playbook-on` |
 | Recover from a full context | `/clear`, then "resume where we left off" |
@@ -249,10 +251,10 @@ false positive, add the fingerprint from the denial to
 team allows attribution, set `PLAYBOOK_ALLOW_AI_ATTRIBUTION=1` in your own
 environment.
 
-### Red-playbook: the security layer
+### Security (red-playbook)
 
-**What it is.** The playbook's security work, called red-playbook while it
-was built. The playbook ships defense. The proof that a defense holds is an
+**What it is.** The playbook's cybersecurity layer, called red-playbook while
+it was built. The playbook ships defense. The proof that a defense holds is an
 attack, and it is run against two local targets only: the playbook itself,
 and your application running on your machine. Nothing published (production,
 staging, any host you do not run in the lab) is ever a target, and there is
@@ -300,6 +302,22 @@ no override for that.
    it is fixed. Exit codes: `0` clean, `1` findings, `2` refused (isolation or
    environment, with the reason), `3` Docker or scanner error.
 4. Optional: install `semgrep` and the next sessions use it.
+
+#### Running the red-playbook tests
+
+These prove the defenses above. Run them from a clone of this repository, at
+its root; `python3 tests/run_all.py` runs all of them except the two opt-in
+rows at the end.
+
+| What it proves | Command | Needs |
+| --- | --- | --- |
+| The gates cannot be talked past: a corpus of evasion attempts (respelled commands, `eval`, `sh -c`, `find -exec`, interpreter one-liners, heredocs, script files) against the destructive-command, code-write, AI-attribution and scanner-outside-the-lab checks, plus the gaps left open on purpose | `python3 -m unittest tests.unit.test_gate_evasion -v` | Python 3.10+ |
+| The secret scanner loads and compiles gitleaks' rules, denies distinctive tokens and only warns on keyword-shaped ones, honors the allow file, redacts what it shows, and blocks a write, a commit or a push that carries a secret | `python3 -m unittest tests.unit.test_secret_scan tests.e2e.test_secret_gate -v` | Python 3.10+, git |
+| Static analysis is offered with the exact command when `semgrep`/`opengrep` is installed, and its scan counts as validation | `python3 -m unittest tests.unit.test_sast -v` | Python 3.10+ |
+| The lab refuses every unsafe compose configuration (host network, privileged, devices, host namespaces, bind mounts, external networks...) and cleans up after itself | `python3 -m unittest tests.unit.test_lab -v` | Python 3.10+ (no Docker) |
+| Every vulnerability fiche has its sections (invariant, sinks, control, negative proof, dynamic proof, review signal) | `python3 -m unittest tests.structural.test_security_fiches -v` | Python 3.10+ |
+| **Opt-in:** a real lab run against a throwaway app scans it and leaves no container, network or volume behind | `python3 lab/run.py --setup`, then `PLAYBOOK_LAB_IT=1 python3 -m unittest tests.e2e.test_lab_integration -v` | Docker with Compose 2.20+, the ZAP image (about 1.2 GB), a few minutes |
+| **Opt-in:** a review of 13 intentionally vulnerable diffs (one per fiche) names the findings each one expects | `bash tests/behavioral/run_behavioral.sh 06` (one fixture; `06` to `18`), or `bash tests/behavioral/run_behavioral.sh` for every prompt | the `claude` CLI, an API key, the plugin at `~/.engineering-playbook`; spends tokens, and results are probabilistic (a miss in most of 10 runs is a regression) |
 
 ### Context limits and handoff
 
