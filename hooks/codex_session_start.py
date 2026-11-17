@@ -138,11 +138,13 @@ def main() -> None:
 
     try:
         body = '\n\n---\n\n'.join(_curated_skill(name) for name in _KEEP_SECTIONS)
-        preamble = f'{body}\n\n{codex_notes}\n\n{_prose_policy()}'
+        preamble = (f'{body}\n\n{codex_notes}\n\n'
+                    f'{playbook_core.USER_LANGUAGE_POLICY}\n\n{_prose_policy()}')
     except Exception:
         preamble = '\n'.join([
             'ENGINEERING PLAYBOOK ACTIVE (Codex adapter).',
             'engineering-playbook or engineering-governance SKILL.md could not be read — governance rules are unavailable this session. Read skills/engineering-playbook/SKILL.md and skills/engineering-governance/SKILL.md directly before implementing.',
+            playbook_core.USER_LANGUAGE_POLICY,
         ])
 
     sys.stdout.write(json.dumps({
