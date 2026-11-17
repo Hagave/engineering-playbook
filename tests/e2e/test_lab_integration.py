@@ -54,7 +54,7 @@ class TestLabRun(unittest.TestCase):
         return subprocess.run(
             [sys.executable, _RUN, '--project-dir', self.project, '--service', 'app',
              '--port', '8000', '--minutes', '1', '--startup-seconds', '3', *extra],
-            capture_output=True, text=True, timeout=900)
+            capture_output=True, text=True, timeout=1200)
 
     def _leftovers(self) -> list[str]:
         label = f'label=com.docker.compose.project={self.lab_project}'
@@ -66,6 +66,12 @@ class TestLabRun(unittest.TestCase):
         result = self._run()
         self.assertIn(result.returncode, (0, 1), result.stderr)
         self.assertIn('Lab scan of http://app:8000/', result.stdout)
+        self.assertEqual(self._leftovers(), [])
+
+    def test_active_scan_runs_the_full_scan_and_leaves_nothing_behind(self):
+        result = self._run('--active', '--active-minutes', '2')
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        self.assertIn('OWASP ZAP full scan, active', result.stdout)
         self.assertEqual(self._leftovers(), [])
 
     def test_bind_mount_is_refused_before_anything_starts(self):

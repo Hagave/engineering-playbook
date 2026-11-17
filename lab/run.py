@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
 Local validation lab: scan the project's own application, running on this
-machine, with OWASP ZAP baseline (passive) — and nothing else.
+machine, with OWASP ZAP — passive by default, active (attack payloads) with
+--active — against an isolated copy of its stack, and nothing else.
 
-    python3 lab/run.py --setup                       # check Docker, download the scanner image
-    python3 lab/run.py --service app --port 8080     # scan the `app` service of ./docker-compose
-    python3 lab/run.py --uninstall                   # remove the scanner image
+    python3 lab/run.py --setup                        # check Docker, download the scanner image
+    python3 lab/run.py --service app --port 8080      # passive scan of the `app` service
+    python3 lab/run.py --service app --port 8080 --active   # active scan (sends payloads)
+    python3 lab/run.py --uninstall                    # remove the scanner image
+
+Both modes run only against the isolated target on the internal network; the
+isolation below is identical for each. Active only sends payloads to that
+target, a throwaway copy, and never reaches anything outside the lab.
 
 How the scope is enforced, outermost first:
 
@@ -65,6 +71,12 @@ MIN_FREE_BYTES = 5 * 1024 ** 3
 SCAN_OVERHEAD_MINUTES = 5
 # Beyond ZAP's own bounds: `compose run` start-up and writing the report.
 SCANNER_MARGIN_SECONDS = 120
+# Active scan (zap-full-scan) sends payloads and runs to completion on its own
+# clock -- neither -m nor -T bounds it -- so the lab caps it with ZAP config:
+# the whole active scan, and any single rule, stop at these minute budgets.
+# The outer timeout covers this budget on top of the spider and the waits.
+ACTIVE_SCAN_MINUTES = 10
+ACTIVE_RULE_MINUTES = 2
 
 # Capabilities a project service may add in the lab: Docker's default set
 # (adding one is a no-op) and the few that act only inside the container.
@@ -254,14 +266,32 @@ def bind_mounts(config: dict) -> list[str]:
     return found
 
 
+def scanner_command(url: str, minutes: int, active: bool, active_minutes: int) -> list[str]:
+    """ZAP's command line. Passive (`zap-baseline.py`) crawls and reads; active
+    (`zap-full-scan.py`) also sends attack payloads to the target. Both run only
+    against the isolated target on the internal network: active changes the scan,
+    never the isolation. The active scan is capped by ZAP config, since -m/-T do
+    not bound it."""
+    common = ['-t', url, '-J', REPORT_FILE, '-I',
+              '-m', str(minutes), '-T', str(minutes + SCAN_OVERHEAD_MINUTES)]
+    if not active:
+        return ['zap-baseline.py', *common]
+    return ['zap-full-scan.py', *common,
+            '-z', f'-config scanner.maxScanDurationInMins={active_minutes} '
+                  f'-config scanner.maxRuleDurationInMins={ACTIVE_RULE_MINUTES}']
+
+
 def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
-                     minutes: int) -> dict:
+                     minutes: int, active: bool = False,
+                     active_minutes: int = ACTIVE_SCAN_MINUTES) -> dict:
     """The project's resolved compose configuration, turned into the lab.
 
     Ports, fixed names, subnets, addresses and image tags of built services
     are dropped so that nothing collides with, or reuses, the developer's own
     stack; every network becomes internal, so no service reaches past the lab;
-    the target joins the scanner's network; the scanner is added on it alone."""
+    the target joins the scanner's network; the scanner is added on it alone.
+    `active` only swaps the scan for an active one against that same isolated
+    target; it does not loosen any of the above."""
     config = json.loads(json.dumps(base))  # deep copy of plain JSON data
     config['name'] = project
     for item in (config.get('volumes') or {}).values():
@@ -314,23 +344,23 @@ def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
         'security_opt': ['no-new-privileges:true'],
         'volumes': [{'type': 'bind', 'source': report_dir, 'target': REPORT_MOUNT}],
         # -m bounds the spider; -T bounds ZAP's start-up and, separately, the
-        # passive scan of everything the spider found, so a target with a huge
-        # or endless page set cannot keep the scanner running. The outer
-        # timeout (scanner_timeout_seconds) covers all three.
-        'command': ['zap-baseline.py', '-t', target.url, '-J', REPORT_FILE, '-I',
-                    '-m', str(minutes), '-T', str(minutes + SCAN_OVERHEAD_MINUTES)],
+        # passive scan; an active scan is capped by ZAP config in scanner_command.
+        # The outer timeout (scanner_timeout_seconds) covers every phase.
+        'command': scanner_command(target.url, minutes, active, active_minutes),
         'profiles': [NETWORK],
     }
     return config
 
 
-def scanner_timeout_seconds(minutes: int) -> int:
+def scanner_timeout_seconds(minutes: int, active: bool = False,
+                            active_minutes: int = ACTIVE_SCAN_MINUTES) -> int:
     """How long `compose run` of the scanner may take: ZAP's start-up wait and
-    its passive-scan wait (each bounded by -T on its own) plus the spider (-m).
-    A shorter limit killed a scan ZAP was still allowed to finish, and its
-    report was lost."""
+    its passive-scan wait (each bounded by -T on its own), the spider (-m), and
+    for an active scan its capped duration on top. A shorter limit killed a scan
+    ZAP was still allowed to finish, and its report was lost."""
     zap_limit = minutes + SCAN_OVERHEAD_MINUTES
-    return (2 * zap_limit + minutes) * 60 + SCANNER_MARGIN_SECONDS
+    total = 2 * zap_limit + minutes + (active_minutes if active else 0)
+    return total * 60 + SCANNER_MARGIN_SECONDS
 
 
 def _host_reach(name: str, service: dict) -> list[str]:
@@ -468,9 +498,10 @@ def parse_report(report: dict) -> list[dict]:
     return sorted(alerts, key=lambda a: (-a['risk'], a['name']))
 
 
-def format_findings(alerts: list[dict], target: Target) -> str:
+def format_findings(alerts: list[dict], target: Target, active: bool = False) -> str:
     serious = [a for a in alerts if a['risk'] >= 2]
-    lines = [f'Lab scan of {target.url} (OWASP ZAP baseline, passive):']
+    mode = 'OWASP ZAP full scan, active' if active else 'OWASP ZAP baseline, passive'
+    lines = [f'Lab scan of {target.url} ({mode}):']
     if not alerts:
         return '\n'.join(lines + ['  no alerts.'])
     for alert in alerts:
@@ -517,6 +548,8 @@ def scan(args: argparse.Namespace) -> int:
     target = parse_target(args.service, args.port, args.path)
     if args.minutes < 1 or args.startup_seconds < 0:
         raise LabError('--minutes must be 1 or more and --startup-seconds 0 or more.')
+    if args.active_minutes < 1:
+        raise LabError('--active-minutes must be 1 or more.')
     check_docker()
     if not image_present():
         raise LabError('The scanner image is not installed. Run `lab/run.py --setup` first '
@@ -533,7 +566,8 @@ def scan(args: argparse.Namespace) -> int:
     config_file = os.path.join(workdir, 'compose.json')
     started = interrupted = False
     try:
-        config = build_lab_config(base, target, project, report_dir, args.minutes)
+        config = build_lab_config(base, target, project, report_dir, args.minutes,
+                                  active=args.active, active_minutes=args.active_minutes)
         problems = validate_lab_config(config, target.service, report_dir,
                                        args.allow_bind_mounts)
         with open(config_file, 'w', encoding='utf-8') as fh:
@@ -560,16 +594,18 @@ def scan(args: argparse.Namespace) -> int:
                            EXIT_ERROR)
         if args.startup_seconds:
             time.sleep(args.startup_seconds)
-        print(f'Scanning {target.url} for up to {args.minutes} minute(s)...', flush=True)
+        kind = 'active scan' if args.active else 'passive scan'
+        print(f'Running a {kind} of {target.url}...', flush=True)
         _compose(project, config_file, '--profile', NETWORK, 'run', '--rm', '--no-deps',
-                 SCANNER, timeout=scanner_timeout_seconds(args.minutes))
+                 SCANNER, timeout=scanner_timeout_seconds(args.minutes, args.active,
+                                                          args.active_minutes))
         report_path = os.path.join(report_dir, REPORT_FILE)
         if not os.path.exists(report_path):
             raise LabError('The scanner produced no report (the target may not have '
                            'answered on that port and path).', EXIT_ERROR)
         with open(report_path, encoding='utf-8') as fh:
             alerts = parse_report(json.load(fh))
-        print(format_findings(alerts, target))
+        print(format_findings(alerts, target, args.active))
         return EXIT_FINDINGS if any(a['risk'] >= 2 for a in alerts) else EXIT_CLEAN
     except KeyboardInterrupt:
         interrupted = True
@@ -620,8 +656,9 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGHUP, _terminate)
     parser = argparse.ArgumentParser(
         description='Scan your own application, running locally in an isolated copy of its '
-                    'compose stack, with OWASP ZAP baseline. Nothing outside the lab can be '
-                    'targeted, and nothing is kept after the run.')
+                    'compose stack, with OWASP ZAP (passive by default, --active for attack '
+                    'payloads). Nothing outside the lab can be targeted, and nothing is kept '
+                    'after the run.')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--setup', action='store_true',
                       help='check Docker and download the pinned scanner image')
@@ -637,6 +674,11 @@ def main(argv: list[str] | None = None) -> int:
                         help='extra wait after the service reports started (default: 5)')
     parser.add_argument('--allow-bind-mounts', action='store_true',
                         help='scan even though the project mounts folders of this computer')
+    parser.add_argument('--active', action='store_true',
+                        help='send attack payloads (ZAP full scan), not only a passive read; '
+                             'slower, and still only against the isolated target')
+    parser.add_argument('--active-minutes', type=int, default=ACTIVE_SCAN_MINUTES,
+                        help=f'cap on the active scan (default: {ACTIVE_SCAN_MINUTES})')
     args = parser.parse_args(argv)
     try:
         if args.setup:

@@ -103,6 +103,29 @@ class TestBuildLabConfig(_LabCase):
         command = self.build()['services'][lab.SCANNER]['command']
         self.assertEqual(command[:3], ['zap-baseline.py', '-t', 'http://app:8080/'])
 
+    def test_active_mode_runs_the_full_scan_with_a_capped_active_scan(self):
+        config = lab.build_lab_config(copy.deepcopy(BASE), self.target, 'redlab-shop',
+                                      self.report_dir, 2, active=True, active_minutes=7)
+        command = config['services'][lab.SCANNER]['command']
+        self.assertEqual(command[0], 'zap-full-scan.py')
+        self.assertIn('http://app:8080/', command)
+        z = command[command.index('-z') + 1]
+        self.assertIn('scanner.maxScanDurationInMins=7', z)
+        self.assertIn(f'scanner.maxRuleDurationInMins={lab.ACTIVE_RULE_MINUTES}', z)
+        # Active changes the scan, never the isolation.
+        self.assertEqual(self.problems(config), [])
+        self.assertEqual(config['services'][lab.SCANNER]['cap_drop'], ['ALL'])
+        self.assertEqual(set(config['services'][lab.SCANNER]['networks']), {lab.NETWORK})
+
+    def test_passive_is_the_default(self):
+        self.assertEqual(self.build()['services'][lab.SCANNER]['command'][0], 'zap-baseline.py')
+
+    def test_the_active_timeout_covers_the_capped_active_scan_on_top(self):
+        passive = lab.scanner_timeout_seconds(2)
+        active = lab.scanner_timeout_seconds(2, active=True, active_minutes=10)
+        self.assertEqual(active - passive, 10 * 60)
+        self.assertGreater(active, (2 * (2 + lab.SCAN_OVERHEAD_MINUTES) + 2 + 10) * 60)
+
     def test_unknown_service_is_refused(self):
         target = lab.parse_target('api', 80, '/')
         with self.assertRaises(lab.LabError):
@@ -356,6 +379,11 @@ class TestReport(unittest.TestCase):
         text = lab.format_findings([], lab.parse_target('app', 8080, '/'))
         self.assertIn('no alerts', text)
 
+    def test_the_header_names_the_mode(self):
+        target = lab.parse_target('app', 8080, '/')
+        self.assertIn('passive', lab.format_findings([], target))
+        self.assertIn('active', lab.format_findings([], target, active=True))
+
 
 class TestEnvironment(unittest.TestCase):
 
@@ -401,7 +429,8 @@ class TestEnvironment(unittest.TestCase):
 
         args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
                                       startup_seconds=0, project_dir='.', compose_file=None,
-                                      allow_bind_mounts=False)
+                                      allow_bind_mounts=False, active=False,
+                                      active_minutes=lab.ACTIVE_SCAN_MINUTES)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
