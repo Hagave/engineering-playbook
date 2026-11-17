@@ -1521,6 +1521,59 @@ def sast_notice(cwd: str) -> str:
     )
 
 
+# Marker files that identify a project's implementation language. Only the
+# languages the playbook has an opt-in for are listed, because the notice points
+# the model at engineering-<lang>. Order matters for a shared build tool: a
+# Kotlin Gradle project (.kts) is checked before a Java one (build.gradle).
+_LANGUAGE_MARKERS = (
+    ('typescript', ('tsconfig.json',)),
+    ('rust', ('Cargo.toml',)),
+    ('go', ('go.mod',)),
+    ('csharp', ('*.csproj', '*.fsproj', '*.sln')),
+    ('kotlin', ('build.gradle.kts', 'settings.gradle.kts')),
+    ('java', ('pom.xml', 'build.gradle', 'settings.gradle')),
+    ('ruby', ('Gemfile', '*.gemspec')),
+)
+
+
+def detect_languages(cwd: str) -> list[tuple[str, str]]:
+    """(language, the marker that proved it) for every playbook language whose
+    marker file sits in the project root. Shallow by design: a marker deeper in
+    the tree is usually a vendored or example sub-project, not the stack. A
+    repository with no known marker returns []."""
+    root = cwd or os.getcwd()
+    found: list[tuple[str, str]] = []
+    for lang, markers in _LANGUAGE_MARKERS:
+        for marker in markers:
+            if '*' in marker:
+                hit = next((os.path.basename(p)
+                            for p in sorted(glob.glob(os.path.join(root, marker)))), '')
+            else:
+                hit = marker if os.path.exists(os.path.join(root, marker)) else ''
+            if hit:
+                found.append((lang, hit))
+                break
+    return found
+
+
+def language_notice(cwd: str) -> str:
+    """Session context naming the implementation language found in the project
+    root and the engineering-<lang> opt-in to load, '' when none is found. A
+    hint for the routing table, not an override: the model still confirms the
+    language, and a project without a marker stays silent."""
+    found = detect_languages(cwd)
+    if not found:
+        return ''
+    if len(found) == 1:
+        lang, marker = found[0]
+        return (f'[playbook:language] Detected {lang} ({marker}). Load the '
+                f'engineering-{lang} opt-in before writing or reviewing code.')
+    listed = ', '.join(f'{lang} ({marker})' for lang, marker in found)
+    opts = ', '.join(f'engineering-{lang}' for lang, _ in found)
+    return (f'[playbook:language] Multiple languages in the root: {listed}. Load '
+            f'the matching opt-in ({opts}) for the part you touch.')
+
+
 SUSPEND_SKILL = 'playbook-off'
 RESUME_SKILLS = ('playbook-on', 'engineering-playbook')
 
