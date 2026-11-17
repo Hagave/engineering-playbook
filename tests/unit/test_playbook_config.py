@@ -255,6 +255,12 @@ class TestHarness(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('Prose budget: LOW', out)
 
+    def test_the_numbered_menu_has_a_digit_for_every_claude_code_setting(self):
+        # hooks/config_panel.tsx MAX_SETTING_ROWS: digits 1-9 hold the settings
+        # plus Status, Learn, red-lab-playbook and Diff panel. A sixth setting
+        # would silently fall off the menu.
+        self.assertLessEqual(len(config.HARNESS_SETTINGS['claude']), 5)
+
     def test_every_setting_is_mapped_to_its_harnesses(self):
         for harness, keys in config.HARNESS_SETTINGS.items():
             with self.subTest(harness=harness):

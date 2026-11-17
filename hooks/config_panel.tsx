@@ -168,6 +168,22 @@ function settingLine(setting: ConfigSetting, ui: PanelText): string {
   return `${setting.label}: ${label}${marker}`
 }
 
+// The heading and the explanation under it, for the screen shown.
+function heading(current: MenuScreen, loaded: ConfigSnapshot): { title: string; help: string | undefined } {
+  const { ui } = loaded
+  if (current.kind === 'lab') {
+    return { title: ui.lab_title, help: ui.lab_help }
+  }
+  if (current.kind === 'setting') {
+    const shown = loaded.settings.find((one): boolean => one.key === current.key)
+    if (shown) {
+      return { title: shown.label, help: shown.help }
+    }
+  }
+
+  return { title: ui.title, help: undefined }
+}
+
 function noEntry(ui: PanelText, digit: string): string {
   return `${ui.title}: ${ui.no_entry.replace('{digit}', digit)}`
 }
@@ -348,10 +364,8 @@ export const register: Register = on => {
     const last = await read($, notice)
     const report = await read($, filterReport)
     const { ui } = loaded
-    const shown = current.kind === 'setting' ? loaded.settings.find((one): boolean => one.key === current.key) : undefined
     const isMain = current.kind === 'main'
-    const title = shown ? shown.label : current.kind === 'lab' ? ui.lab_title : ui.title
-    const help = shown ? shown.help : current.kind === 'lab' ? ui.lab_help : undefined
+    const { title, help } = heading(current, loaded)
 
     return (
       <Box flexDirection="column">
