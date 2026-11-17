@@ -14,7 +14,33 @@ const BAND = {
   },
 } as const
 
+const UI = {
+  title: 'Engineering Playbook settings',
+  hint_main: 'type a number and Enter, 0 exits',
+  hint_sub: 'type a number and Enter, 0 goes back',
+  opened: 'Playbook settings are above the prompt: type a number and Enter (0 exits).',
+  no_entry: 'no entry {digit} on this screen.',
+  current: 'current',
+  default: 'default',
+  status: 'Status',
+  learn: 'Learn',
+  lab: 'red-lab-playbook: attack your own app in an isolated local copy',
+  diff: 'Diff panel',
+  back: 'Back',
+  exit: 'Exit',
+  lab_title: 'red-lab-playbook',
+  lab_help: 'Security scanners run against your own app inside an isolated copy of its stack.',
+  lab_setup: 'Set up',
+  lab_passive: 'Passive scan',
+  lab_active: 'Active scan',
+  lab_sqlmap: 'SQL injection scan',
+  lab_uninstall: 'Remove the scanner images',
+}
+
 const SNAPSHOT = {
+  language: 'en',
+  language_name: 'English',
+  ui: UI,
   settings: [
     {
       key: 'prose',
@@ -250,4 +276,127 @@ test('output that only mentions a tag is not toasted as a block', async ($, on) 
 
   await $.tool.call({ tool: 'Bash', command: 'python3 tests/run_all.py' })
   expect(toasts).toEqual([])
+})
+
+// Two settings in SNAPSHOT: Status 3, Learn 4, red-lab-playbook 5, Diff panel 6.
+const LAB_DIGIT = '5'
+
+test('the main menu lists red-lab-playbook with what it is, and it opens its steps', async ($, on) => {
+  on('process.run', () => exited(0, JSON.stringify(SNAPSHOT)))
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+
+  const main = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await main.find({ type: 'Button', key: `entry-${LAB_DIGIT}` }))?.props.label).toBe(UI.lab)
+  expect((await main.find({ type: 'Button', key: 'entry-6' }))?.props.label).toBe('Diff panel')
+  await main.unmount()
+
+  const opened = await $.prompt.submit(sent(LAB_DIGIT))
+  expect(opened.drop).toBeTruthy()
+  const lab = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await lab.find({ type: 'Text', text: /red-lab-playbook/ }))?.text).toBeTruthy()
+  expect((await lab.find({ type: 'Text', text: /isolated copy/ }))?.text).toBe(UI.lab_help)
+  const labels: unknown[] = []
+  for (const digit of ['1', '2', '3', '4', '5', '0']) {
+    labels.push((await lab.find({ type: 'Button', key: `entry-${digit}` }))?.props.label)
+  }
+  expect(labels).toEqual([UI.lab_setup, UI.lab_passive, UI.lab_active, UI.lab_sqlmap, UI.lab_uninstall, 'Back'])
+  await lab.unmount()
+})
+
+test('every red-lab-playbook step closes the menu and hands that step to the model', async ($, on) => {
+  const toModel: string[] = []
+  on('process.run', () => exited(0, JSON.stringify(SNAPSHOT)))
+  on('prompt.submit', (_, e) => {
+    toModel.push(e.text)
+
+    return { text: e.text }
+  })
+  on('command.run', () => ({ text: 'the skill ran' }))
+
+  const steps = ['setup', 'passive', 'active', 'sqlmap', 'uninstall']
+  for (const [index, step] of steps.entries()) {
+    await $.command.run(typed('playbook-config'))
+    await $.prompt.submit(sent(LAB_DIGIT))
+    await $.prompt.submit(sent(String(index + 1)))
+    expect(toModel.at(-1)).toContain(`red-lab-playbook step "${step}"`)
+  }
+  expect(toModel.length).toBe(steps.length)
+
+  // The menu closed with the step: a digit after it is the person's, for the model.
+  await $.prompt.submit(sent('1'))
+  expect(toModel.at(-1)).toBe('1')
+})
+
+test('0 on the red-lab-playbook screen goes back to the main menu', async ($, on) => {
+  on('process.run', () => exited(0, JSON.stringify(SNAPSHOT)))
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent(LAB_DIGIT))
+  await $.prompt.submit(sent('0'))
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Button', key: 'entry-0' }))?.props.label).toBe('Exit')
+  await band.unmount()
+})
+
+const PT_UI = {
+  ...UI,
+  title: 'Configurações do Engineering Playbook',
+  hint_main: 'digite um número e Enter, 0 sai',
+  opened: 'As configurações do playbook estão acima do prompt: digite um número e Enter (0 sai).',
+  no_entry: 'não há opção {digit} nesta tela.',
+  default: 'padrão',
+  learn: 'Aprender',
+  exit: 'Sair',
+}
+const PT_SNAPSHOT = {
+  ...SNAPSHOT,
+  language: 'pt-br',
+  language_name: 'Brazilian Portuguese',
+  ui: PT_UI,
+  settings: SNAPSHOT.settings.map(setting =>
+    setting.key === 'prose' ? { ...setting, label: 'Nível de prosa' } : setting,
+  ),
+}
+
+test('the menu draws the strings of the language the script resolved', async ($, on) => {
+  on('process.run', (_, e) => exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(PT_SNAPSHOT)))
+  on('command.run', () => ({ text: 'the skill ran' }))
+
+  const ran = await $.command.run(typed('playbook-config'))
+  expect(ran.text).toBe(PT_UI.opened)
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /Configurações/ }))?.text).toBeTruthy()
+  expect((await band.find({ type: 'Button', key: 'entry-1' }))?.props.label).toBe('Nível de prosa: low (padrão mid)')
+  expect((await band.find({ type: 'Button', key: 'entry-0' }))?.props.label).toBe('Sair')
+  await band.unmount()
+
+  const missing = await $.prompt.submit(sent('9'))
+  expect(missing.drop).toBe('Configurações do Engineering Playbook: não há opção 9 nesta tela.')
+})
+
+test('a prompt the menu hands the model asks for the answer in the person language', async ($, on) => {
+  const toModel: string[] = []
+  on('process.run', () => exited(0, JSON.stringify(PT_SNAPSHOT)))
+  on('prompt.submit', (_, e) => {
+    toModel.push(e.text)
+
+    return { text: e.text }
+  })
+  on('command.run', () => ({ text: 'the skill ran' }))
+
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('4'))
+  expect(toModel.at(-1)).toContain('engineering-learn')
+  expect(toModel.at(-1)).toContain('Answer in Brazilian Portuguese.')
+})
+
+test('settings the script cannot read leave the request to the skill', async ($, on) => {
+  on('process.run', () => exited(1, '', 'python3: not found'))
+  on('command.run', () => ({ text: 'the skill ran' }))
+
+  const ran = await $.command.run(typed('playbook-config'))
+  expect(ran.text).toBe('the skill ran')
 })
