@@ -4,7 +4,7 @@
 > Built for Claude Code. Codex CLI and Google Antigravity adapters are experimental.
 
 [![License: MIT + Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-4.0.2-blueviolet.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-4.1.0-blueviolet.svg)](.claude-plugin/plugin.json)
 [![Harnesses](https://img.shields.io/badge/harnesses-Claude_Code%20%7C%20Codex%20CLI%20%7C%20Antigravity-2ea44f.svg)](#supported-harnesses)
 [![Skills](https://img.shields.io/badge/skills-40-orange.svg)](skills/)
 [![PRs target develop](https://img.shields.io/badge/PRs-target%20%60develop%60-blueviolet.svg)](#contributing)
@@ -50,6 +50,11 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 | **Claude Code** | Supported | [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) | `install.sh` or `claude plugin install` ([Quick install](#quick-install)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`, `SubagentStop` |
 | **Codex CLI** | Experimental | [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) | `install.sh --codex`, `scripts/install-codex.sh` or `codex plugin add` ([Quick install](#quick-install)) | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `SubagentStop`, `PreCompact`, `PostCompact` |
 | **Google Antigravity** | Experimental | [`adapters/antigravity/`](adapters/antigravity/) | `install.sh --antigravity <project>` or `adapters/antigravity/install.sh <project>` ([Quick install](#quick-install)) | Optional git-hook enforcement (`--git-hooks`) |
+
+**Official plugin stores: soon.** The playbook is not listed yet in Claude
+Code's plugin directory, Codex's plugin registry or any Antigravity catalog;
+the listings are in progress. Until then every install path below gets it
+from this repository, which serves as its own plugin marketplace.
 
 **Claude Code is the target harness.** Every gate, the settings menu and the
 learn loop are designed and verified there first. The Codex CLI and Google
@@ -368,8 +373,10 @@ turn on Known-failure warnings there if you want the reminders.
 | Known-failure warnings | Warn before touching something that failed before | off |
 | Context budget | Token count after which the session wraps up and hands off | off |
 | CLAUDE.md budget | Size the project `CLAUDE.md` may grow to before a turn is blocked | 40,000 characters |
+| Language | Language of the menu's own text: `auto` (system locale), `en`, `pt-br`, `es` | `auto` |
 | Status | The session's configuration and the output filter's savings | |
 | Learn | Mine this project's failures into rules | |
+| red-lab-playbook | Attack your own app in an isolated local copy: set up, passive scan, active scan, SQL injection scan, remove the scanner images | |
 
 `/playbook-off` suspends every gate and rule for the session, including the
 safety blocks; `/playbook-on` brings them back.
@@ -431,7 +438,7 @@ concurrent sessions in the same project never interfere; a subagent gets its
 own state (`session_id` + `agent_id`) and is gated at `SubagentStop`, so its
 writes never block the parent session's turn.
 
-**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.0.2`.
+**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.1.0`.
 
 **For a team:** commit the marketplace and the plugin to the project's
 `.claude/settings.json`; each teammate still accepts the folder's trust dialog
@@ -497,8 +504,9 @@ from the repo, so all lifecycle events stay wired (`SessionStart`,
 script also verifies the installed `hooks.json` and refuses to proceed if any
 event is missing.
 
-**Official (`codex plugin add`)** — Codex's plugin registry is the
-production install path:
+**Plugin marketplace (`codex plugin add`)** — Codex's plugin commands,
+pointed at a clone of this repository as a local marketplace. A listing in
+Codex's official plugin registry is coming soon; it is not there yet.
 
 ```bash
 # 1. Register the marketplace (single SOURCE argument; the marketplace name
@@ -743,7 +751,7 @@ would have read, not against raw output Claude Code had already cut.
 
 ### User preferences
 
-Four behaviours are user-tunable. The plugin ships the defaults; each user's
+Five behaviours are user-tunable. The plugin ships the defaults; each user's
 choices are written to `~/.claude/hooks/.playbook-prefs.json` by
 `scripts/playbook_config.py` — nothing is hardcoded to one machine, and nothing
 personal travels with the plugin.
@@ -754,6 +762,7 @@ personal travels with the plugin.
 | Known-failure warnings | `watch` | `off` | Claude Code | Known-failure warnings before risky actions. |
 | Context budget | `context_budget` | `off` | Claude Code | Context size past which the session is told to wrap up, hand off and `/clear`. |
 | CLAUDE.md budget | `claude_md_budget` | `40000` | Claude Code | Characters the project `CLAUDE.md` may grow to before the turn end is blocked. |
+| Language | `language` | `auto` | Claude Code | Language of the numbered menu's own text; `auto` follows the system locale. Elsewhere the model writes the menu in the language the user writes in. |
 
 In Claude Code the menu is numbered, above the prompt: type a number and Enter.
 In Codex and Antigravity the `playbook-config` skill presents it (`/playbook-config`

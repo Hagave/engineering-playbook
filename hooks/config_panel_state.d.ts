@@ -1,7 +1,7 @@
 // State contract of the settings menu (hooks/config_panel.tsx).
 //
 // The menu draws what `scripts/playbook_config.py show --json` returns; it
-// holds no list of keys or values of its own.
+// holds no list of keys, values or text of its own.
 
 export type ConfigChoice = { value: string; label: string }
 
@@ -15,13 +15,47 @@ export type ConfigSetting = {
   choices: ConfigChoice[]
 }
 
-export type ConfigSnapshot = { settings: ConfigSetting[] }
+// The panel's own strings, already in the person's language
+// (hooks/playbook_i18n.py, UI_KEYS).
+export type PanelText = {
+  title: string
+  hint_main: string
+  hint_sub: string
+  opened: string
+  // Holds `{digit}`.
+  no_entry: string
+  current: string
+  default: string
+  status: string
+  learn: string
+  lab: string
+  diff: string
+  back: string
+  exit: string
+  lab_title: string
+  lab_help: string
+  lab_setup: string
+  lab_passive: string
+  lab_active: string
+  lab_sqlmap: string
+  lab_uninstall: string
+}
+
+export type ConfigSnapshot = {
+  // 'en', 'pt-br' or 'es': what the `language` setting resolved to.
+  language: string
+  // That language's English name, for the prompts the menu hands the model.
+  language_name: string
+  ui: PanelText
+  settings: ConfigSetting[]
+}
 
 // What the last action said: the script's two lines after a `set`, or why it failed.
 export type PanelNotice = { text: string; isError: boolean }
 
-// Which screen the band shows: the main list, one setting's choices, or none.
-export type MenuScreen = { kind: 'main' } | { kind: 'setting'; key: string }
+// Which screen the band shows: the main list, one setting's choices, the
+// red-lab-playbook steps, or none.
+export type MenuScreen = { kind: 'main' } | { kind: 'setting'; key: string } | { kind: 'lab' }
 
 declare module 'claude-code' {
   interface PluginState {

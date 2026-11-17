@@ -27,6 +27,7 @@ import time
 import warnings
 from typing import NamedTuple
 
+import playbook_i18n
 import secret_scan
 
 SPEC_TOKEN = '[SPEC CONFIRMED]'
@@ -2835,6 +2836,18 @@ def read_incidents(path: str, limit: int = 50) -> list[dict]:
 
 PROSE_LEVELS = ('low', 'mid', 'high')
 
+# The session context is English; without this the model reads it as a cue and
+# switches to English, most visibly right after a /clear. One text for every
+# harness: the Claude Code and Codex SessionStart hooks inject it, and the
+# Antigravity AGENTS.template.md carries it verbatim (a structural test holds
+# the two equal).
+USER_LANGUAGE_POLICY = (
+    'Reply to the user in the language they write in, and keep that language '
+    'after the context is cleared (/clear) or compacted: the English in this '
+    'context is addressed to you, not a cue to switch the conversation to '
+    "English. The playbook's menus and prompts follow the user's language too."
+)
+
 # Prose budgets. These are the product, not decoration: the difference between
 # them is what the model is allowed to spend output tokens ON, and every level
 # forbids the same filler — preamble, restating the request, recapping work the
@@ -2875,6 +2888,9 @@ PREFS_DEFAULTS: dict = {
     # thresholds only speak at 700k, long after the cost has been paid — every call
     # re-reads the whole context, so a session's cost grows with its size squared.
     'context_budget': 0,
+    # Language of the fixed text the settings menu shows (playbook_i18n). 'auto'
+    # follows the system locale; replies follow the language the user writes in.
+    'language': 'auto',
 }
 
 MEMORY_FILE = 'CLAUDE.md'
@@ -2918,6 +2934,8 @@ def load_prefs(state_dir: str) -> dict:
     tokens = stored.get('context_budget')
     if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
         prefs['context_budget'] = tokens
+    if stored.get('language') in playbook_i18n.LANGUAGES:
+        prefs['language'] = stored['language']
     return prefs
 
 
@@ -2961,6 +2979,12 @@ def set_pref(state_dir: str, key: str, value: str) -> tuple[dict, str | None]:
         if tokens is None:
             return prefs, f'context_budget must be a token count (250000, 250k) or off — got {value!r}'
         prefs['context_budget'] = tokens
+    elif key == 'language':
+        language = playbook_i18n.normalize(raw)
+        if language is None:
+            return prefs, (f'language must be one of {", ".join(playbook_i18n.LANGUAGES)} '
+                           f'— got {value!r}')
+        prefs['language'] = language
     else:
         return prefs, f'unknown preference {key!r} — valid keys: {", ".join(PREFS_DEFAULTS)}'
 

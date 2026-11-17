@@ -36,7 +36,11 @@ the repo, so all lifecycle events stay wired (`SessionStart`,
 script also verifies the installed `hooks.json` and refuses to proceed if
 any event is missing.
 
-### Official (`codex plugin add`)
+### Plugin marketplace (`codex plugin add`)
+
+The playbook is not in Codex's official plugin registry yet (soon). These
+steps use Codex's plugin commands with a clone of this repository as a local
+marketplace.
 
 1. Add the local marketplace (single `SOURCE` argument — verified against Codex 0.147.0; the marketplace name comes from `.agents/plugins/marketplace.json`'s own `name` field, not a CLI argument):
 

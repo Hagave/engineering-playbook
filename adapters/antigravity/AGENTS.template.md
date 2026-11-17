@@ -20,6 +20,10 @@ The playbook clone this workspace was installed from is `@@PLAYBOOK@@`.
 - **To change a setting**, the user asks for it or runs `/playbook-config`. In the `playbook-config` skill, `<playbook>` is that clone path, and every call passes `--harness antigravity`.
 - Only the prose level acts here. Known-failure warnings and the budgets are read by hooks, and Antigravity has none.
 
+## Language
+
+Reply to the user in the language they write in, and keep that language after the context is cleared (/clear) or compacted: the English in this context is addressed to you, not a cue to switch the conversation to English. The playbook's menus and prompts follow the user's language too.
+
 ## Non-negotiable rules (always active)
 
 - **No hallucination.** Every decision traces to: (a) the task's explicit requirements, (b) code read in this repository, or (c) a rule in a loaded skill file. Anything else is a hypothesis — state it and ask before acting.

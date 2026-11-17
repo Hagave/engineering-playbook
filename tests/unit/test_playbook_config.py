@@ -51,7 +51,10 @@ class TestSetPrintsTheEffect(unittest.TestCase):
 
     def _run(self, *argv: str) -> tuple[int, str]:
         out = io.StringIO()
-        with mock.patch.object(config, 'STATE_DIR', self.state), contextlib.redirect_stdout(out):
+        # An English locale: `auto` would otherwise follow the machine running the tests.
+        with mock.patch.object(config, 'STATE_DIR', self.state), \
+                mock.patch.dict(os.environ, {'LANG': 'en_US.UTF-8'}, clear=True), \
+                contextlib.redirect_stdout(out):
             code = config.main(list(argv))
         return code, out.getvalue()
 
@@ -102,6 +105,108 @@ class TestSetPrintsTheEffect(unittest.TestCase):
 
 
 
+class TestLanguage(unittest.TestCase):
+    """The panel draws fixed text, so the model's "reply in the user's
+    language" never reached it: the menu stayed English for a user writing
+    Portuguese. The `language` setting picks the text it is drawn in."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state)
+
+    def _run(self, *argv: str, lang_env: str = 'en_US.UTF-8') -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        env = {'LANG': lang_env}
+        with mock.patch.object(config, 'STATE_DIR', self.state), \
+                mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = config.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def _show(self, lang_env: str = 'en_US.UTF-8') -> dict:
+        return json.loads(self._run('show', '--json', lang_env=lang_env)[1])
+
+    def test_auto_is_the_default_and_follows_the_locale(self):
+        self.assertEqual(self._show('en_US.UTF-8')['language'], 'en')
+        self.assertEqual(self._show('pt_BR.UTF-8')['language'], 'pt-br')
+        self.assertEqual(self._show('es_ES.UTF-8')['language'], 'es')
+        self.assertEqual(self._show('C')['language'], 'en')
+        self.assertEqual(self._show('de_DE.UTF-8')['language'], 'en')
+
+    def test_a_chosen_language_wins_over_the_locale(self):
+        self.assertEqual(self._run('set', 'language', 'pt-BR')[0], 0)
+        shown = self._show('en_US.UTF-8')
+        self.assertEqual(shown['language'], 'pt-br')
+        self.assertEqual(shown['language_name'], 'Brazilian Portuguese')
+        self.assertEqual(shown['ui']['exit'], 'Sair')
+        prose = next(s for s in shown['settings'] if s['key'] == 'prose')
+        self.assertEqual(prose['label'], 'Nível de prosa')
+        watch = next(s for s in shown['settings'] if s['key'] == 'watch')
+        self.assertEqual([c['label'] for c in watch['choices']], ['ligado', 'desligado'])
+        # The values passed to `set` never change with the language.
+        self.assertEqual([c['value'] for c in watch['choices']], ['on', 'off'])
+
+    def test_set_language_accepts_the_usual_spellings_and_rejects_others(self):
+        for spelling in ('pt-BR', 'pt_br', 'PT-BR', 'es', 'en', 'auto'):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(self._run('set', 'language', spelling)[0], 0)
+        code, _, err = self._run('set', 'language', 'klingon')
+        self.assertEqual(code, 1)
+        self.assertIn('language must be one of', err)
+
+    def test_the_effect_line_of_a_set_is_in_the_chosen_language(self):
+        self._run('set', 'language', 'pt-br')
+        _, out, _ = self._run('set', 'context_budget', '250k')
+        self.assertEqual(out.splitlines()[1], config.effect_note('context_budget', 250000, 'pt-br'))
+        self.assertIn('250.000', out)
+
+    def test_setting_the_language_reports_it_in_that_language(self):
+        _, out, _ = self._run('set', 'language', 'es')
+        self.assertIn('Español', out.splitlines()[1])
+        self.assertIn('En vigor ahora', out.splitlines()[1])
+
+    def test_a_corrupt_stored_language_reads_as_auto(self):
+        with open(os.path.join(self.state, '.playbook-prefs.json'), 'w') as f:
+            json.dump({'language': 'xx'}, f)
+        self.assertEqual(config.playbook_core.load_prefs(self.state)['language'], 'auto')
+
+    def test_language_is_a_claude_code_setting_only(self):
+        code, _, err = self._run('set', 'language', 'pt-br', '--harness', 'codex')
+        self.assertEqual(code, 1)
+        self.assertIn('no effect in codex', err)
+
+
+class TestTranslations(unittest.TestCase):
+    """A string missing in one language would fall back to English mid-menu."""
+
+    def test_every_string_exists_in_every_language(self):
+        i18n = config.playbook_i18n
+        for key, entry in i18n.STRINGS.items():
+            with self.subTest(key=key):
+                self.assertEqual(set(entry), set(i18n.LANGUAGE_NAMES))
+                self.assertTrue(all(value.strip() for value in entry.values()))
+
+    def test_every_setting_has_a_label_and_help(self):
+        for key in config.DESCRIPTIONS:
+            with self.subTest(key=key):
+                self.assertIn(f'label_{key}', config.playbook_i18n.STRINGS)
+                self.assertIn(f'help_{key}', config.playbook_i18n.STRINGS)
+
+    def test_placeholders_match_across_languages(self):
+        import string
+        for key, entry in config.playbook_i18n.STRINGS.items():
+            fields = {lang: {f for _, f, _, _ in string.Formatter().parse(text) if f}
+                      for lang, text in entry.items()}
+            with self.subTest(key=key):
+                self.assertEqual(len({frozenset(f) for f in fields.values()}), 1)
+
+    def test_the_lab_entry_says_what_it_is_in_every_language(self):
+        for language in config.playbook_i18n.LANGUAGE_NAMES:
+            with self.subTest(language=language):
+                label = config.playbook_i18n.text(language, 'lab')
+                self.assertTrue(label.startswith('red-lab-playbook: '))
+
+
 class TestHarness(unittest.TestCase):
     """Only the settings a harness acts on are offered there: one nothing
     reads would be accepted and silently ignored."""
@@ -149,6 +254,12 @@ class TestHarness(unittest.TestCase):
         code, out, _ = self._run('session', '--harness', 'antigravity')
         self.assertEqual(code, 0)
         self.assertIn('Prose budget: LOW', out)
+
+    def test_the_numbered_menu_has_a_digit_for_every_claude_code_setting(self):
+        # hooks/config_panel.tsx MAX_SETTING_ROWS: digits 1-9 hold the settings
+        # plus Status, Learn, red-lab-playbook and Diff panel. A sixth setting
+        # would silently fall off the menu.
+        self.assertLessEqual(len(config.HARNESS_SETTINGS['claude']), 5)
 
     def test_every_setting_is_mapped_to_its_harnesses(self):
         for harness, keys in config.HARNESS_SETTINGS.items():
