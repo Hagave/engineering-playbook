@@ -1,0 +1,28 @@
+Review this pull request with engineering-code-review. It is the whole diff: a GraphQL API added with Apollo Server.
+
+```ts
+// src/graphql/server.ts
+const server = new ApolloServer({ typeDefs, resolvers, introspection: true });
+
+// src/graphql/resolvers.ts
+export const resolvers = {
+  Query: {
+    user: (_: unknown, { id }: { id: string }) => db.user.findUnique({ where: { id } }),
+  },
+  User: {
+    orders: (user: User, { first }: { first: number }) =>
+      db.order.findMany({ where: { userId: user.id }, take: first }),
+    friends: (user: User) => db.user.findMany({ where: { friendOf: user.id } }),
+  },
+};
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche graphql.md):
+Fiche: graphql
+- Reports missing authorization in the resolvers (CWE-639): any caller reads any user's orders
+- Reports unbounded cost (CWE-770): no depth / complexity limit, `first` without a maximum, recursive friends
+- Mentions introspection enabled, and the N+1 in nested resolvers (DataLoader)
+
+Must mention:
+- depth|complexity|CWE-770|cost
+- authoriz|CWE-639|owner

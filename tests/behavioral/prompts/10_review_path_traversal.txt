@@ -1,0 +1,23 @@
+Review this pull request with engineering-code-review. It is the whole diff, added to an Express API.
+
+```ts
+// src/routes/files.ts
+router.get('/files/:name', auth, (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'uploads', req.params.name));
+});
+
+router.post('/files', auth, upload.single('file'), (req, res) => {
+  fs.renameSync(req.file.path, path.join(UPLOAD_DIR, req.file.originalname));
+  res.sendStatus(201);
+});
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche files.md):
+Fiche: files
+- Reports path traversal (CWE-22) on the download: no containment check after path.join
+- Reports the upload keeping the client's filename (CWE-434 / CWE-22): server-generated name, type by magic bytes, size limit
+- Notes that the download has no ownership check (access-control.md)
+
+Must mention:
+- CWE-22|path traversal|directory traversal
+- originalname|server-generated|uuid|CWE-434

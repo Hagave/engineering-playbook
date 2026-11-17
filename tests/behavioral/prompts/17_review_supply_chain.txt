@@ -1,0 +1,29 @@
+Review this pull request with engineering-code-review. It is the whole diff: a new GitHub Actions workflow.
+
+```yaml
+# .github/workflows/pr-check.yml
+on: pull_request_target
+permissions: write-all
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: echo "Checking ${{ github.event.pull_request.title }}"
+      - run: npm install && npm test
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche supply-chain.md):
+Fiche: supply-chain
+- Reports pull_request_target running the PR's code with secrets and write permissions
+- Reports the PR title interpolated into run: (script injection), fix: pass through env and quote
+- Reports actions pinned to a tag instead of a commit SHA, write-all permissions, npm install instead of npm ci
+
+Must mention:
+- pull_request_target
+- github.event|injection|env
+- SHA|pin

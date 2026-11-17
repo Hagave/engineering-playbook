@@ -1,0 +1,25 @@
+Review this pull request with engineering-code-review. It is the whole diff, added to a multi-tenant Express API. `auth` verifies the JWT and sets req.user.
+
+```ts
+// src/routes/invoices.ts
+router.get('/invoices/:id', auth, async (req, res) => {
+  res.json(await Invoice.findById(req.params.id));
+});
+
+// src/routes/profile.ts
+router.patch('/me', auth, async (req, res) => {
+  await User.update({ where: { id: req.user.id }, data: { ...req.body } });
+  res.sendStatus(204);
+});
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche access-control.md):
+Fiche: access-control
+- Reports IDOR / BOLA (CWE-639): the invoice is fetched by id with no owner or tenant scope
+- Reports mass assignment (CWE-915): the body is spread into the update, so role / tenantId can be set
+- Fix: repository method that requires the owner/tenant, 404 for foreign objects, DTO allowlist
+- Asks for negative tests with two users in different tenants
+
+Must mention:
+- CWE-639|IDOR|BOLA|tenant|owner
+- CWE-915|mass assignment|allowlist|whitelist

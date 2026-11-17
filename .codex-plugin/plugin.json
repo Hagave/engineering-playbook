@@ -1,0 +1,75 @@
+{
+  "name": "playbook",
+  "version": "4.0.0",
+  "description": "AI Engineering Playbook — Codex adapter wrapping the engineering-* skill catalog (40 skills).",
+  "author": {
+    "name": "hagave"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://github.com/Hagave/engineering-playbook",
+  "repository": "https://github.com/Hagave/engineering-playbook",
+  "keywords": [
+    "engineering",
+    "playbook",
+    "ai"
+  ],
+  "skills": [
+    "./skills/engineering-playbook",
+    "./skills/engineering-governance",
+    "./skills/engineering-code-economy",
+    "./skills/engineering-architecture",
+    "./skills/engineering-typescript",
+    "./skills/engineering-linting",
+    "./skills/engineering-performance",
+    "./skills/engineering-security",
+    "./skills/engineering-concurrency",
+    "./skills/engineering-error-handling",
+    "./skills/engineering-testing",
+    "./skills/engineering-code-review",
+    "./skills/engineering-nestjs",
+    "./skills/engineering-kafka",
+    "./skills/engineering-rabbitmq",
+    "./skills/engineering-implement",
+    "./skills/engineering-refactor",
+    "./skills/engineering-refactor-purge",
+    "./skills/engineering-refactor-tooling",
+    "./skills/playbook-off",
+    "./skills/playbook-on",
+    "./skills/engineering-prisma",
+    "./skills/engineering-ddd",
+    "./skills/engineering-scaffold",
+    "./skills/engineering-arch-hexagonal",
+    "./skills/engineering-arch-modular",
+    "./skills/engineering-arch-mvc",
+    "./skills/engineering-design-patterns",
+    "./skills/playbook-config",
+    "./skills/engineering-docker",
+    "./skills/engineering-nestjs-security",
+    "./skills/engineering-nestjs-logger",
+    "./skills/engineering-nestjs-interceptors",
+    "./skills/engineering-learn",
+    "./skills/engineering-java",
+    "./skills/engineering-go",
+    "./skills/engineering-rust",
+    "./skills/engineering-csharp",
+    "./skills/engineering-kotlin",
+    "./skills/engineering-ruby"
+  ],
+  "hooks": "./.codex-plugin/hooks.json",
+  "interface": {
+    "displayName": "AI Engineering Playbook (Codex)",
+    "shortDescription": "Original engineering-* skill catalog for Codex.",
+    "longDescription": "Loads the engineering playbook skills (engineering-*) in Codex CLI.",
+    "developerName": "hagave",
+    "category": "Productivity",
+    "capabilities": [
+      "Instructions",
+      "Lifecycle hooks"
+    ],
+    "defaultPrompt": [
+      "Use the engineering playbook for this feature.",
+      "Plan and implement this feature with engineering-implement.",
+      "Review this change with engineering-code-review."
+    ]
+  }
+}

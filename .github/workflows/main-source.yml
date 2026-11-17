@@ -1,0 +1,27 @@
+name: main-source
+
+# main only receives develop: every change reaches main after it went through
+# develop and its checks. A pull request into main from any other branch, or
+# from a fork, fails this check, which the main ruleset requires.
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  from-develop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Pull requests into main come from develop of this repository
+        # Through env, never inline: a branch name is attacker-controlled text.
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REF" != "develop" ] || [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::main accepts pull requests from develop only (got $HEAD_REPO:$HEAD_REF)."
+            exit 1
+          fi

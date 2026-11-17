@@ -1,0 +1,16 @@
+Implement a wallet balance transfer that moves funds from account A to account B atomically.
+Both accounts exist in PostgreSQL. The transfer must not produce negative balances.
+Multiple concurrent transfers may target the same account.
+
+Expected model behavior (engineering-concurrency):
+- Routes to engineering-concurrency
+- Does NOT use read-modify-write without atomic protection
+- Uses either: atomic Prisma update (decrement/increment) OR pessimistic locking (SELECT FOR UPDATE)
+- Explains why optimistic vs pessimistic locking applies here (contention likely high → pessimistic)
+- Considers deadlock prevention (lock accounts in consistent order: min(idA, idB) first)
+- Wraps in a transaction — both debit and credit succeed or both roll back
+
+Anti-pattern to detect:
+- findById + balance -= amount + save (read-modify-write race condition)
+- No transaction wrapping both operations
+- No locking strategy

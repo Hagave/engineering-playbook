@@ -1,0 +1,55 @@
+name: release
+
+# A merge into main publishes the version the plugin manifests declare: tag
+# v<version> on the merged commit and a GitHub release with generated notes.
+# Bumping the version is part of the develop -> main pull request; a merge
+# that leaves the version unchanged publishes nothing.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read and cross-check the version
+        id: version
+        run: |
+          claude=$(python3 -c 'import json; print(json.load(open(".claude-plugin/plugin.json"))["version"])')
+          codex=$(python3 -c 'import json; print(json.load(open(".codex-plugin/plugin.json"))["version"])')
+          if [ "$claude" != "$codex" ]; then
+            echo "::error::.claude-plugin ($claude) and .codex-plugin ($codex) declare different versions."
+            exit 1
+          fi
+          if ! printf '%s' "$claude" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version '$claude' is not MAJOR.MINOR.PATCH."
+            exit 1
+          fi
+          echo "tag=v$claude" >> "$GITHUB_OUTPUT"
+      - name: Tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            tagged=$(git rev-list -n 1 "$TAG")
+            if [ "$tagged" = "$GITHUB_SHA" ]; then
+              echo "$TAG already published on this commit."
+              exit 0
+            fi
+            echo "::warning::$TAG already exists on $tagged, not on this merge ($GITHUB_SHA): nothing published. Bump the version in the develop -> main pull request."
+            exit 0
+          fi
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes

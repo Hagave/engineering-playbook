@@ -1,0 +1,26 @@
+Review this pull request with engineering-code-review. It is the whole diff, added to a user service.
+
+```ts
+// src/infrastructure/password.ts
+export const hashPassword = (password: string): string =>
+  crypto.createHash('sha256').update(password).digest('hex');
+
+// src/application/request-password-reset.use-case.ts
+const resetToken = Math.random().toString(36).slice(2);
+await this.users.saveResetToken(user.id, resetToken);
+
+// src/application/verify-webhook.ts
+export const isValidSignature = (expected: string, received: string): boolean =>
+  expected === received;
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche crypto.md):
+Fiche: crypto
+- Reports a fast, unsalted hash for passwords (CWE-916): use Argon2id (or bcrypt cost >= 12)
+- Reports Math.random for the reset token (CWE-338): use crypto.randomBytes / randomUUID
+- Reports the non-constant-time comparison of signatures (CWE-208): crypto.timingSafeEqual
+
+Must mention:
+- argon2|bcrypt|scrypt
+- Math.random|CSPRNG|randomBytes|CWE-338
+- timingSafeEqual|constant time|constant-time|CWE-208

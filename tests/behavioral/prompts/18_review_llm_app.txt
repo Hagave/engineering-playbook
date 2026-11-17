@@ -1,0 +1,30 @@
+Review this pull request with engineering-code-review. It is the whole diff: an assistant that summarizes a user's uploaded documents.
+
+```ts
+// src/assistant/tools.ts
+export const tools = {
+  deleteAccount: async ({ userId }: { userId: string }) => accounts.delete(userId),
+  sendEmail: async ({ to, body }: { to: string; body: string }) => mailer.send(to, body),
+};
+
+// src/assistant/run.ts
+export async function summarize(userId: string, documentText: string): Promise<string> {
+  const reply = await llm.chat({
+    system: `You are a helpful assistant. Internal API key: ${process.env.INTERNAL_KEY}`,
+    messages: [{ role: 'user', content: `Summarize this document:\n${documentText}` }],
+    tools,
+  });
+  for (const call of reply.toolCalls) await tools[call.name](call.args);
+  return reply.text; // rendered with innerHTML by the frontend
+}
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche llm-apps.md):
+Fiche: llm-apps
+- Reports prompt injection from the document reaching state-changing tools (LLM01 / LLM06): tools run without confirmation, with any userId the model chooses
+- Reports the secret in the system prompt (LLM07 / LLM02) and model output rendered as HTML (LLM05, XSS)
+- Fix: tool authorization with the end user's identity, confirmation for irreversible actions, schema validation of tool args, no secrets in prompts, budgets
+
+Must mention:
+- prompt injection|LLM01
+- confirm|excessive agency|LLM06|authoriz

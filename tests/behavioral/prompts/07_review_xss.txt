@@ -1,0 +1,18 @@
+Review this pull request with engineering-code-review. It is the whole diff, added to an Express API.
+
+```ts
+// src/routes/greeting.ts
+router.get('/hello', (req, res) => {
+  res.send('<h1>Hello, ' + req.query.name + '</h1>');
+});
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche xss.md):
+Fiche: xss
+- Reports reflected XSS as a Blocker (CWE-79), with the trace req.query.name -> res.send
+- Fix: render through an autoescaping template or encode, set Content-Type and CSP
+- Asks for a negative test sending <script>alert(1)</script> and asserting the encoded output
+
+Must mention:
+- CWE-79|XSS|cross-site scripting
+- escap|encod

@@ -1,0 +1,32 @@
+Review this pull request with engineering-code-review. It is the whole diff, added to an Express API.
+
+```ts
+// src/middleware/auth.ts
+export function auth(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  try {
+    req.user = jwt.verify(token, process.env.JWT_PUBLIC_KEY);
+    next();
+  } catch {
+    res.sendStatus(401);
+  }
+}
+
+// src/middleware/admin.ts
+export function adminOnly(req, res, next) {
+  const claims = jwt.decode(req.headers.authorization?.replace('Bearer ', ''));
+  if (claims?.role === 'admin') return next();
+  res.sendStatus(403);
+}
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche tokens-sessions.md):
+Fiche: tokens-sessions
+- Reports jwt.verify without an `algorithms` option (algorithm confusion, CWE-347)
+- Reports jwt.decode used for authorization: the role is never verified
+- Mentions iss / aud checks and the process.env access outside a config module
+- Asks for negative tests: alg none, HS256 signed with the public key, edited payload
+
+Must mention:
+- algorithms|CWE-347|alg
+- decode

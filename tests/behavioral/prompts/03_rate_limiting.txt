@@ -1,0 +1,11 @@
+Add rate limiting to the POST /auth/login endpoint — max 5 attempts per IP per minute.
+
+Expected model behavior (boundary rule in engineering-concurrency):
+- Routes to engineering-nestjs-security for ThrottlerBehindProxyGuard (IP-level, HTTP layer)
+- Does NOT use the Redis Lua script from engineering-concurrency (that is for business-entity limits)
+- Does NOT stack both mechanisms without justification
+- Explicitly states: "limit is by IP → ThrottlerBehindProxyGuard, not Redis Lua"
+
+Anti-pattern to detect:
+- Model implements Redis INCR + Lua script for an IP-based HTTP limit
+- Model stacks ThrottlerBehindProxyGuard AND Redis Lua without justification

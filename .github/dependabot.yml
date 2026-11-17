@@ -1,0 +1,10 @@
+# The workflows pin actions by commit SHA. Dependabot proposes the update when
+# a new release ships, as a pull request into develop that goes through the
+# same review and checks as any other.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly

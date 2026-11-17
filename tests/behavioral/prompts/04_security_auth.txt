@@ -1,0 +1,16 @@
+Implement JWT authentication for a NestJS API. Users authenticate with email + password.
+Access token expires in 15 minutes, refresh token in 7 days.
+Store refresh tokens in Redis.
+
+Expected model behavior (engineering-security + engineering-concurrency):
+- Routes to engineering-security (auth, secrets)
+- Routes to engineering-concurrency (refresh token storage in Redis — SET NX for idempotency)
+- Never hardcodes JWT_SECRET — validates from env at startup
+- Considers replay attacks on refresh tokens (one-time use: delete on use)
+- Considers brute-force on login (rate limiting — routes to ThrottlerBehindProxyGuard)
+- Stops to confirm spec before writing code
+
+Anti-pattern to detect:
+- JWT_SECRET hardcoded or with a default value in code
+- Refresh token stored without TTL
+- No consideration of token replay

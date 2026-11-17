@@ -1,0 +1,139 @@
+---
+name: playbook-config
+description: "The playbook's settings menu: response prose level, known-failure warnings, cost budgets, session status and learning from past failures. Use when the user says /playbook-config, asks for the playbook's settings, status or configuration, wants shorter or longer answers, wants warnings about past mistakes on or off, or asks the playbook to learn from this project's failures."
+version: 3.1.0
+user-invocable: true
+---
+
+<!-- RULE-ANCHOR -->
+Rules in this skill are **non-negotiable** and active for the entire session.
+Read this skill completely before acting. No partial reads.
+Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+<!-- /RULE-ANCHOR -->
+
+
+# Playbook Config
+
+One menu for everything the user can set or ask the playbook for. `/playbook-on` and `/playbook-off` stay separate commands.
+
+`<playbook>` below is the playbook clone: two levels above this skill's base directory in Claude Code and Codex, and in Antigravity the path the Settings section of `AGENTS.md` names. Every setting is read and written through `python3 <playbook>/scripts/playbook_config.py`, never by editing a file by hand: the script validates the value and writes atomically.
+
+Every `playbook_config.py` call passes `--harness`: `claude` in Claude Code, `codex` in Codex, `antigravity` in Antigravity. `show` then lists only the settings that harness acts on, and `set` refuses the others, because nothing there would read them. In Codex and Antigravity that leaves the prose level alone.
+
+A user who asks for a change outside the menu ("shorter answers", "set prose to low") gets the same `set` call; there is no need to open the menu first.
+
+---
+
+## The menu
+
+Show one screen at a time. Every screen lists its entries with a one-line explanation of what each does, and ends with **Back** (except the main menu) and **Exit**. Typing `exit` at any screen leaves the menu. Change only what the user picks; never set a value they did not choose.
+
+Present a screen with the AskUserQuestion tool where it exists (Claude Code): one question, its options the screen's entries, each option's description the explanation. AskUserQuestion takes at most four options; when a screen has more, drop **Exit** from it and keep **Back** (the user can still type `exit`). In a harness without that tool, print the screen as a numbered list and wait for the user's answer.
+
+### Main menu
+
+| Entry | What it does |
+|---|---|
+| Settings | Change how the playbook behaves: prose level, warnings, cost budgets. |
+| Status | Show the session's configuration, the current settings and the output filter's totals. |
+| Learn | Mine this project's failure journal and sessions for repeated mistakes and write rules for them into the project `CLAUDE.md`. |
+| Exit | Leave the menu. |
+
+### Settings
+
+Read the current values first: `python3 <playbook>/scripts/playbook_config.py show --harness <harness>`. Show only the entries it lists, each with its current value; the rows below that it does not list do not exist in this harness.
+
+| Entry | Key | Values | What it does |
+|---|---|---|---|
+| Prose level | `prose` | `low`, `mid` (default), `high` | How much explanation a response carries. See *Prose levels*. |
+| Known-failure warnings | `watch` | `on`, `off` (default) | Before a write or a command that touches something that already failed in this project, show the recorded failure. See *Known-failure warnings*. |
+| Cost budgets | | | Opens a screen with the two budgets below. |
+
+Cost budgets screen:
+
+| Entry | Key | Values | What it does |
+|---|---|---|---|
+| CLAUDE.md budget | `claude_md_budget` | characters, `0` = off (default 40000) | Blocks the end of a turn that grew the project `CLAUDE.md` past this size. The file is re-sent to every session and every subagent. |
+| Context budget | `context_budget` | tokens, e.g. `250k`, `0` = off (default) | Past this much context, tells the model once per multiple to finish the step, write the handoff and ask for `/clear`. Never blocks. |
+
+Selecting an entry opens a screen with its values (plus **Back**). Apply the choice with:
+
+```bash
+python3 <playbook>/scripts/playbook_config.py set <key> <value> --harness <harness>
+```
+
+Report the script's output lines as they come: the second one says when the change takes effect and what the user will notice, which differs per setting (prose waits for the next session; the budgets apply at once). Do not add your own timing claim. A value the script rejects is reported as rejected; do not retry with a guessed value.
+
+### Status
+
+1. Print the session configuration block from *Session configuration block*, when the session has one.
+2. Print the settings: `python3 <playbook>/scripts/playbook_config.py show --harness <harness>`.
+3. Print the output filter's totals: `python3 <playbook>/hooks/output_filter.py --report`, its single line as it comes. When the file does not exist (an adapter without hooks), skip it. The figure counts only what the model would have read: Claude Code already cuts Bash output above 30,000 characters.
+
+Then show the Status screen's entries: **Back**, **Exit**.
+
+### Learn
+
+Load the `engineering-learn` skill and follow it. It reads this project's failure journal and session logs, extracts repeated failure patterns, and writes the corrections into the project `CLAUDE.md` (asking before creating that file). When it finishes, return to the main menu.
+
+---
+
+## Prose levels
+
+Every level forbids the same filler; the difference is what substance is allowed.
+
+| Level | What the response contains |
+|---|---|
+| `low` | The result, plus only the reasoning that changes a decision. One or two sentences per point. Code and command output are not narrated. |
+| `mid` | What was done and why that approach, including trade-offs that would change the user's decision. One short paragraph for anything non-obvious. |
+| `high` | Full reasoning: alternatives considered, trade-offs, failure modes, how to verify, grounded in `file:line`, command output or documentation. |
+
+No level permits preamble, restating the request, recapping steps the user just watched, or flattery. It reduces output tokens only; input context is governed by the context guard.
+
+## Known-failure warnings
+
+Retrieval, not supervision: at the moment of a write or a shell command, the `PreToolUse` hook reads the failure journal `learn_guard` writes and the rules inside `<!-- engineering-learn:live -->` in the project `CLAUDE.md`. A `[playbook:watch]` message is something that already went wrong here; it warns and never blocks, once per session per warning.
+
+- Treat a warning as evidence and adjust the action. Do not restate it to the user as news.
+- No warning means no recorded failure matches, not that the action is safe.
+- A wrong warning is fixed in `CLAUDE.md`, not by turning the warnings off.
+
+---
+
+## Session configuration block
+
+The block records the stack chosen in this session by `engineering-scaffold` (new project) or `engineering-refactor` (existing project). Render it exactly in this shape, and refer to it for the rest of the session instead of re-reading skill files.
+
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║          Engineering Playbook — Active                               ║
+╠══════════════════════════════════════════════════════════════════════╣
+║ Mode         │ [New project / Refactor]                              ║
+║ Framework    │ [NestJS / Express / Django / FastAPI / ...]           ║
+║ HTTP         │ [Express / Fastify / uvicorn / gunicorn / —]          ║
+║ Architecture │ [Hexagonal / Modular / MVC]                           ║
+║ DDD          │ [yes / no]                                            ║
+║ ORM          │ [Prisma / TypeORM / none]                             ║
+║ Database     │ [PostgreSQL / MySQL / —]                              ║
+║ Broker       │ [Kafka / RabbitMQ / none]                             ║
+║ Cache        │ [Redis / none]                                        ║
+║ Docker       │ [yes / no]                                            ║
+║ Logger       │ [structured logging / built-in / none]                ║
+║ Security     │ [headers + CORS + rate limiting / none]               ║
+║ Interceptors │ [logging, trace-id, response, filter / none]          ║
+║ Patterns     │ [SOLID, Clean Code, ...]                              ║
+╚══════════════════════════════════════════════════════════════════════╝
+```
+
+Fill each field from the choices made in this session; `—` where a field does not apply; for Interceptors list only the selected ones or `none`.
+
+- The block is session- and project-scoped. A new session starts with none, whatever an earlier session configured.
+- With no configuration this session, do not infer one: say there is none and that it is set when a project is scaffolded or refactored.
+- When the user changes a choice mid-session, update the block and show it again; the new block replaces the old one.
+- With a block in place, apply skill rules silently: raise a rule only when a request would break it or the user asks. Reason from the block's fields, not from defaults.
+
+<!-- OUTPUT-DISCIPLINE -->
+No preamble. No ceremony. No restating context already confirmed.
+Implement exactly what was specified — nothing more, nothing less.
+When ambiguous: stop, list the question, wait. Never assume.
+<!-- /OUTPUT-DISCIPLINE -->

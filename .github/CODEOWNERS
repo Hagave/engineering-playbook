@@ -1,0 +1,4 @@
+# Every change needs the owner's review. With the branch rulesets in
+# .github/rulesets/, a pull request into develop or main from anyone else
+# merges only after @Hagave approves it.
+* @Hagave

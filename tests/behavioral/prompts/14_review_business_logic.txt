@@ -1,0 +1,23 @@
+Review this pull request with engineering-code-review. It is the whole diff, added to a checkout service backed by PostgreSQL.
+
+```ts
+// src/application/redeem-coupon.use-case.ts
+async execute(userId: string, code: string, orderTotal: number): Promise<number> {
+  const coupon = await this.coupons.findByCode(code);
+  if (!coupon || coupon.used) throw new CouponUnavailableError();
+  coupon.used = true;
+  coupon.usedBy = userId;
+  await this.coupons.save(coupon);
+  return orderTotal - coupon.amount;
+}
+```
+
+Expected model behavior (engineering-code-review + engineering-concurrency, fiche business-logic.md):
+Fiche: business-logic
+- Reports the check-then-act race (CWE-362): two parallel redemptions both see used = false
+- Fix: atomic conditional update (UPDATE ... WHERE used = false) checking the affected rows, or a unique constraint
+- Notes the business rule mutated in the use case instead of a domain method, and the client-supplied orderTotal
+- Asks for a test with parallel redemptions where exactly one succeeds
+
+Must mention:
+- race|CWE-362|atomic|concurren

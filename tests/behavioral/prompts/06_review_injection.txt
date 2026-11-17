@@ -1,0 +1,28 @@
+Review this pull request with engineering-code-review. It is the whole diff, added to an Express API.
+
+```ts
+// src/routes/users.ts
+router.get('/users/search', async (req, res) => {
+  const rows = await db.query(
+    "SELECT id, name FROM users WHERE email = '" + req.query.email + "'",
+  );
+  res.json(rows);
+});
+
+router.post('/thumbnails', async (req, res) => {
+  exec('convert ' + req.body.file + ' -resize 200x200 out.png', (err) => {
+    res.sendStatus(err ? 500 : 201);
+  });
+});
+```
+
+Expected model behavior (engineering-code-review + engineering-security, fiche injection.md):
+Fiche: injection
+- Reports the SQL built by concatenation as a Blocker (CWE-89), fix: parameterized query
+- Reports the shell command built from the body as a Blocker (CWE-78), fix: execFile/spawn with an argv array
+- Each Blocker carries a trace from req.query/req.body to the sink
+- Asks for negative tests from the fiche (e.g. ' OR '1'='1, "a.png; id")
+
+Must mention:
+- CWE-89|SQL injection|parameteri
+- CWE-78|command injection|execFile|argv

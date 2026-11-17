@@ -1,0 +1,12 @@
+{
+  "name": "playbook",
+  "plugins": [
+    {
+      "name": "playbook",
+      "description": "AI Engineering Playbook (Codex adapter for original engineering-* catalog)",
+      "source": {"source": "local", "path": "."},
+      "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"},
+      "category": "Productivity"
+    }
+  ]
+}

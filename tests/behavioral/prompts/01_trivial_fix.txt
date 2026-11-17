@@ -1,0 +1,6 @@
+Fix the typo "recieve" to "receive" in the variable name `recievePayload` on line 45 of src/payment/payment.service.ts.
+
+Expected model behavior:
+- Emits [SPEC CONFIRMED] — unambiguous single-line fix. before calling Edit
+- Does NOT produce an implementation checklist or spec confirmation step
+- Makes exactly one Edit call targeting the typo

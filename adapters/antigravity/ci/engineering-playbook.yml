@@ -1,0 +1,65 @@
+# Re-run the installer with --ci to update it. Make the "policy" check required
+# in the branch protection of your default branch: local git hooks can be
+# skipped with --no-verify, this check cannot.
+name: engineering-playbook
+
+# `edited` too: the body is checked, and editing it pushes no commit, so the
+# default types (opened, synchronize, reopened) would keep an earlier green.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Event fields reach the script through env, never interpolated into it:
+      # a pull request body is text anyone opening a PR controls.
+      - name: No AI attribution in the commits or the pull request body
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'EOF'
+          import os, re, subprocess, sys
+          rule = re.compile(r'''@@RULE@@''', re.IGNORECASE)
+          span = os.environ['BASE_SHA'] + '..' + os.environ['HEAD_SHA']
+          log = subprocess.run(['git', 'log', '--format=%H%x00%B%x1e', span],
+                               capture_output=True, text=True, check=True).stdout
+          found = []
+          for entry in log.split('\x1e'):
+              sha, _, message = entry.strip().partition('\0')
+              if sha and rule.search(message):
+                  found.append(sha[:12])
+          if rule.search(os.environ.get('PR_BODY') or ''):
+              found.append('the pull request body')
+          if found:
+              print('AI attribution found in: ' + ', '.join(found))
+              print('Remove the Co-Authored-By / "Generated with" lines and push again.')
+              sys.exit(1)
+          EOF
+
+      - name: Typecheck and lint
+        if: hashFiles('package.json') != ''
+        run: |
+          if [[ -f package-lock.json ]]; then npm ci
+          elif [[ -f pnpm-lock.yaml ]]; then corepack enable && pnpm install --frozen-lockfile
+          elif [[ -f yarn.lock ]]; then corepack enable && yarn install --immutable
+          else npm install
+          fi
+          fail=0
+          if [[ -f tsconfig.json ]]; then npx tsc --noEmit || fail=1; fi
+          if grep -q '"lint:check"' package.json; then npm run lint:check || fail=1
+          elif grep -q '"lint"' package.json; then npm run lint || fail=1
+          fi
+          exit "${fail}"
