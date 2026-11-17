@@ -1,7 +1,7 @@
 ---
 name: playbook-config
 description: "The playbook's settings menu: response prose level, known-failure warnings, cost budgets, session status and learning from past failures. Use when the user says /playbook-config, asks for the playbook's settings, status or configuration, wants shorter or longer answers, wants warnings about past mistakes on or off, or asks the playbook to learn from this project's failures."
-version: 3.1.0
+version: 3.2.0
 user-invocable: true
 ---
 
@@ -29,6 +29,8 @@ A user who asks for a change outside the menu ("shorter answers", "set prose to 
 Show one screen at a time. Every screen lists its entries with a one-line explanation of what each does, and ends with **Back** (except the main menu) and **Exit**. Typing `exit` at any screen leaves the menu. Change only what the user picks; never set a value they did not choose.
 
 Present a screen with the AskUserQuestion tool where it exists (Claude Code): one question, its options the screen's entries, each option's description the explanation. AskUserQuestion takes at most four options; when a screen has more, drop **Exit** from it and keep **Back** (the user can still type `exit`). In a harness without that tool, print the screen as a numbered list and wait for the user's answer.
+
+Render every screen — its title, the option labels and their explanations — and your own replies in the language the user writes in; a user writing Portuguese gets the menu in Portuguese. Keep the setting keys (`prose`, `watch`, `claude_md_budget`, `context_budget`), the command names (`/playbook-config`, `/playbook-off`) and the `playbook_config.py` arguments exactly as written — translate only what the user reads.
 
 ### Main menu
 
@@ -69,12 +71,25 @@ Report the script's output lines as they come: the second one says when the chan
 1. Print the session configuration block from *Session configuration block*, when the session has one.
 2. Print the settings: `python3 <playbook>/scripts/playbook_config.py show --harness <harness>`.
 3. Print the output filter's totals: `python3 <playbook>/hooks/output_filter.py --report`, its single line as it comes. When the file does not exist (an adapter without hooks), skip it. The figure counts only what the model would have read: Claude Code already cuts Bash output above 30,000 characters.
+4. Name the security layer, so the user knows it is there: the always-on gates (secret scan, destructive-command confirmation, pre-push code review), the per-vulnerability fiches in `engineering-security`, static analysis when `semgrep`/`opengrep` is installed, and the local lab that scans the project's own app in an isolated copy of its stack — `python3 <playbook>/lab/run.py --setup`, then `--service <svc> --port <port>` (add `--active` or `--sqlmap --endpoint ...` for deeper scans).
 
 Then show the Status screen's entries: **Back**, **Exit**.
 
 ### Learn
 
 Load the `engineering-learn` skill and follow it. It reads this project's failure journal and session logs, extracts repeated failure patterns, and writes the corrections into the project `CLAUDE.md` (asking before creating that file). When it finishes, return to the main menu.
+
+---
+
+## Guided setup (first run)
+
+The SessionStart hook offers this once, on the first run on the machine (a first-run line in the session context). When the user accepts, walk them through the playbook in their language, and let them stop at any point:
+
+1. In two or three lines, say what the playbook gives them: the governance gates (spec, validation, review, secret and destructive-command gates), the security layer (fiches, SAST when installed, the local lab), and that every setting below is optional with a sensible default.
+2. Walk the **Settings** entries one at a time (prose level, known-failure warnings, the two budgets), each with its default, applying only what they choose — exactly as the menu does.
+3. Offer **Status** so they see the result, then leave.
+
+If the user skips, say that `/playbook-config` reopens this anytime, and do nothing else. Never block their first task on it.
 
 ---
 

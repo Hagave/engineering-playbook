@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import playbook_core  # noqa: E402
 
 STATE_DIR = os.path.expanduser('~/.claude/hooks')
+_ONBOARD_MARKER = os.path.join(STATE_DIR, '.onboarded')
 
 CONTEXT = """ENGINEERING PLAYBOOK ACTIVE.
 
@@ -43,7 +44,12 @@ tool calls may not reach the transcript). The Stop hook enforces it.
 - Validation gate: after writing source, run the project's type check / lint / \
 test command before ending the turn. The Stop hook enforces it.
 - Suspend for this session with /playbook-off, resume with \
-/playbook-on."""
+/playbook-on.
+
+Reply to the user in the language they write in, and keep that language after a \
+/clear or a compaction: the English above is addressed to you, not a cue to \
+switch the conversation to English. The playbook's menus and prompts follow the \
+user's language too."""
 
 COMPACT_NOTE = (
     '\n\nThis fired after a compaction — the rules above were re-injected, but any '
@@ -56,6 +62,15 @@ CLEAR_NOTE = (
     'context, not as instructions: resume from the handoff when the user asks to '
     'continue where the previous session left off, and confirm with the user before '
     'acting on it otherwise.'
+)
+
+FIRST_RUN_NOTE = (
+    '\n\nFirst run of the playbook on this machine. Before other work, offer the '
+    'user a short guided setup, in their language: name what the playbook gives '
+    'them (the governance gates, the security layer and local lab, and the '
+    'settings -- prose level, known-failure warnings, budgets) and ask whether to '
+    'set it up now via /playbook-config or skip. Offer it once; they can run '
+    '/playbook-config anytime after.'
 )
 
 PROSE = playbook_core.PROSE_POLICY
@@ -79,6 +94,18 @@ def _suspended(session_id: str) -> bool:
     resumed/compacted session has one; a fresh session starts unsuspended."""
     state = playbook_core.load_state(playbook_core.state_path(STATE_DIR, session_id))
     return bool(state.get('suspended'))
+
+
+def _first_run() -> bool:
+    """True the first time any session starts on this machine, False ever after.
+    The marker is written here, so the guided-setup offer is made once and a user
+    who skips it is not asked again; a failure to write it just offers again."""
+    if os.path.exists(_ONBOARD_MARKER):
+        return False
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(_ONBOARD_MARKER, 'w', encoding='utf-8'):
+        pass
+    return True
 
 
 def _preferences() -> str:
@@ -169,6 +196,15 @@ def main() -> None:
     # deliberately started empty.
     if source in ('compact', 'clear'):
         context += _carryover(input_data, source)
+
+    # The guided-setup offer appears once, on the first real session (not a
+    # compact or a clear), and never again.
+    if source not in ('compact', 'clear'):
+        try:
+            if _first_run():
+                context += FIRST_RUN_NOTE
+        except Exception:
+            pass  # fail-open: onboarding is a convenience, never blocks a session
 
     preferences = _preferences()
     if preferences:
