@@ -116,6 +116,272 @@ git clone https://github.com/Hagave/engineering-playbook.git ~/.engineering-play
 
 ---
 
+## How to use it
+
+Everything below works in Claude Code with the plugin installed. Each part
+says what it is, how it works, and what you do. You mostly talk to the agent
+as usual: the playbook loads the right rules and the hooks enforce them. The
+[Reference](#reference) has the details.
+
+| You want to | Do this |
+| --- | --- |
+| Build a feature or fix a bug | Ask for it; confirm the checklist the agent posts |
+| Start a new project | Ask for it ("create a Go API for orders") and answer the stack checklist |
+| Clean up an existing codebase | Ask to refactor it, or report the bug |
+| Review a change | Ask for a review; one also runs before every `git push` |
+| Check the security of your code | Ask for a security review; scan the running app with the lab |
+| Change how the playbook behaves | `/playbook-config` |
+| Work without the rules for a while | `/playbook-off`, then `/playbook-on` |
+| Recover from a full context | `/clear`, then "resume where we left off" |
+
+### Everyday flow
+
+**What it is.** The governance that is on in every session: rules the agent
+must follow, loaded only when the task needs them, and hooks that block what
+breaks them.
+
+**How it works.** At session start a hook announces the playbook. When the
+work involves code, the agent loads `engineering-playbook`, whose routing
+table picks the skills the task needs (language, architecture, security,
+testing...). Writing source is denied until `engineering-governance` is
+loaded. Every decision must trace to your request, code read in the repo, or
+a rule; anything else is a question for you.
+
+**How to use it.** Nothing to do. Expect the agent to ask before it guesses,
+to reuse code before creating more, and to run your type check, lint and tests
+before it ends a turn that changed code. To make it read the project faster,
+give the project a manifest (see [Per-project setup](#per-project-setup)).
+
+### Implementing a feature or a fix
+
+**What it is.** `engineering-implement`: a fixed workflow with a hard stop
+before any code.
+
+**How it works.** The agent reads the relevant code, asks all its open
+questions in one message, then posts a checklist: every file it will touch,
+what changes, and which tests cover it. It stops there. After your go-ahead it
+writes `[SPEC CONFIRMED]`, implements exactly the checklist, runs validation
+and updates the registries. Two hooks back this up: the **spec gate** blocks
+the end of a turn that wrote code without the confirmation, and the
+**validation gate** blocks the end of a turn that wrote code and ran no type
+check, lint or test.
+
+**How to use it.** Ask for the change ("add pagination to the orders
+endpoint"). Answer the questions, read the checklist, reply "ok", "go" or
+"sim". To change the plan, say what to change instead of confirming.
+
+### Starting a new project
+
+**What it is.** `engineering-scaffold`: the stack is decided before any code.
+
+**How it works.** For a greenfield request the agent presents a fixed list of
+stack questions (language, framework, database and access layer, messaging,
+Docker, linting...), in order. Anything you do not choose defaults to none or
+no. Only after the stack is set does it load the language and framework skills
+and scaffold.
+
+**How to use it.** Ask for the project ("create a NestJS API for invoices")
+and answer the list. Then continue as in *Implementing a feature*.
+
+### Refactoring and bug hunting in existing code
+
+**What it is.** `engineering-refactor`: a phased cleanup for codebases that
+grew without the rules.
+
+**How it works.** Phase 0 deletes dead code only, phase 1 sets the strictest
+tooling baseline (type checker, linter) and turns its errors into a backlog,
+phase 2 restructures, phase 3 fixes the bugs. A bug in a dirty codebase is
+fixed after the purge and the baseline, because before them it cannot be
+scoped reliably.
+
+**How to use it.** Say "refactor this project", or describe the bug ("the
+login returns 500 after a password change"). Confirm each phase as the agent
+proposes it.
+
+### Code review and the push gate
+
+**What it is.** `engineering-code-review`: a checklist-driven review whose
+findings are Blocker, Major or Minor, and a hook that makes it mandatory
+before a push.
+
+**How it works.** The review reads the whole diff, loads the skills the diff
+touches and runs every checklist section (layers, security, concurrency,
+performance, repeated logic, dead code...). A `git push` is denied until the
+current `HEAD` has been reviewed; a new commit needs a new review. Blockers
+are fixed before the push. Blocker and Major findings in code the agent wrote
+arm the learn gate (see *Learning from mistakes*).
+
+**How to use it.** Ask "review this diff" or "review PR 42", or just ask for a
+push and the review runs first. Only you can skip it: say "pode pushar sem
+review" / "skip review", or set `PLAYBOOK_SKIP_REVIEW=1`.
+
+### Safety gates
+
+**What it is.** Hooks that stop what cannot be undone or should not leave the
+machine: destructive commands, AI attribution in history, and secrets.
+
+**How it works.**
+- **Destructive commands** (`rm -r`, `git reset --hard`, force push,
+  `git clean`, `DROP TABLE`, and their respellings) are denied until you
+  authorize that act in your own message. The permission lasts one turn. An
+  `rm` inside the session's own scratchpad needs none.
+- **AI attribution** (`Co-Authored-By: Claude`, "Generated with Claude") is
+  denied in commits, tags, pull requests and their bodies.
+- **Secrets** with a known token shape (AWS, GitHub, Stripe, private keys and
+  about a hundred more, from gitleaks' rules) are denied in what a write adds,
+  a commit records or a push publishes. Generic patterns only warn.
+
+**How to use it.** When a destructive command is denied, the agent shows it
+and what it destroys. Answer naming the act: "pode apagar", "confirmo o
+reset", "go ahead and delete it"; a plain "ok" does not count. For a secret
+false positive, add the fingerprint from the denial to
+`.playbook/secrets-allow` yourself; the agent cannot write that file. If your
+team allows attribution, set `PLAYBOOK_ALLOW_AI_ATTRIBUTION=1` in your own
+environment.
+
+### Red-playbook: the security layer
+
+**What it is.** The playbook's security work, called red-playbook while it
+was built. The playbook ships defense. The proof that a defense holds is an
+attack, and it is run against two local targets only: the playbook itself,
+and your application running on your machine. Nothing published (production,
+staging, any host you do not run in the lab) is ever a target, and there is
+no override for that.
+
+**How it works.** Four parts:
+- **Knowledge.** `engineering-security` holds the rules for input,
+  injection, secrets, auth and HTTP, plus 13 vulnerability fiches in
+  `references/` (injection, XSS, SSRF, access control, tokens and sessions,
+  files, redirects, untrusted parsing, business logic, GraphQL, crypto,
+  supply chain, LLM apps). Each fiche gives the invariant, the dangerous sinks,
+  the control, the hostile inputs that become negative tests, and what a
+  review looks for.
+- **Review.** A security candidate in a review ends in one of three states:
+  confirmed (the path from input to sink, `file:line` by `file:line`), ruled
+  out (the control that holds, with its `file:line`), or an open proof gap.
+  Nothing is dropped silently.
+- **Lab.** `lab/run.py` runs an isolated copy of your compose stack on
+  internal Docker networks and scans one service with OWASP ZAP baseline
+  (passive). Nothing in the copy reaches your machine, your network or the
+  internet, and your running stack is not touched. The hook denies scanners
+  (`nmap`, `sqlmap`, ZAP...) run anywhere else.
+- **Static analysis and self-tests.** When `semgrep` or `opengrep` is
+  installed, a scan of the changed files becomes part of validation. The
+  playbook's own gates are attacked by a corpus of evasion attempts
+  (`tests/unit/test_gate_evasion.py`), run with the test suite.
+
+**How to use it.**
+1. Ask: "do a security review of this diff", or "is this endpoint safe against
+   SSRF?". The agent loads the matching fiches and reports each candidate in
+   one of the three states.
+2. For a confirmed finding, the fix comes with the fiche's negative tests,
+   written first. The test, not the report, keeps it fixed.
+3. To scan the running application, install Docker with Compose 2.20+ and
+   ask the agent to "scan the app in the lab". The lab ships with the plugin
+   as `lab/run.py`, and the agent knows where it is. From a clone of this
+   repository you can also run it yourself, from the project directory:
+
+   ```bash
+   python3 <playbook>/lab/run.py --setup                    # once: downloads the pinned ZAP image (about 1.2 GB)
+   python3 <playbook>/lab/run.py --service app --port 8080  # scan the compose service `app`
+   ```
+
+   A Medium or High alert is a review candidate, confirmed in the code before
+   it is fixed. Exit codes: `0` clean, `1` findings, `2` refused (isolation or
+   environment, with the reason), `3` Docker or scanner error.
+4. Optional: install `semgrep` and the next sessions use it.
+
+### Context limits and handoff
+
+**What it is.** The hook that measures the session's context and decides when
+it must end.
+
+**How it works.** At 70% of the model's window the agent stops taking new
+work, finishes the step in progress and writes a handoff: goal, what is
+done, the next step, decisions and files. At 85% every tool call is denied and
+it writes the handoff at once. The hook saves the handoff and an automatic
+carry-over note (request, files written, commands run, gates still owed). The
+playbook never recommends `/compact`, which does not reliably get back under
+the threshold.
+
+**How to use it.** When the agent asks for it, type `/clear`, then "resume
+where we left off" ("retome de onde paramos"). The next session starts with
+the handoff injected. To cut cost earlier on large windows, set a context
+budget in `/playbook-config` (for example 250k tokens).
+
+### Learning from mistakes
+
+**What it is.** A loop that turns a repeated mistake into a written rule in
+the project's `CLAUDE.md`.
+
+**How it works.** Every failed tool call goes to a journal for the session.
+When you say the previous turn was wrong, when the same call fails three
+times, or when a review finds Blocker or Major issues in the agent's code, the
+**learn gate** keeps the turn open until the agent names the premise it got
+wrong, states what is true and writes the rule into `CLAUDE.md` with
+`[LEARNED]`. **Learn**, in `/playbook-config`, mines the journal and the
+project's session logs for repeated failure-then-fix patterns and writes them
+as rules. **Known-failure warnings**, when on, warn before a command or a
+write touches something that already failed in this project.
+
+**How to use it.** Correct the agent in plain words ("that's wrong, the tests
+live in `test/`"). Open `/playbook-config` → Learn after a rough session, and
+turn on Known-failure warnings there if you want the reminders.
+
+### Settings and switching the rules off
+
+**What it is.** `/playbook-config`, `/playbook-off` and `/playbook-on`.
+
+**How it works.** `/playbook-config` opens a numbered menu above the prompt:
+
+| Entry | What it changes | Default |
+| --- | --- | --- |
+| Prose level | How much explanation a response carries: `low`, `mid`, `high` (from the next session) | `mid` |
+| Known-failure warnings | Warn before touching something that failed before | off |
+| Context budget | Token count after which the session wraps up and hands off | off |
+| CLAUDE.md budget | Size the project `CLAUDE.md` may grow to before a turn is blocked | 40,000 characters |
+| Status | The session's configuration and the output filter's savings | |
+| Learn | Mine this project's failures into rules | |
+
+`/playbook-off` suspends every gate and rule for the session, including the
+safety blocks; `/playbook-on` brings them back.
+
+**How to use it.** Type `/playbook-config`, a number, Enter; `0` goes back.
+You can also just ask ("shorter answers"). Use `/playbook-off` for throwaway
+exploration only.
+
+### Keeping cost down
+
+**What it is.** Three things that cut tokens without cutting checks.
+
+**How it works.**
+- **Output filter.** Read-only commands (`grep`, `ls -l`, `git log`) have
+  their output shortened before the agent reads it: matches grouped by file,
+  noise dropped. `cat` and the Read tool are never filtered.
+- **Runner agent.** `engineering-playbook:runner` runs test suites, builds and
+  long jobs on the cheapest model and reports only the result. A validation it
+  runs after the agent's last write counts for the validation gate.
+- **Budgets.** The context budget and the `CLAUDE.md` budget above.
+
+**How to use it.** Nothing to do for the filter; prefix a command with
+`PLAYBOOK_RAW=1` to see its raw output. Ask the agent to "run the tests with
+the runner". See the savings in `/playbook-config` → Status.
+
+### Per-project memory: manifest and registries
+
+**What it is.** A project manifest in `CLAUDE.md` and a `registries/` folder
+that lists every artifact.
+
+**How it works.** The agent reads the manifest (stack, commands, aliases,
+architecture) instead of asking for it again. Before creating a service,
+DTO or utility it checks the registry, and it updates the registry after every
+change, so nothing gets written twice.
+
+**How to use it.** Write the manifest once and `mkdir registries`, as in
+[Per-project setup](#per-project-setup).
+
+---
+
 ## Detailed installation
 
 ### Claude Code
@@ -616,8 +882,8 @@ validation command (tsc, lint, tests) ran afterwards. At Stop the spec gate
 is checked first, then the validation gate; `stop_hook_active` breaks any
 loop after a single block.
 
-Both the spec gate and skill gate are suspended while
-`/playbook-off` is active. Context and safety checks always run.
+Every gate, the safety blocks included, is suspended while `/playbook-off`
+is active: off is a full pass-through until `/playbook-on`.
 
 #### Destructive operations
 
@@ -936,37 +1202,6 @@ the language opt-in) along when an implementation starts.
 | MVC | `engineering-arch-mvc` |
 | SOLID / naming / design patterns | `engineering-design-patterns` |
 | Extract session learnings | `engineering-learn` |
-
-### Implementation workflow
-
-When `engineering-implement` loads, the flow is:
-
-1. **Read** — read all relevant files.
-2. **Clarify** — list open questions in a single message.
-3. **Spec checklist** — produce a checklist of every file that will be touched,
-   what changes, and what tests cover it.
-4. **STOP** — post the checklist and wait for explicit confirmation (`"proceed"`,
-   `"ok"`, `"sim"`, `"go"`) before writing a single line of code.
-5. **Build** — implement exactly the checklist, nothing more.
-6. **Validate** — run lint, type check, and tests.
-7. **Register** — update registry entries.
-
-No code is written before step 4 confirmation.
-
-### Session learning
-
-After a session with errors or corrections, open `/playbook-config` and pick
-**Learn**.
-
-The agent will:
-
-1. Read the failure journal the hooks keep for this project, then the session
-   logs at `~/.claude/projects/<project-path-slug>/*.jsonl`.
-2. Extract every tool call that returned an error and the fix that followed.
-3. Correlate patterns: wrong file paths, failed commands, wrong search scope,
-   rejected tool calls.
-4. Write specific corrections into the project `CLAUDE.md` with idempotent
-   markers — re-running always replaces, never duplicates.
 
 ---
 
