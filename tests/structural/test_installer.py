@@ -112,6 +112,16 @@ class TestInstaller(unittest.TestCase):
 
     # ── Harnesses ─────────────────────────────────────────────────────────────
 
+    def test_first_claude_install_shows_a_quick_start_then_is_quiet_on_update(self) -> None:
+        self._fake_claude()
+        first = self._run()  # default claude harness, first time
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn('quick start', first.stdout.lower())
+        self.assertIn('/playbook-config', first.stdout)
+        second = self._run()  # same dir again: an update stays quiet
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotIn('quick start', second.stdout.lower())
+
     def test_antigravity_is_installed_from_the_current_link(self) -> None:
         # The commit-msg hook names the checker through DIR/current, so an
         # update that moves the link reaches it without a reinstall.
