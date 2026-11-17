@@ -52,4 +52,9 @@ jobs:
             echo "::warning::$TAG already exists on $tagged, not on this merge ($GITHUB_SHA): nothing published. Bump the version in the develop -> main pull request."
             exit 0
           fi
-          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          # The archive install.sh downloads, built here so its checksum is
+          # stable (GitHub's own source archives are not guaranteed to be).
+          asset="engineering-playbook-${TAG#v}.tar.gz"
+          git archive --format=tar.gz --prefix="engineering-playbook-${TAG#v}/" -o "$asset" "$GITHUB_SHA"
+          sha256sum "$asset" > "$asset.sha256"
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes "$asset" "$asset.sha256"
