@@ -46,10 +46,7 @@ test command before ending the turn. The Stop hook enforces it.
 - Suspend for this session with /playbook-off, resume with \
 /playbook-on.
 
-Reply to the user in the language they write in, and keep that language after a \
-/clear or a compaction: the English above is addressed to you, not a cue to \
-switch the conversation to English. The playbook's menus and prompts follow the \
-user's language too."""
+""" + playbook_core.USER_LANGUAGE_POLICY
 
 COMPACT_NOTE = (
     '\n\nThis fired after a compaction — the rules above were re-injected, but any '
@@ -94,6 +91,21 @@ def _suspended(session_id: str) -> bool:
     resumed/compacted session has one; a fresh session starts unsuspended."""
     state = playbook_core.load_state(playbook_core.state_path(STATE_DIR, session_id))
     return bool(state.get('suspended'))
+
+
+def _attended() -> bool:
+    """False when Claude Code runs without a person at the prompt (`claude -p`,
+    the Agent SDK). Offering the guided setup there would burn the one-time
+    marker on a session nobody reads, so the real first interactive session
+    would never see it.
+
+    Measured on Claude Code 2.1.326: a `claude -p` SessionStart hook gets
+    CLAUDE_CODE_ENTRYPOINT=sdk-cli and CLAUDE_CODE_SESSION_ATTENDED=0, an
+    interactive one gets `cli` and `1`. Either signal is enough; when neither is
+    set (an older Claude Code) the session counts as attended, as before."""
+    if os.environ.get('CLAUDE_CODE_SESSION_ATTENDED') == '0':
+        return False
+    return not os.environ.get('CLAUDE_CODE_ENTRYPOINT', '').startswith('sdk')
 
 
 def _first_run() -> bool:
@@ -198,8 +210,8 @@ def main() -> None:
         context += _carryover(input_data, source)
 
     # The guided-setup offer appears once, on the first real session (not a
-    # compact or a clear), and never again.
-    if source not in ('compact', 'clear'):
+    # compact, a clear or a headless run), and never again.
+    if source not in ('compact', 'clear') and _attended():
         try:
             if _first_run():
                 context += FIRST_RUN_NOTE

@@ -2835,6 +2835,18 @@ def read_incidents(path: str, limit: int = 50) -> list[dict]:
 
 PROSE_LEVELS = ('low', 'mid', 'high')
 
+# The session context is English; without this the model reads it as a cue and
+# switches to English, most visibly right after a /clear. One text for every
+# harness: the Claude Code and Codex SessionStart hooks inject it, and the
+# Antigravity AGENTS.template.md carries it verbatim (a structural test holds
+# the two equal).
+USER_LANGUAGE_POLICY = (
+    'Reply to the user in the language they write in, and keep that language '
+    'after the context is cleared (/clear) or compacted: the English in this '
+    'context is addressed to you, not a cue to switch the conversation to '
+    "English. The playbook's menus and prompts follow the user's language too."
+)
+
 # Prose budgets. These are the product, not decoration: the difference between
 # them is what the model is allowed to spend output tokens ON, and every level
 # forbids the same filler — preamble, restating the request, recapping work the
