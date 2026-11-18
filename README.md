@@ -1042,7 +1042,7 @@ python3 lab/run.py --uninstall                   # removes the image
 - **Host access.** A service that is privileged, adds capabilities beyond a small safe set, uses devices or GPUs, shares the host's namespaces (`pid`, `ipc`, `uts`, `userns_mode`, `cgroup`), uses a `network_mode`, or reaches containers outside the lab is refused.
 - **Target.** The target is a compose service plus a port and a path, never a URL.
 - **Checks before start.** Both the rendered and the Compose-resolved configuration are checked. A failed check refuses the run with exit code 2.
-- **Bind mounts.** A project that mounts folders of this computer is refused, with the list of mounts. `--allow-bind-mounts` scans anyway.
+- **Mounts of this computer.** A read-only mount whose source is inside the project (committed init scripts, seed data) is kept. A read-write mount is dropped, so the lab writes to a fresh, empty location and never to the developer's files; a read-only mount outside the project, and a `configs:`/`secrets:` file outside it, are refused.
 - **Nothing kept.** The report is printed and deleted. The lab's containers, network, volumes and built images are removed at the end of every run, also on error or Ctrl-C. A removal that fails is reported with the command that finishes it.
 
 The hook denies scanners and scanner containers (`nmap`, `nuclei`, `sqlmap`,

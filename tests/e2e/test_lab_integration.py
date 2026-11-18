@@ -126,12 +126,23 @@ class TestLabRun(unittest.TestCase):
         self.assertIn('CWE-89', result.stdout)
         self.assertEqual(self._leftovers(), [])
 
-    def test_bind_mount_is_refused_before_anything_starts(self):
+    def test_a_mount_outside_the_project_is_refused_before_anything_starts(self):
+        with open(os.path.join(self.project, 'compose.yaml'), 'a') as fh:
+            fh.write('    volumes: ["/etc/hostname:/srv/h:ro"]\n')
+        result = self._run()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn('outside the project', result.stderr)
+        self.assertEqual(self._leftovers(), [])
+
+    def test_a_writable_bind_inside_the_project_is_dropped_and_the_lab_runs(self):
+        # The drop depends on `docker compose config` normalizing this short
+        # form to long form; a unit test cannot prove that, so it is run against
+        # the real tool here. The rw bind is dropped and the scan completes.
         with open(os.path.join(self.project, 'compose.yaml'), 'a') as fh:
             fh.write('    volumes: ["./:/srv"]\n')
         result = self._run()
-        self.assertEqual(result.returncode, 2, result.stdout)
-        self.assertIn('--allow-bind-mounts', result.stderr)
+        self.assertIn(result.returncode, (0, 1), result.stdout + result.stderr)
+        self.assertNotIn('outside the project', result.stderr)
         self.assertEqual(self._leftovers(), [])
 
 
