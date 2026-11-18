@@ -668,62 +668,86 @@ def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
     return truncated
 
 
-def _turn_user_prompt(transcript: str | None) -> str:
-    """Text of the real user message that started the current turn, or '' when
-    something else started it: a background-task notification, a subagent
-    hand-back, an automatic continuation.
+def _content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return ' '.join(
+            b.get('text', '') for b in content
+            if isinstance(b, dict) and b.get('type') == 'text'
+        )
+    return ''
 
-    The harness closes every finished turn with a `turn_duration` system entry
-    and writes none for what it injects into a running turn (reminders, skill
-    bodies, Stop-hook feedback; a notification that arrives mid-turn is an
-    attachment, not a user entry). So a closed turn met before any user message
-    means the user did not start this one."""
+
+def _origin_kind(origin: object) -> str | None:
+    return origin.get('kind') if isinstance(origin, dict) else None
+
+
+def _turn_user_prompts(transcript: str | None) -> list[str]:
+    """What the user sent in the current turn: the message that started it, when
+    the user started it, and the messages they typed into it while it ran.
+    Empty when nothing the user sent is in the turn.
+
+    The harness marks what the human sent with `origin.kind == 'human'`: on the
+    user entry that opens a turn, and on the `queued_command` attachment of a
+    message typed mid-turn. Everything else that opens a turn carries another
+    origin (notification, hand-back, plugin) or none (a compaction summary, an
+    interrupt marker, a built-in slash command, bash mode, an SDK prompt), and
+    its text is not the user's.
+
+    The harness also closes every finished turn with a `turn_duration` system
+    entry and writes none for what it injects into a running turn, so the walk
+    never reaches back past one into an earlier turn."""
     if not transcript or not os.path.exists(transcript):
-        return ''
+        return []
+    prompts: list[str] = []
     for line in reversed(_read_tail_lines(transcript)):
         try:
             obj = json.loads(line)
         except Exception:
             continue
         # Trade-off: a background subagent still running after the user's turn
-        # closed reads the parent transcript and so loses that turn's consent
-        # (denied, never wrongly allowed); and a transcript that records no
-        # `turn_duration` at all falls back to the latest user message.
+        # closed reads the parent transcript and so loses that turn's consent;
+        # a compaction in the middle of a turn hides the user's opening message
+        # behind the summary; and a Claude Code that writes no `origin` gives no
+        # consent at all. Each is denied, never wrongly allowed.
         if obj.get('type') == 'system' and obj.get('subtype') == 'turn_duration':
-            return ''
-        if not _is_user_prompt(obj):
+            break
+        attachment = obj.get('attachment') if obj.get('type') == 'attachment' else None
+        if isinstance(attachment, dict) and attachment.get('type') == 'queued_command':
+            if (attachment.get('commandMode') == 'prompt'
+                    and _origin_kind(attachment.get('origin')) == 'human'):
+                prompts.append(_content_text(attachment.get('prompt')))
             continue
-        content = obj.get('message', {}).get('content')
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return ' '.join(
-                b.get('text', '') for b in content
-                if isinstance(b, dict) and b.get('type') == 'text'
-            )
-    return ''
+        origin = _origin_kind(obj.get('origin')) if obj.get('type') == 'user' else None
+        if origin is None and not _is_user_prompt(obj):
+            continue
+        if origin == 'human' and _is_user_prompt(obj):
+            prompts.append(_content_text(obj.get('message', {}).get('content')))
+        break
+    return prompts
 
 
-def _turn_typed_words(transcript: str | None) -> str:
-    """What the user typed in the message that started the current turn:
+def _turn_typed_words(transcript: str | None) -> list[str]:
+    """What the user typed in each message they sent in the current turn:
     consent is read from here, never from a block they pasted from elsewhere
-    nor from a turn the user did not start."""
-    return playbook_core.typed_words(_turn_user_prompt(transcript))
+    nor from text the user did not send. One item per message, so a phrase is
+    never matched across two of them."""
+    return [playbook_core.typed_words(prompt) for prompt in _turn_user_prompts(transcript)]
 
 
 def _destructive_authorized(transcript: str | None) -> bool:
-    """Whether the user authorized a destructive operation in their current
-    message.
+    """Whether the user authorized a destructive operation in what they sent in
+    the current turn.
 
-    Read fresh from the message that started the current turn on every call,
-    which is what scopes it: an authorization is good for the turn it was given
-    in and no longer, and a turn a notification or a hand-back started has none. It
+    Read fresh from the current turn on every call, which is what scopes it: an
+    authorization is good for the turn it was given in and no longer, and a turn
+    a notification, a hand-back or a compaction summary opened has none. It
     is deliberately not persisted — a stored flag would let a "pode apagar" from
     an hour ago clear a block on something the user never saw. And because only
-    user messages are scanned, the model cannot authorize itself by writing the
-    phrase in its own response."""
-    prompt = _turn_typed_words(transcript)
-    return bool(prompt) and bool(DESTRUCTIVE_AUTHORIZED_RE.search(prompt))
+    what the user sent is scanned, the model cannot authorize itself by writing
+    the phrase in its own response or in a summary of earlier turns."""
+    return any(DESTRUCTIVE_AUTHORIZED_RE.search(words) for words in _turn_typed_words(transcript))
 
 
 _FINDING_RE = re.compile(r'^\s*[-*]\s+`?[^`\n]+?:\d+`?\s*[—-]', re.MULTILINE)
@@ -978,9 +1002,8 @@ def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict 
     not from the session's directory: a push from another worktree is about
     that worktree's commits. A commit is covered when a remote-tracking ref has
     it or a credited commit (a reviewed HEAD, a waived push tip) contains it.
-    The waiver is the user's own words in the message that started the current
-    turn (or
-    PLAYBOOK_SKIP_REVIEW in the environment), never the model's.
+    The waiver is the user's own words in what they sent in the current turn
+    (or PLAYBOOK_SKIP_REVIEW in the environment), never the model's.
 
     Fails closed when a push's directory or revisions cannot be resolved or git
     cannot list its commits; outside a repository nothing is published."""
@@ -1002,7 +1025,7 @@ def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict 
             pending.append((target.repo, target.revs, count))
     if not unknown and not pending:
         return None
-    if REVIEW_BYPASS_RE.search(_turn_typed_words(transcript)):
+    if any(REVIEW_BYPASS_RE.search(words) for words in _turn_typed_words(transcript)):
         # Remembered per commit so the rest of this push (and a retry of it)
         # does not re-prompt for a waiver the user already gave.
         waived = [tip for repo, revs, _ in pending for tip in playbook_core.pushed_tips(repo, revs)]

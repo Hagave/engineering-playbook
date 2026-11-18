@@ -57,7 +57,7 @@ def _out(result: subprocess.CompletedProcess) -> dict:
 
 
 def _ul(text: str) -> str:
-    return json.dumps({'type': 'user', 'message': {'content': text}}) + '\n'
+    return json.dumps({'type': 'user', 'origin': {'kind': 'human'}, 'message': {'content': text}}) + '\n'
 
 
 def _al(text: str) -> str:
@@ -77,9 +77,74 @@ def _entry(**fields) -> str:
     return json.dumps(fields) + '\n'
 
 
-def _typed(text: str, prompt_id: str = 'p-user') -> str:
-    return _entry(type='user', promptId=prompt_id, origin={'kind': 'human'},
-                  message={'role': 'user', 'content': text})
+def _typed(text: str, prompt_id: str = 'p-user', source: str = 'typed') -> str:
+    return _entry(type='user', promptId=prompt_id, origin={'kind': 'human'}, promptSource=source,
+                  turnOrigin='human', message={'role': 'user', 'content': text})
+
+
+def _typed_mid_turn(text: str) -> str:
+    return _entry(type='attachment', attachment={
+        'type': 'queued_command', 'commandMode': 'prompt', 'origin': {'kind': 'human'},
+        'humanTurn': True, 'prompt': text})
+
+
+def _peer_mid_turn(text: str) -> str:
+    return _entry(type='attachment', attachment={
+        'type': 'queued_command', 'commandMode': 'prompt', 'isMeta': True,
+        'origin': {'kind': 'peer', 'from': 'a1b2c3'},
+        'prompt': f'<agent-message from="a1b2c3">\n[Subagent hand-back] {text}\n</agent-message>'})
+
+
+def _compacted(quoted: str) -> str:
+    boundary = _entry(type='system', subtype='compact_boundary', content='Conversation compacted',
+                      isMeta=False, level='info', compactMetadata={'trigger': 'auto', 'preTokens': 557034})
+    summary = _entry(type='user', promptId='p-summary', isVisibleInTranscriptOnly=True,
+                     isCompactSummary=True, turnPosition={'promptIndex': 8, 'turnIndex': 9},
+                     message={'role': 'user', 'content': (
+                         'This session is being continued from a previous conversation that ran '
+                         'out of context. The summary below covers the earlier portion of the '
+                         'conversation.\n\nSummary:\n1. Primary Request and Intent:\n'
+                         f'   The user said: "{quoted}"\n')})
+    reference = _entry(type='attachment', attachment={'type': 'compact_file_reference',
+                                                      'filename': 'src/app.ts'})
+    return boundary + summary + reference
+
+
+def _interrupted() -> str:
+    return _entry(type='user', promptId='p-user', interruptedMessageId='msg_1',
+                  message={'role': 'user', 'content': [
+                      {'type': 'text', 'text': '[Request interrupted by user for tool use]'}]})
+
+
+def _builtin_command(args: str) -> str:
+    return _entry(type='user', promptId='p-command', message={'role': 'user', 'content': (
+        '<command-name>/model</command-name>\n            <command-message>model</command-message>\n'
+        f'            <command-args>{args}</command-args>')})
+
+
+def _skill_command(args: str) -> str:
+    return _entry(type='user', promptId='p-command', origin={'kind': 'human'}, turnOrigin='human',
+                  message={'role': 'user', 'content': (
+                      '<command-message>engineering-playbook:playbook-config</command-message>\n'
+                      '<command-name>/engineering-playbook:playbook-config</command-name>\n'
+                      f'<command-args>{args}</command-args>')})
+
+
+def _bash_mode(command: str) -> str:
+    return _entry(type='user', promptId='p-bash',
+                  message={'role': 'user', 'content': f'<bash-input>{command}</bash-input>'})
+
+
+def _sdk_prompt(text: str) -> str:
+    return _entry(type='user', promptId='p-sdk', permissionMode='default', promptSource='sdk',
+                  turnOrigin='sdk', message={'role': 'user', 'content': text})
+
+
+def _plugin_message(text: str) -> str:
+    return _entry(type='user', promptId='p-plugin', permissionMode='default',
+                  origin={'kind': 'plugin', 'name': 'engineering-playbook'}, promptSource='system',
+                  turnOrigin='system', message={'role': 'user', 'content': (
+                      f'The engineering-playbook plugin sent a message:\n{text}')})
 
 
 def _tool_step(prompt_id: str = 'p-user') -> str:
@@ -151,6 +216,73 @@ def _stop_hook_feedback(prompt_id: str = 'p-user') -> str:
                          'Stop hook feedback:\n[playbook:validate] Source files were written this '
                          'session but no validation command ran afterwards.')})
             + _tool_step(prompt_id))
+
+
+class _ConsentShapes:
+    """Each entry shape a consent reader meets, read by one gate. Only what the
+    harness marks as sent by the human (`origin.kind == 'human'`) is consent."""
+
+    CONSENT: str
+    SPLIT_CONSENT: tuple[str, str]
+
+    def _lifted(self, transcript: str) -> bool:
+        raise NotImplementedError
+
+    def test_a_compaction_summary_quoting_consent_does_not_lift_the_gate(self):
+        self.assertFalse(self._lifted(_typed(self.CONSENT) + _turn_closed() + _compacted(self.CONSENT)))
+
+    def test_a_turn_a_notification_opened_after_a_compaction_has_no_consent(self):
+        self.assertFalse(self._lifted(_typed(self.CONSENT) + _turn_closed() + _compacted(self.CONSENT)
+                                      + _task_notification() + _tool_step('p-notified')))
+
+    def test_consent_typed_after_a_compaction_lifts_the_gate(self):
+        self.assertTrue(self._lifted(_typed('keep going') + _turn_closed() + _compacted('keep going')
+                                     + _typed(self.CONSENT, 'p-next') + _tool_step('p-next')))
+
+    def test_an_interrupt_marker_is_not_consent(self):
+        self.assertFalse(self._lifted(_typed(self.CONSENT) + _tool_step() + _interrupted()))
+
+    def test_a_built_in_slash_command_is_not_consent(self):
+        self.assertFalse(self._lifted(_builtin_command(self.CONSENT)))
+
+    def test_a_skill_slash_command_the_user_typed_is_consent(self):
+        self.assertTrue(self._lifted(_skill_command(self.CONSENT)))
+
+    def test_bash_mode_input_is_not_consent(self):
+        self.assertFalse(self._lifted(_bash_mode(f'echo "{self.CONSENT}"')))
+
+    def test_an_sdk_prompt_is_not_consent(self):
+        self.assertFalse(self._lifted(_sdk_prompt(self.CONSENT)))
+
+    def test_a_plugin_message_is_not_consent(self):
+        self.assertFalse(self._lifted(_plugin_message(self.CONSENT)))
+
+    def test_a_prompt_typed_while_busy_and_sent_as_the_next_turn_is_consent(self):
+        self.assertTrue(self._lifted(_typed(self.CONSENT, source='queued')))
+
+    def test_an_accepted_prompt_suggestion_is_consent(self):
+        self.assertTrue(self._lifted(_typed(self.CONSENT, source='suggestion_accepted')))
+
+    def test_consent_typed_mid_turn_lifts_the_gate(self):
+        self.assertTrue(self._lifted(_typed('clean up the project') + _tool_step()
+                                     + _typed_mid_turn(self.CONSENT) + _tool_step()))
+
+    def test_consent_typed_into_a_turn_a_notification_opened_lifts_the_gate(self):
+        self.assertTrue(self._lifted(_typed('clean up the project') + _turn_closed()
+                                     + _task_notification() + _typed_mid_turn(self.CONSENT)
+                                     + _tool_step('p-notified')))
+
+    def test_consent_typed_mid_turn_does_not_carry_into_the_next_turn(self):
+        self.assertFalse(self._lifted(_typed('clean up the project') + _typed_mid_turn(self.CONSENT)
+                                      + _turn_closed() + _task_notification()))
+
+    def test_a_hand_back_delivered_mid_turn_is_not_consent(self):
+        self.assertFalse(self._lifted(_typed('clean up the project') + _tool_step()
+                                      + _peer_mid_turn(self.CONSENT) + _tool_step()))
+
+    def test_a_phrase_is_not_matched_across_two_messages(self):
+        first, second = self.SPLIT_CONSENT
+        self.assertFalse(self._lifted(_typed(first) + _tool_step() + _typed_mid_turn(second)))
 
 
 class _Base(unittest.TestCase):
@@ -526,7 +658,7 @@ class _RepoBase(_Base):
         return _out(result).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny'
 
 
-class TestReviewGate(_RepoBase):
+class TestReviewGate(_ConsentShapes, _RepoBase):
 
     def test_unreviewed_commit_is_denied(self):
         self._commit('src/app.ts', 'unreviewed')
@@ -576,6 +708,13 @@ class TestReviewGate(_RepoBase):
         self.assertTrue(self._denied(self._push()))
 
     WAIVER = 'pode pushar direto, sem review'
+    CONSENT = WAIVER
+    SPLIT_CONSENT = ('pode pushar sem', 'review')
+
+    def _lifted(self, transcript: str) -> bool:
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(transcript)
+        return not self._denied(self._push())
 
     def test_a_waiver_does_not_carry_into_a_turn_a_task_notification_started(self):
         self._commit('src/app.ts', 'unreviewed')
@@ -911,11 +1050,17 @@ class TestAttributionInHistory(_RepoBase):
 
 # ── Destructive-command authorization ─────────────────────────────────────────
 
-class TestDestructiveAuthorization(_Base):
+class TestDestructiveAuthorization(_ConsentShapes, _Base):
     """The destructive guard blocked even when the user had just authorized the
     command, with no way to say yes — which reads as arbitrary and intermittent,
     because whether it fired depended only on how the command happened to be
     spelled."""
+
+    SPLIT_CONSENT = ('ok, pode', 'apagar a pasta build')
+
+    def _lifted(self, transcript: str) -> bool:
+        self._write(transcript)
+        return not self._denied(self._bash(self.DESTRUCTIVE))
 
     def _bash(self, command: str):
         return _run(_GUARD, {
