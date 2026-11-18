@@ -916,6 +916,19 @@ def _check_watch(state: dict, prefs: dict, tool_name: str, tool_input: dict) -> 
     }
 
 
+def _check_shell_edit(state: dict) -> dict | None:
+    if state.get('shell_edit_noted'):
+        return None
+    return {
+        'block': False,
+        'to_model': True,
+        'model_only': True,
+        'msg': '[playbook:edit] This command edits project code from the shell. Use the edit tool for '
+               'project code: it checks each change against the file as read, and several edits can go '
+               'in one response. Keep a script for one mechanical change repeated across many files.',
+    }
+
+
 def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict | None:
     """Deny a push whose HEAD has not been reviewed.
 
@@ -1038,7 +1051,7 @@ def _emit_pretooluse(result: dict) -> None:
                 'hookEventName': 'PreToolUse',
                 'additionalContext': result['msg'],
             },
-            'systemMessage': result['msg'],
+            **({} if result.get('model_only') else {'systemMessage': result['msg']}),
         }))
     else:
         print(json.dumps({'systemMessage': result['msg']}))
@@ -1152,6 +1165,7 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
                 state[flag] = False
     else:
         state['stop_blocked'] = []
+        state['shell_edit_noted'] = False
 
     # Spec gate, deferred from PreToolUse. Code was written this turn without a
     # visible [SPEC CONFIRMED]; the turn's text is now flushed, so this is the
@@ -1299,6 +1313,9 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
         # enforce here (hard pre-write deny).
         result = _check_skill_gate(state)
 
+    shell_edit = _check_shell_edit(state) if not result and code_write and tool_name == 'Bash' else None
+    result = result or shell_edit
+
     # The advisory outranks every other non-blocking message (a watch hint):
     # governance names this hook the single source of truth for context health.
     # Only a real gate verdict displaces it.
@@ -1308,6 +1325,9 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
     if secret_notice and not (result and result.get('block')):
         result = (secret_notice if not result else
                   {**secret_notice, 'msg': result['msg'] + '\n\n' + secret_notice['msg']})
+
+    if shell_edit and result and not result.get('block') and shell_edit['msg'] in result['msg']:
+        state['shell_edit_noted'] = True
 
     _save_state(state)
 
