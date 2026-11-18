@@ -5,8 +5,12 @@ machine, with OWASP ZAP — passive by default, active (attack payloads) with
 --active — against an isolated copy of its stack, and nothing else.
 
     python3 lab/run.py --setup                        # check Docker, download the scanner image
-    python3 lab/run.py --service app --port 8080      # passive scan of the `app` service
-    python3 lab/run.py --service app --port 8080 --active   # active scan (sends payloads)
+    python3 lab/run.py                                # find the compose file, passive-scan every
+                                                      #   service built from inside the project
+    python3 lab/run.py --service app --port 8080      # passive scan of one named service
+    python3 lab/run.py --active                       # active scan (sends payloads)
+    python3 lab/run.py --gate                         # scan the committed tree (a worktree of
+                                                      #   HEAD), record the result against the SHA
     python3 lab/run.py --uninstall                    # remove the scanner image
 
 Both modes run only against the isolated target on the internal network; the
@@ -50,6 +54,7 @@ Python 3.10+, standard library only.
 """
 import argparse
 import csv
+import hashlib
 import json
 import os
 import platform
@@ -320,6 +325,13 @@ def _within(path: str, root: str) -> bool:
     return real == real_root or real.startswith(real_root + os.sep)
 
 
+def _within_any(path: str, roots: list[str]) -> bool:
+    """Whether `path` is inside any of `roots`. In gate mode the roots are the
+    project and the worktrees of its committed tree, so a build context or mount
+    redirected into a worktree still counts as inside the project."""
+    return any(_within(path, root) for root in roots)
+
+
 def host_mounts(config: dict) -> list[HostMount]:
     """Every place a project service mounts a path of this computer: a
     `type: bind`, and a named volume the local driver binds to a host path via
@@ -387,7 +399,8 @@ def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
                      minutes: int, active: bool = False,
                      active_minutes: int = ACTIVE_SCAN_MINUTES,
                      tool: str = 'zap', level: int = SQLMAP_LEVEL,
-                     risk: int = SQLMAP_RISK, time_sec: int = SQLMAP_TIME_SEC) -> dict:
+                     risk: int = SQLMAP_RISK, time_sec: int = SQLMAP_TIME_SEC,
+                     worktrees: dict[str, str] | None = None) -> dict:
     """The project's resolved compose configuration, turned into the lab.
 
     Ports, fixed names, subnets, addresses and image tags of built services
@@ -412,6 +425,8 @@ def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
         service.pop('container_name', None)
         if 'build' in service:
             service.pop('image', None)  # built under the lab's name, removed by `down --rmi local`
+            if worktrees:
+                _remap_build(service, worktrees)  # build the committed tree, not the working one
         attached = service.get('networks')
         if isinstance(attached, list):
             attached = {n: None for n in attached}
@@ -445,6 +460,8 @@ def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
             service['volumes'] = kept
     for name in freshen:
         config['volumes'][name].pop('driver_opts', None)
+    if worktrees:
+        _remap_mounts(config, worktrees)  # read committed init/seed data, not the working tree
     target_service = services[target.service]
     networks = target_service.get('networks') or {'default': None}
     networks[NETWORK] = None
@@ -502,13 +519,14 @@ def _is_local_build_path(source: str) -> bool:
     return not (s.startswith(('docker-image://', 'oci-layout://')) or '://' in s)
 
 
-def _build_reach(name: str, service: dict, project_root: str) -> list[str]:
+def _build_reach(name: str, service: dict, roots: list[str]) -> list[str]:
     """Fields of a service's `build:` that read this computer at build time.
     The lab keeps `build:` and runs `up` (it builds on the host daemon), so a
     build that forwards SSH, pulls in a host directory as an extra context, or
     builds from a context outside the project reaches files of this computer,
     the same as a mount does. Build-time network (a base image, a remote
-    context) is inherent to building and is not refused here."""
+    context) is inherent to building and is not refused here. `roots` is the
+    project, plus the worktrees that hold its committed tree in gate mode."""
     build = service.get('build')
     if isinstance(build, str):
         build = {'context': build}
@@ -516,7 +534,7 @@ def _build_reach(name: str, service: dict, project_root: str) -> list[str]:
         return []
     problems = []
     context = build.get('context')
-    if context and _is_local_build_path(context) and not _within(context, project_root):
+    if context and _is_local_build_path(context) and not _within_any(context, roots):
         problems.append(f'service {name!r} builds from {context}, a context outside the project')
     if build.get('ssh'):
         problems.append(f'service {name!r} forwards SSH to its build (build.ssh), reaching '
@@ -524,7 +542,7 @@ def _build_reach(name: str, service: dict, project_root: str) -> list[str]:
     extra = build.get('additional_contexts') or {}
     sources = extra.values() if isinstance(extra, dict) else [str(e).split('=', 1)[-1] for e in extra]
     for source in sources:
-        if _is_local_build_path(source) and not _within(str(source), project_root):
+        if _is_local_build_path(source) and not _within_any(str(source), roots):
             problems.append(f'service {name!r} builds from an extra context outside the project '
                             f'({source})')
     return problems
@@ -579,13 +597,17 @@ def _host_reach(name: str, service: dict) -> list[str]:
 
 
 def validate_lab_config(config: dict, target_service: str, report_dir: str,
-                        project_root: str, scanner_image: str = ZAP_IMAGE) -> list[str]:
+                        project_root: str, scanner_image: str = ZAP_IMAGE,
+                        worktrees: dict[str, str] | None = None) -> list[str]:
     """Every way `config` could let the scanner reach beyond the lab, or let the
     lab reach into the developer's environment. [] when it is safe to start.
     `project_root` is the project's directory: a read-only mount inside it is
-    kept, anything else refused. `scanner_image` is the pinned image the scanner
-    must be (ZAP or sqlmap)."""
+    kept, anything else refused. In gate mode `worktrees` holds the committed
+    tree the build and in-project mounts were redirected to, so a path inside a
+    worktree counts as inside the project. `scanner_image` is the pinned image
+    the scanner must be (ZAP or sqlmap)."""
     problems: list[str] = []
+    in_project = [project_root, *(worktrees or {}).values()]
     networks = config.get('networks') or {}
     services = config.get('services') or {}
     for name, network in networks.items():
@@ -617,7 +639,7 @@ def validate_lab_config(config: dict, target_service: str, report_dir: str,
             if item.get('external'):
                 problems.append(f'{singular} {name!r} is external: the lab would reuse a '
                                 f'{singular} it does not own')
-            elif item.get('file') and not _within(item['file'], project_root):
+            elif item.get('file') and not _within_any(item['file'], in_project):
                 problems.append(f'{singular} {name!r} reads {item["file"]}, a file outside '
                                 'the project')
 
@@ -657,7 +679,7 @@ def validate_lab_config(config: dict, target_service: str, report_dir: str,
                 if isinstance(attachment, dict) and attachment.get(key):
                     problems.append(f'service {name!r} has a fixed {key} on {network_name!r}')
         problems += _host_reach(name, service)
-        problems += _build_reach(name, service, project_root)
+        problems += _build_reach(name, service, in_project)
     for name, network in networks.items():
         if isinstance(network, dict) and ((network.get('ipam') or {}).get('config')
                                           or (network.get('driver_opts') or {}).get(_BRIDGE_NAME_OPT)):
@@ -668,7 +690,7 @@ def validate_lab_config(config: dict, target_service: str, report_dir: str,
     # business touching. build_lab_config has already dropped writable mounts,
     # so a writable one reaching here is an unresolved form and is refused too.
     for mount in host_mounts(config):
-        if mount.read_only and _within(mount.source, project_root):
+        if mount.read_only and _within_any(mount.source, in_project):
             continue
         why = 'is writable' if not mount.read_only else 'is outside the project'
         problems.append(f'the project mounts a folder of this computer that {why}, so the lab '
@@ -776,6 +798,202 @@ def _repo_root(project_dir: str) -> str:
     return os.path.abspath(project_dir)
 
 
+# Where --gate writes the result of scanning a project at a commit, one file per
+# project, outside any repository so it is never committed. The pre-push gate
+# (a later change) reads it to decide whether the commit being pushed has a
+# clean scan on record. REDLAB_STATE_DIR overrides the location (the gate hook
+# and the tests point it elsewhere).
+GATE_STATE_DIR = os.environ.get('REDLAB_STATE_DIR') or os.path.expanduser('~/.claude/hooks/redlab')
+GATE_RESULT_VERSION = 1
+
+
+def _gate_state_path(project_root: str) -> str:
+    key = hashlib.sha256(os.path.realpath(project_root).encode()).hexdigest()[:16]
+    return os.path.join(GATE_STATE_DIR, f'{key}.json')
+
+
+def write_gate_result(project_root: str, commit: str, targets: list[Target],
+                      verdict: int) -> None:
+    """Record, for `project_root`, the scan verdict of exactly `commit`. Written
+    whole (a temp file renamed into place) so a reader never sees half a record,
+    and keyed by the commit so a result for an earlier commit is never read as
+    this one's (see `read_gate_result`)."""
+    path = _gate_state_path(project_root)
+    os.makedirs(GATE_STATE_DIR, exist_ok=True)
+    record = {
+        'version': GATE_RESULT_VERSION,
+        'commit': commit,
+        'at': int(time.time()),
+        'verdict': verdict,  # one of the EXIT_* codes
+        'targets': [{'service': t.service, 'port': t.port} for t in targets],
+    }
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(record, fh)
+    os.replace(tmp, path)
+
+
+def read_gate_result(project_root: str, commit: str) -> dict | None:
+    """The recorded result for `project_root` at `commit`, or None when there is
+    none for that exact commit: a record left by an earlier commit does not
+    count for a new one, which is how a re-scan is forced after each change."""
+    try:
+        with open(_gate_state_path(project_root), encoding='utf-8') as fh:
+            record = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if record.get('version') == GATE_RESULT_VERSION and record.get('commit') == commit:
+        return record
+    return None
+
+
+def _git_commit(repo: str, ref: str) -> str:
+    """The full SHA `ref` resolves to in `repo`."""
+    done = _run(['git', '-C', repo, 'rev-parse', '--verify', f'{ref}^{{commit}}'], timeout=10)
+    sha = (done.stdout or '').strip()
+    if done.returncode != 0 or not sha:
+        raise LabError(f'Could not resolve {ref!r} in {repo}: {(done.stderr or "").strip()}',
+                       EXIT_ERROR)
+    return sha
+
+
+def _repo_toplevel(path: str) -> str | None:
+    """The git work tree `path` is in, or None if it is in none."""
+    directory = path if os.path.isdir(path) else (os.path.dirname(path) or '.')
+    done = _run(['git', '-C', directory, 'rev-parse', '--show-toplevel'], timeout=10)
+    top = (done.stdout or '').strip()
+    return top if done.returncode == 0 and top else None
+
+
+def _add_worktree(repo: str, commit: str, parent: str, prefix: str) -> str:
+    """A detached worktree of `repo` at `commit`, under `parent`; the caller
+    removes it with `_remove_worktree`. The build then reads the committed tree,
+    not the working tree, so the scan is of exactly what is being pushed. The
+    `prefix` is the project's (`<project>.wt-`), so a worktree a killed run
+    leaves behind is swept by `remove_stale_workdirs` on the next run."""
+    base = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    os.rmdir(base)  # `git worktree add` needs a path that does not yet exist
+    done = _run(['git', '-C', repo, 'worktree', 'add', '--detach', '--force', base, commit],
+                timeout=120)
+    if done.returncode != 0:
+        raise LabError(f'Could not check out {repo} at {commit[:12]} as a worktree:\n'
+                       + (done.stderr or '').strip(), EXIT_ERROR)
+    return base
+
+
+def _remove_worktree(repo: str, worktree: str) -> None:
+    _run(['git', '-C', repo, 'worktree', 'remove', '--force', worktree], timeout=60)
+    _run(['git', '-C', repo, 'worktree', 'prune'], timeout=30)
+    shutil.rmtree(worktree, ignore_errors=True)
+
+
+def _service_build_paths(service: dict) -> list[str]:
+    """The local build paths of a service: its context and any local additional
+    contexts. Remote/image contexts are left out (the build fetches them)."""
+    build = service.get('build')
+    if isinstance(build, str):
+        candidates = [build]
+    elif isinstance(build, dict):
+        candidates = [build['context']] if build.get('context') else []
+        extra = build.get('additional_contexts') or {}
+        candidates += list(extra.values()) if isinstance(extra, dict) \
+            else [str(entry).split('=', 1)[-1] for entry in extra]
+    else:
+        return []
+    return [str(path) for path in candidates if path and _is_local_build_path(str(path))]
+
+
+def _prepare_worktrees(base: dict, project_root: str, commit: str, parent: str,
+                       prefix: str) -> dict[str, str]:
+    """One worktree per repo a service builds from: the project's own repo at
+    `commit`, any other repo (a sibling built as a dependency) at its own HEAD.
+    Returns {repo work tree -> worktree path} for build_lab_config; on any
+    failure the ones already made are removed before the error propagates."""
+    repos: set[str] = set()
+    for service in (base.get('services') or {}).values():
+        for path in _service_build_paths(service):
+            repo = _repo_toplevel(path)
+            if repo:
+                repos.add(repo)
+    worktrees: dict[str, str] = {}
+    try:
+        for repo in sorted(repos):
+            _run(['git', '-C', repo, 'worktree', 'prune'], timeout=30)  # a killed run's leftover
+            ref = commit if _same_dir(repo, project_root) else _git_commit(repo, 'HEAD')
+            worktrees[repo] = _add_worktree(repo, ref, parent, prefix)
+    except LabError:
+        for made_repo, made_wt in worktrees.items():
+            _remove_worktree(made_repo, made_wt)
+        raise
+    return worktrees
+
+
+def _same_dir(first: str, second: str) -> bool:
+    return os.path.realpath(first) == os.path.realpath(second)
+
+
+def _remap_build_path(path: str, worktrees: dict[str, str]) -> str | None:
+    """`path` rewritten into the worktree of the repo it is in, or None if it is
+    in no mapped repo (left as it is)."""
+    if not _is_local_build_path(path):
+        return None
+    for repo_root, worktree in worktrees.items():
+        if _within(path, repo_root):
+            rel = os.path.relpath(os.path.realpath(path), os.path.realpath(repo_root))
+            return worktree if rel == '.' else os.path.join(worktree, rel)
+    return None
+
+
+def _remap_mounts(config: dict, worktrees: dict[str, str]) -> None:
+    """Point read-only in-project mounts at the worktrees, so a built service
+    reads the committed init/seed data rather than the working tree. Writable
+    mounts are already dropped; a mount outside the project is left as it is and
+    refused by validate_lab_config. Runs on the config after the writable-mount
+    drop, so only kept (read-only) mounts remain."""
+    for service in (config.get('services') or {}).values():
+        for volume in service.get('volumes') or []:
+            if isinstance(volume, dict) and volume.get('type') == 'bind':
+                remapped = _remap_build_path(str(volume.get('source')), worktrees)
+                if remapped is not None:
+                    volume['source'] = remapped
+    for volume in (config.get('volumes') or {}).values():
+        device = (volume.get('driver_opts') or {}).get('device') if isinstance(volume, dict) else None
+        if device:
+            remapped = _remap_build_path(str(device), worktrees)
+            if remapped is not None:
+                volume['driver_opts']['device'] = remapped
+
+
+def _remap_build(service: dict, worktrees: dict[str, str]) -> None:
+    """Point a service's local build paths at the worktrees in place, so the
+    build uses the committed tree instead of the working tree."""
+    build = service.get('build')
+    if isinstance(build, str):
+        remapped = _remap_build_path(build, worktrees)
+        if remapped is not None:
+            service['build'] = remapped
+        return
+    if not isinstance(build, dict):
+        return
+    if build.get('context'):
+        remapped = _remap_build_path(str(build['context']), worktrees)
+        if remapped is not None:
+            build['context'] = remapped
+    extra = build.get('additional_contexts')
+    if isinstance(extra, dict):
+        for name, source in list(extra.items()):
+            remapped = _remap_build_path(str(source), worktrees)
+            if remapped is not None:
+                extra[name] = remapped
+    elif isinstance(extra, list):
+        rewritten = []
+        for entry in extra:
+            name, sep, source = str(entry).partition('=')
+            remapped = _remap_build_path(source, worktrees) if sep else None
+            rewritten.append(f'{name}={remapped}' if remapped is not None else entry)
+        build['additional_contexts'] = rewritten
+
+
 def resolved_config(project_dir: str, compose_files: list[str]) -> dict:
     args = ['docker', 'compose']
     for file in compose_files:
@@ -787,33 +1005,242 @@ def resolved_config(project_dir: str, compose_files: list[str]) -> dict:
     return json.loads(done.stdout)
 
 
+# Compose file names in Docker's precedence order (the first that exists is the
+# base of a stack), and the override files that layer onto it in the same dir.
+_COMPOSE_PRIMARY = ('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml')
+_COMPOSE_OVERRIDE = ('compose.override.yaml', 'compose.override.yml',
+                     'docker-compose.override.yaml', 'docker-compose.override.yml')
+# Not descended into, nor offered as sibling stacks: build output, caches and
+# VCS internals hold no stack of the user's and would slow or mislead the walk.
+_SKIP_DIRS = frozenset({
+    '.git', 'node_modules', '.venv', 'venv', '__pycache__', '.mypy_cache', '.pytest_cache',
+    '.tox', 'dist', 'build', 'target', '.idea', '.vscode', '.cache', '.next', '.gradle',
+})
+_DISCOVERY_MAX_DOWN = 3  # how deep to descend from the start directory
+
+
+def _compose_stack_in(dirpath: str) -> list[str] | None:
+    """The compose files of the stack rooted at `dirpath`: the first primary
+    name that exists (Docker's precedence), then the override files beside it.
+    None when the directory holds no compose file."""
+    primary = next((os.path.join(dirpath, n) for n in _COMPOSE_PRIMARY
+                    if os.path.isfile(os.path.join(dirpath, n))), None)
+    if primary is None:
+        return None
+    return [primary] + [os.path.join(dirpath, n) for n in _COMPOSE_OVERRIDE
+                        if os.path.isfile(os.path.join(dirpath, n))]
+
+
+def find_compose_stacks(start: str) -> list[list[str]]:
+    """Compose stacks in `start` and its descendants, to a bounded depth. Each
+    stack is its files, primary first. Deduplicated by real path and sorted, so
+    the order does not depend on the walk.
+
+    Only downward: climbing to find a compose in an ancestor or a sibling would,
+    from a repo under a workspace like `~/projects/`, list every neighbouring
+    project's compose. A stack whose compose sits above or beside the directory
+    the lab is run from (a shared `../local-env/`) is named with --compose-file
+    or --project-dir instead. Run from the directory that contains the stack
+    (its descendants are searched) and it is found."""
+    start = os.path.abspath(start)
+    seen: set[str] = set()
+    stacks: list[list[str]] = []
+    for root, dirs, _files in os.walk(start):
+        if root[len(start):].count(os.sep) >= _DISCOVERY_MAX_DOWN:
+            dirs[:] = []
+        else:
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        real = os.path.realpath(root)
+        if real in seen:
+            continue
+        seen.add(real)
+        files = _compose_stack_in(root)
+        if files:
+            stacks.append(files)
+    return sorted(stacks, key=lambda files: files[0])
+
+
+def _build_context(service: dict) -> str | None:
+    """The build context of a service, or None if it is image-only. Compose
+    resolves the short form (`build: ./dir`) and the long form to an absolute
+    path under `build.context`."""
+    build = service.get('build')
+    if isinstance(build, str):
+        return build
+    if isinstance(build, dict):
+        context = build.get('context')
+        return str(context) if context else None
+    return None
+
+
+def _port_ints(token: object) -> list[int]:
+    """The port number(s) a compose port token names: a single port, or the two
+    ends of a range (`8000-8005`), so a range reads as more than one port and
+    the service is reported ambiguous, not silently dropped as having none. A
+    `/tcp` suffix and the host side of `host:container` are stripped by the
+    caller; anything that is not a number is ignored."""
+    text = str(token).split('/')[0]
+    if '-' in text:
+        low, _, high = text.partition('-')
+        if low.isdigit() and high.isdigit():
+            return [int(low)] if low == high else [int(low), int(high)]
+        return []
+    return [int(text)] if text.isdigit() else []
+
+
+def _service_ports(service: dict) -> list[int]:
+    """The container-side ports a service listens on, from `ports` (the
+    `target`, not the host `published`) and `expose`. Sorted and deduplicated.
+    A range contributes both of its ends (see `_port_ints`)."""
+    ports: set[int] = set()
+    for port in service.get('ports') or []:
+        if isinstance(port, dict):
+            if port.get('target') is not None:
+                ports.update(_port_ints(port['target']))
+        elif isinstance(port, (str, int)):
+            ports.update(_port_ints(str(port).rsplit(':', 1)[-1]))
+    for exposed in service.get('expose') or []:
+        ports.update(_port_ints(exposed))
+    return sorted(ports)
+
+
+def detect_targets(config: dict, project_root: str) -> tuple[list[Target], list[str]]:
+    """The services to scan — those built from inside the project (a
+    `build.context` within `project_root`); image-only services are
+    dependencies. Each becomes a Target on `/` with its single listening port.
+    The second list is the reasons a built service could not be targeted (no
+    port, or more than one and so ambiguous): the caller refuses with them."""
+    targets: list[Target] = []
+    problems: list[str] = []
+    for name, service in sorted((config.get('services') or {}).items()):
+        context = _build_context(service)
+        if not context or not _within(context, project_root):
+            continue
+        ports = _service_ports(service)
+        if not ports:
+            problems.append(f'service {name!r} builds from the project but declares no port '
+                            '(add `expose:` or `ports:`, or pass --service and --port)')
+        elif len(ports) > 1:
+            problems.append(f'service {name!r} listens on more than one port ({", ".join(map(str, ports))}); '
+                            'pass --service and --port to pick one')
+        else:
+            targets.append(parse_target(name, ports[0], '/'))
+    return targets, problems
+
+
+def _discover_one_stack(project_dir: str) -> list[str]:
+    """The one compose stack to scan, found near `project_dir`. Raises when none
+    is found, or when more than one is: the lab never guesses which stack to
+    bring up — the user picks with --compose-file or --project-dir."""
+    stacks = find_compose_stacks(project_dir)
+    if not stacks:
+        raise LabError(f'No compose file found in {os.path.abspath(project_dir)} or nearby. '
+                       'Pass --compose-file, or run from the project directory.')
+    if len(stacks) > 1:
+        listing = '\n  - '.join(stack[0] for stack in stacks)
+        raise LabError('More than one compose file was found; pass --compose-file (or '
+                       f'--project-dir) to choose one:\n  - {listing}')
+    return stacks[0]
+
+
+def _resolve_targets(args: argparse.Namespace, project_root: str,
+                     tool: str) -> tuple[dict, list[Target]]:
+    """The resolved compose configuration and the services to scan. With
+    --service the user names one target; otherwise the targets are detected
+    (every service built from inside the project). sqlmap scans one named
+    endpoint, never a detected set."""
+    compose_files = args.compose_file or _discover_one_stack(args.project_dir)
+    base = resolved_config(args.project_dir, compose_files)
+    if tool == 'sqlmap':
+        if not args.service or args.port is None or not args.endpoint:
+            raise LabError('--sqlmap scans one endpoint: pass --service, --port and --endpoint.')
+        return base, [parse_target(args.service, args.port, args.path, endpoint=args.endpoint)]
+    if args.service:
+        if args.port is None:
+            raise LabError('--service needs --port (the port the service listens on in the lab).')
+        return base, [parse_target(args.service, args.port, args.path)]
+    targets, problems = detect_targets(base, project_root)
+    if not targets:
+        detail = ('\n  - '.join(problems) if problems
+                  else 'no service in the compose file builds from inside this project')
+        raise LabError(f'Nothing to scan: {detail}.\n  Pass --service and --port to choose one.')
+    if problems:
+        print('[lab] some built services were skipped:\n  - ' + '\n  - '.join(problems),
+              file=sys.stderr)
+    return base, targets
+
+
 def scan(args: argparse.Namespace) -> int:
     tool = 'sqlmap' if args.sqlmap else 'zap'
     if args.sqlmap and args.active:
         raise LabError('--active is a ZAP option; --sqlmap is a separate SQL-injection scan.')
-    if tool == 'sqlmap':
-        if not args.endpoint:
-            raise LabError('--sqlmap needs --endpoint, e.g. --endpoint "/items?id=1".')
-        if not 1 <= args.level <= 5 or not 1 <= args.risk <= 3 or args.time_sec < 1:
-            raise LabError('--level must be 1-5, --risk 1-3, --time-sec 1 or more.')
-        target = parse_target(args.service, args.port, args.path, endpoint=args.endpoint)
-    else:
-        target = parse_target(args.service, args.port, args.path)
     if args.minutes < 1 or args.startup_seconds < 0:
         raise LabError('--minutes must be 1 or more and --startup-seconds 0 or more.')
     if args.active_minutes < 1:
         raise LabError('--active-minutes must be 1 or more.')
+    if tool == 'sqlmap' and (not 1 <= args.level <= 5 or not 1 <= args.risk <= 3 or args.time_sec < 1):
+        raise LabError('--level must be 1-5, --risk 1-3, --time-sec 1 or more.')
     check_docker()
     needed = SQLMAP_IMAGE if tool == 'sqlmap' else ZAP_IMAGE
     if not image_present(needed):
         raise LabError('The scanner image is not installed. Run `lab/run.py --setup` first'
                        + (f' ({ZAP_DOWNLOAD_HINT}).' if tool == 'zap' else '.'))
-    base = resolved_config(args.project_dir, args.compose_file)
     project = _project_name(args.project_dir)
     project_root = _repo_root(args.project_dir)
     lock = acquire_lab_lock(project)
-    remove_stale_workdirs(project)
+    worktrees: dict[str, str] = {}
+    try:
+        remove_stale_workdirs(project)
+        base, targets = _resolve_targets(args, project_root, tool)
+        commit = None
+        if args.gate:
+            # Scan exactly the commit being pushed, not the working tree: build
+            # each service from a worktree of its repo at that commit (other
+            # repos at their own HEAD). The result is recorded against the SHA.
+            commit = _git_commit(project_root, args.commit or 'HEAD')
+            worktrees = _prepare_worktrees(base, project_root, commit, tempfile.gettempdir(),
+                                           f'{project}.wt-')
+        if len(targets) > 1:
+            print(f'Scanning {len(targets)} services built from this project: '
+                  + ', '.join(t.service for t in targets), flush=True)
+        # The worst code across targets (error > refused > findings > clean).
+        # A later target's error thus outranks an earlier one's findings in the
+        # exit code, but every target's findings are printed as they are found.
+        worst = EXIT_CLEAN
+        for target in targets:
+            try:
+                worst = max(worst, _scan_target(target, base, project, project_root, args,
+                                                 tool, needed, worktrees))
+            except LabError as exc:
+                # A refusal is stack-wide and would repeat for every target, so
+                # it aborts the run; a single-target run propagates unchanged.
+                if exc.code == EXIT_REFUSED or len(targets) == 1:
+                    raise
+                print(f'[lab] {target.service}: {exc}', file=sys.stderr)
+                worst = max(worst, exc.code)
+        if commit is not None:
+            write_gate_result(project_root, commit, targets, worst)
+            print(f'[lab] gate result for {commit[:12]} recorded.', file=sys.stderr)
+        return worst
+    finally:
+        for repo, worktree in worktrees.items():
+            try:
+                _remove_worktree(repo, worktree)
+            except LabError as exc:  # one failure must not strand the rest, or the lock
+                print(f'[lab] could not remove the worktree {worktree} ({exc}); '
+                      f'remove it with: git -C {repo} worktree remove --force {worktree}',
+                      file=sys.stderr)
+        os.close(lock)
 
+
+def _scan_target(target: Target, base: dict, project: str, project_root: str,
+                 args: argparse.Namespace, tool: str, needed: str,
+                 worktrees: dict[str, str]) -> int:
+    """Bring up an isolated copy with the scanner on `target`'s network, scan it,
+    and remove the lab. One target at a time under the shared compose project
+    name, torn down before the next. Returns this target's exit code; raises
+    LabError on a refusal or a Docker/scanner error. `worktrees` (empty unless
+    --gate) redirects each service's build to the committed tree."""
     # 0700: only this user can enter. The '.' ends the prefix that
     # remove_stale_workdirs matches; it is not in a project name.
     workdir = tempfile.mkdtemp(prefix=f'{project}.')
@@ -828,9 +1255,9 @@ def scan(args: argparse.Namespace) -> int:
         config = build_lab_config(base, target, project, report_dir, args.minutes,
                                   active=args.active, active_minutes=args.active_minutes,
                                   tool=tool, level=args.level, risk=args.risk,
-                                  time_sec=args.time_sec)
+                                  time_sec=args.time_sec, worktrees=worktrees)
         problems = validate_lab_config(config, target.service, report_dir,
-                                       project_root, needed)
+                                       project_root, needed, worktrees)
         with open(config_file, 'w', encoding='utf-8') as fh:
             json.dump(config, fh)
         os.chmod(config_file, 0o600)  # resolved environment values live in it
@@ -841,19 +1268,20 @@ def scan(args: argparse.Namespace) -> int:
                 raise LabError('Docker Compose rejected the lab configuration:\n'
                                + effective.stderr.strip(), EXIT_ERROR)
             problems = validate_lab_config(json.loads(effective.stdout), target.service,
-                                           report_dir, project_root, needed)
+                                           report_dir, project_root, needed, worktrees)
         if problems:
             raise LabError('Refused — the lab would not be isolated:\n  - '
                            + '\n  - '.join(problems))
 
         # Holding the lock, anything under this project name is a leftover: a
-        # run killed before its teardown (SIGKILL, power loss). Removed here so
-        # it neither accumulates nor leaks state into this run.
+        # run killed before its teardown (SIGKILL, power loss), or the previous
+        # target of this run. Removed here so it neither accumulates nor leaks
+        # state into this scan.
         if not teardown(project, config_file):
             raise LabError('A previous lab run of this project left containers that could '
                            'not be removed (see above); nothing was started.', EXIT_ERROR)
-        print(f'Starting an isolated copy of the stack (compose project {project!r})...',
-              flush=True)
+        print(f'Starting an isolated copy of the stack for {target.service!r} '
+              f'(compose project {project!r})...', flush=True)
         started = True
         up = _compose(project, config_file, 'up', '-d', '--wait', target.service)
         if up.returncode != 0:
@@ -909,7 +1337,6 @@ def scan(args: argparse.Namespace) -> int:
                 print('[lab] the lab was removed.', file=sys.stderr)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
-            os.close(lock)
 
 
 def teardown(project: str, config_file: str) -> bool:
@@ -1014,15 +1441,27 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument('--setup', action='store_true',
                       help='check Docker and download the pinned scanner image')
     mode.add_argument('--uninstall', action='store_true', help='remove the scanner image')
-    parser.add_argument('--service', help='compose service to scan')
-    parser.add_argument('--port', type=int, help='port the service listens on inside the network')
+    parser.add_argument('--service',
+                        help='compose service to scan (default: every service built from inside '
+                             'the project)')
+    parser.add_argument('--port', type=int,
+                        help='port the service listens on inside the network (with --service; '
+                             'detected from `ports`/`expose` otherwise)')
     parser.add_argument('--path', default='/', help='path to start from (default: /)')
-    parser.add_argument('--project-dir', default='.', help='directory of the compose project')
+    parser.add_argument('--project-dir', default='.',
+                        help='directory to scan from; the compose file is found here or nearby '
+                             '(default: the current directory)')
     parser.add_argument('--compose-file', action='append', default=[],
-                        help='compose file(s), as with `docker compose -f` (default: Compose\'s own)')
+                        help='compose file(s), as with `docker compose -f` (default: discovered '
+                             'near --project-dir)')
     parser.add_argument('--minutes', type=int, default=2, help='spider time budget (default: 2)')
     parser.add_argument('--startup-seconds', type=int, default=5,
                         help='extra wait after the service reports started (default: 5)')
+    parser.add_argument('--gate', action='store_true',
+                        help='scan the committed tree (a git worktree of the commit), not the '
+                             'working tree, and record the result against the commit')
+    parser.add_argument('--commit',
+                        help='for --gate: the commit to scan (default: HEAD of the project)')
     parser.add_argument('--active', action='store_true',
                         help='send attack payloads (ZAP full scan), not only a passive read; '
                              'slower, and still only against the isolated target')
@@ -1045,8 +1484,6 @@ def main(argv: list[str] | None = None) -> int:
             return setup()
         if args.uninstall:
             return uninstall()
-        if not args.service or not args.port:
-            parser.error('--service and --port are required to scan (or use --setup)')
         return scan(args)
     except LabError as exc:
         print(f'[lab] {exc}', file=sys.stderr)

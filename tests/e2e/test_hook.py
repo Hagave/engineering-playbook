@@ -523,6 +523,58 @@ class TestStopValidation(_HookTest):
         self.assertNotEqual(_out(r).get('decision'), 'block')
 
 
+# ── Shell edit notice ─────────────────────────────────────────────────────────
+
+class TestShellEditNotice(_HookTest):
+
+    SED = {'command': "sed -i 's/a/b/' src/user.ts"}
+
+    def setUp(self):
+        super().setUp()
+        self._write(_READY)
+
+    def _notice(self, r) -> str:
+        return _out(r).get('hookSpecificOutput', {}).get('additionalContext', '') if r.stdout.strip() else ''
+
+    def test_first_shell_edit_of_a_turn_is_noted_to_the_model_only(self):
+        r = self._pre('Bash', self.SED)
+        self._assert_allowed(r)
+        self.assertIn('[playbook:edit]', self._notice(r))
+        self.assertNotIn('systemMessage', _out(r))
+
+    def test_noted_once_per_turn(self):
+        self._pre('Bash', self.SED)
+        self.assertEqual(self._notice(self._pre('Bash', self.SED)), '')
+        self._pre('Bash', {'command': 'npm test'})
+        self._stop()
+        self.assertIn('[playbook:edit]', self._notice(self._pre('Bash', self.SED)))
+
+    def test_a_note_displaced_by_the_context_advisory_is_not_spent(self):
+        self._write(_READY + _usage(150_000))
+        displaced = self._pre('Bash', self.SED)
+        self.assertIn('[playbook:context]', displaced.stdout)
+        self.assertNotIn('[playbook:edit]', displaced.stdout)
+        with open(_state_path(self.session_id)) as f:
+            self.assertFalse(json.load(f).get('shell_edit_noted'))
+
+    def test_each_shell_form_that_writes_code_is_noted(self):
+        for command in ("sed -i 's/a/b/' src/user.ts",
+                        "cat > src/user.ts <<'EOF'\nexport class User {}\nEOF",
+                        "printf 'x = 1\n' >> scripts/run.py",
+                        "python3 - <<'EOF'\nopen('src/a.py', 'w').write('x = 1')\nEOF"):
+            with self.subTest(command=command[:20]):
+                self._stop()
+                self.assertIn('[playbook:edit]', self._notice(self._pre('Bash', {'command': command})))
+
+    def test_the_edit_tool_a_read_and_a_doc_write_are_not_noted(self):
+        for tool, tool_input in (('Edit', {'file_path': 'src/user.ts', 'old_string': 'a', 'new_string': 'b'}),
+                                 ('Bash', {'command': 'cat src/user.ts | head -20'}),
+                                 ('Bash', {'command': "sed -i 's/a/b/' README.md"}),
+                                 ('Bash', {'command': 'npm test'})):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                self.assertEqual(self._notice(self._pre(tool, tool_input)), '')
+
+
 # ── Subagent isolation ────────────────────────────────────────────────────────
 
 class TestSubagentIsolation(_HookTest):

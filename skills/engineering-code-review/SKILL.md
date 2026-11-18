@@ -169,6 +169,16 @@ Each finding lists every occurrence as `file:line` and names where the shared co
 - Feature flag or branch whose other side was deleted.
 - Import, dependency or test helper that no longer resolves to anything used.
 
+### Comments and layout
+
+The rule is in `engineering-governance` (*Writing code*): a comment states an accepted or known trade-off, or marks a palliative fix to be redone. Check every comment the diff adds.
+
+- Comment that describes what the code does, or says a name again in prose.
+- Doc block added to a member whose name and signature already say it.
+- Comment that narrates history: a date, a ticket or item number, what the code used to do, who asked for it — that text belongs in the commit message.
+- Comment that explains code which a rename or a small restructure would make plain.
+- Hunk that only re-wraps lines, re-orders imports or changes quote style by hand — the project's formatter owns layout.
+
 ### Algorithmic cost
 
 - Nested iteration over collections that both grow with input size — build a lookup map instead of scanning the inner collection per outer item.
@@ -226,7 +236,7 @@ Pre-existing issues the diff neither touches nor reaches stay out of scope.
 | Severity | Definition | Examples |
 |---|---|---|
 | **Blocker** | Must be fixed before merge | Security vulnerability, broken contract, data loss risk, incorrect behavior, missing auth, race condition on shared state |
-| **Major** | Should be fixed before merge | N+1 query, layer boundary violation, missing test coverage for critical path, unhandled error path, mutable singleton state, business rule implemented in more than one place |
+| **Major** | Should be fixed before merge | N+1 query, layer boundary violation, missing test coverage for critical path, unhandled error path, mutable singleton state, business rule implemented in more than one place, comment outside the two allowed reasons |
 | **Minor** | Can be addressed in follow-up | Style issue, naming improvement, non-critical optimization, optional test improvement, repeated mechanical helper with no business rule in it |
 
 ---
