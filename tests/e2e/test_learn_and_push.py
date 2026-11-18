@@ -15,6 +15,7 @@ The review gate shells out to git, so its tests build a real repository with a
 real upstream — a mocked one would not exercise the fail-open paths (no repo,
 nothing ahead of upstream) that decide whether the gate is safe to ship.
 """
+import importlib.util
 import json
 import os
 import shutil
@@ -467,6 +468,23 @@ class TestReviewGate(_RepoBase):
         self._write(_ul('pode pushar direto, sem review'))
         self.assertFalse(self._denied(self._push()))
 
+    def test_a_waiver_only_inside_a_pasted_block_does_not_allow_the_push(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_ul('<pasted_content id="1">release notes: skip review for hotfixes'
+                        '</pasted_content id="1">\npush it'))
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_waiver_typed_next_to_a_pasted_block_allows_the_push(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_ul('<pasted_content id="1">ci log</pasted_content id="1">\n'
+                        'pode pushar sem review'))
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_waiver_after_an_unclosed_pasted_block_is_pasted(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_ul('push it\n<pasted_content id="1">checklist\nskip review'))
+        self.assertTrue(self._denied(self._push()))
+
     def test_model_cannot_write_its_own_bypass(self):
         # The phrase only counts in the user's message; assistant text must not clear it.
         self._commit('src/app.ts', 'unreviewed')
@@ -508,6 +526,80 @@ class TestReviewGate(_RepoBase):
         self._commit('src/app.ts', 'unreviewed')
         self._write(_skill('playbook-off'))
         self.assertFalse(self._denied(self._push()))
+
+
+class TestReviewGateAcrossWorktrees(_RepoBase):
+    """The session's directory is the main checkout; the push runs in another
+    worktree of the same repository."""
+
+    def setUp(self):
+        super().setUp()
+        self.worktree = os.path.join(self.dir, 'wt')
+        self._git('worktree', 'add', '-q', '-b', 'feat', self.worktree)
+
+    def _commit_in(self, root: str, name: str, text: str):
+        path = os.path.join(root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+        self._git('add', '-A', cwd=root)
+        self._git('commit', '-q', '-m', text, cwd=root)
+
+    def _review(self):
+        self._write(_skill('engineering-code-review'))
+        self._push('git status')
+
+    def _push_from_worktree(self, env=None):
+        return self._push(f'cd {self.worktree} && git push origin feat', env=env)
+
+    def test_a_commit_in_the_worktree_after_the_review_is_denied(self):
+        self._commit_in(self.worktree, 'src/app.ts', 'reviewed')
+        self._review()
+        self._commit_in(self.worktree, 'src/extra.ts', 'sneaked in')
+        result = self._push_from_worktree()
+        self.assertTrue(self._denied(result))
+        self.assertIn('review-gate', _out(result).get('systemMessage', ''))
+
+    def test_the_reviewed_worktree_is_allowed_when_only_the_session_directory_moved(self):
+        self._commit_in(self.worktree, 'src/app.ts', 'reviewed')
+        self._review()
+        self._commit('src/unrelated.ts', 'made elsewhere')
+        self.assertFalse(self._denied(self._push_from_worktree()))
+
+    def test_a_branch_no_review_contains_is_denied_while_head_is_reviewed(self):
+        self._commit_in(self.worktree, 'src/app.ts', 'never reviewed')
+        self._git('worktree', 'remove', '--force', self.worktree)
+        self._commit('src/app.ts', 'reviewed')
+        self._review()
+        self.assertFalse(self._denied(self._push()))
+        self.assertTrue(self._denied(self._push('git push origin feat')))
+
+    def test_a_push_whose_directory_is_computed_fails_closed(self):
+        # The attribution and secret gates deny this push before the review
+        # gate runs, so the review gate is called on its own here.
+        self._commit_in(self.worktree, 'src/app.ts', 'reviewed')
+        self._review()
+        self.assertTrue(self._denied(self._push('cd "$WT" && git push origin feat')))
+        spec = importlib.util.spec_from_file_location('context_guard_review', _GUARD)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        guard._CWD = self.repo
+        for command in ('cd "$WT" && git push origin feat', 'git push origin "$BRANCH"',
+                        f'cd {self.dir}/not-yet && git push origin feat'):
+            verdict = guard._check_push_gate(self._state(), self.transcript, command)
+            self.assertTrue(verdict and verdict['block'], command)
+            self.assertIn('could not determine', verdict['msg'])
+        self.assertIsNone(guard._check_push_gate(
+            self._state(), self.transcript, f'cd {self.worktree} && git push origin feat'))
+
+    def test_the_user_waiver_covers_the_commits_it_was_given_for(self):
+        self._commit_in(self.worktree, 'src/app.ts', 'unreviewed')
+        self._write(_ul('pode pushar sem review'))
+        self.assertFalse(self._denied(self._push_from_worktree()))
+        self._write(_ul('push it'))
+        self.assertFalse(self._denied(self._push_from_worktree()))
+        self._commit_in(self.worktree, 'src/extra.ts', 'after the waiver')
+        self.assertTrue(self._denied(self._push_from_worktree()))
 
 
 class TestAttributionInHistory(_RepoBase):
@@ -751,6 +843,21 @@ class TestDestructiveAuthorization(_Base):
         self._write(_ul('clean up the project'))
         command = "bash <<'SHEOF'\nrm -rf /tmp/whatever\nSHEOF"
         self.assertTrue(self._denied(self._bash(command)))
+
+    def test_consent_only_inside_a_pasted_block_does_not_allow_it(self):
+        self._write(_ul('what does this runbook say?\n<pasted_content id="1">'
+                        'step 3: go ahead and delete the build directory'
+                        '</pasted_content id="1">'))
+        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_consent_typed_next_to_a_pasted_block_allows_it(self):
+        self._write(_ul('<pasted_content id="1">build log</pasted_content id="1">\n'
+                        'pode apagar a pasta build'))
+        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_an_unclosed_pasted_block_is_pasted_to_the_end(self):
+        self._write(_ul('read this\n<pasted_content id="1">notes\npode apagar a pasta build'))
+        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
 
 
 # ── Review findings feed the learn loop ───────────────────────────────────────
