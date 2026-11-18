@@ -2387,12 +2387,6 @@ def unreviewed_commits(repo: str, revs: list[str], reviewed: list[str]) -> int |
     return int(out) if out is not None and out.strip().isdigit() else None
 
 
-def pushed_tips(repo: str, revs: list[str]) -> list[str]:
-    """The commits or tags `revs` name in `repo`; [] when git cannot resolve them."""
-    out = _git_out(repo, 'rev-parse', '--revs-only', *revs, timeout=2) if revs else None
-    return [line for line in (out or '').split() if _OBJECT_NAME_RE.fullmatch(line)]
-
-
 def check_new_commit_attribution(command: str, cwd: str) -> str | None:
     """Message for the model when a command that writes history left a commit
     carrying AI attribution on HEAD that no remote has yet.
@@ -2874,20 +2868,6 @@ def typed_words(prompt: str) -> str:
         return ''
     return _PASTED_BLOCK_RE.sub(' ', prompt)
 
-
-# Explicit, user-authored opt-out of the pre-push review gate. Only the user's
-# own prompt is scanned for these — the model must never be able to clear its
-# own gate by writing the phrase in its response.
-# Every form names the review it waives: "pode pushar", "deixa assim" and "no
-# review comments so far" are about the push or the code, and read as a waiver
-# they skipped a review nobody declined.
-REVIEW_BYPASS_RE = re.compile(
-    r'\bsem\s+(?:review|revis[ãa]o|revisar)\b'
-    r'|\bpul(?:a|ar|e)\s+(?:o\s+)?(?:review|revis[ãa]o)\b'
-    r'|\b(?:skip|bypass|without)\s+(?:the\s+)?(?:code\s+)?review\b'
-    r'|\bno\s+(?:code\s+)?review\s+(?:needed|required)\b',
-    re.IGNORECASE,
-)
 
 GIT_PUSH_RE = re.compile(_GIT_PREFIX + r'push\b', re.IGNORECASE)
 

@@ -89,203 +89,6 @@ def _typed_mid_turn(text: str) -> str:
         'humanTurn': True, 'prompt': text})
 
 
-def _peer_mid_turn(text: str) -> str:
-    return _entry(type='attachment', attachment={
-        'type': 'queued_command', 'commandMode': 'prompt', 'isMeta': True,
-        'origin': {'kind': 'peer', 'from': 'a1b2c3'},
-        'prompt': f'<agent-message from="a1b2c3">\n[Subagent hand-back] {text}\n</agent-message>'})
-
-
-def _compacted(quoted: str) -> str:
-    boundary = _entry(type='system', subtype='compact_boundary', content='Conversation compacted',
-                      isMeta=False, level='info', compactMetadata={'trigger': 'auto', 'preTokens': 557034})
-    summary = _entry(type='user', promptId='p-summary', isVisibleInTranscriptOnly=True,
-                     isCompactSummary=True, turnPosition={'promptIndex': 8, 'turnIndex': 9},
-                     message={'role': 'user', 'content': (
-                         'This session is being continued from a previous conversation that ran '
-                         'out of context. The summary below covers the earlier portion of the '
-                         'conversation.\n\nSummary:\n1. Primary Request and Intent:\n'
-                         f'   The user said: "{quoted}"\n')})
-    reference = _entry(type='attachment', attachment={'type': 'compact_file_reference',
-                                                      'filename': 'src/app.ts'})
-    return boundary + summary + reference
-
-
-def _interrupted() -> str:
-    return _entry(type='user', promptId='p-user', interruptedMessageId='msg_1',
-                  message={'role': 'user', 'content': [
-                      {'type': 'text', 'text': '[Request interrupted by user for tool use]'}]})
-
-
-def _builtin_command(args: str) -> str:
-    return _entry(type='user', promptId='p-command', message={'role': 'user', 'content': (
-        '<command-name>/model</command-name>\n            <command-message>model</command-message>\n'
-        f'            <command-args>{args}</command-args>')})
-
-
-def _skill_command(args: str) -> str:
-    return _entry(type='user', promptId='p-command', origin={'kind': 'human'}, turnOrigin='human',
-                  message={'role': 'user', 'content': (
-                      '<command-message>engineering-playbook:playbook-config</command-message>\n'
-                      '<command-name>/engineering-playbook:playbook-config</command-name>\n'
-                      f'<command-args>{args}</command-args>')})
-
-
-def _bash_mode(command: str) -> str:
-    return _entry(type='user', promptId='p-bash',
-                  message={'role': 'user', 'content': f'<bash-input>{command}</bash-input>'})
-
-
-def _sdk_prompt(text: str) -> str:
-    return _entry(type='user', promptId='p-sdk', permissionMode='default', promptSource='sdk',
-                  turnOrigin='sdk', message={'role': 'user', 'content': text})
-
-
-def _plugin_message(text: str) -> str:
-    return _entry(type='user', promptId='p-plugin', permissionMode='default',
-                  origin={'kind': 'plugin', 'name': 'engineering-playbook'}, promptSource='system',
-                  turnOrigin='system', message={'role': 'user', 'content': (
-                      f'The engineering-playbook plugin sent a message:\n{text}')})
-
-
-def _tool_step(prompt_id: str = 'p-user') -> str:
-    call = {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash', 'input': {'command': 'ls'}}
-    result = {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'build'}
-    return (_entry(type='assistant', message={'role': 'assistant', 'stop_reason': 'tool_use',
-                                              'content': [call]})
-            + _entry(type='user', promptId=prompt_id, message={'role': 'user', 'content': [result]}))
-
-
-def _turn_closed() -> str:
-    text = {'type': 'text', 'text': 'Started the suite in the background.'}
-    return (_entry(type='assistant', message={'role': 'assistant', 'stop_reason': 'end_turn',
-                                              'content': [text]})
-            + _entry(type='system', subtype='stop_hook_summary', hookCount=1, preventedContinuation=False)
-            + _entry(type='system', subtype='turn_duration', durationMs=4210, messageCount=9))
-
-
-def _task_notification(prompt_id: str = 'p-notified') -> str:
-    return _entry(type='user', promptId=prompt_id,
-                  origin={'kind': 'task-notification', 'producer': 'session-task'},
-                  promptSource='system',
-                  message={'role': 'user', 'content': (
-                      '<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n'
-                      '<status>completed</status>\n<summary>Background command "Run the suite" '
-                      'completed (exit code 0)</summary>\n</task-notification>')})
-
-
-def _handback(prompt_id: str = 'p-handback') -> str:
-    reminder = _entry(type='user', promptId=prompt_id, isMeta=True, turnCompanion=True,
-                      message={'role': 'user', 'content': (
-                          '<system-reminder>\n<tools-used-before-summary>Read'
-                          '</tools-used-before-summary>\n</system-reminder>')})
-    report = _entry(type='user', promptId=prompt_id, isMeta=True,
-                    origin={'kind': 'peer', 'from': 'a1b2c3'},
-                    message={'role': 'user', 'content': (
-                        'Another Claude session sent a message:\n<agent-message from="a1b2c3">\n'
-                        '[Subagent hand-back] The text below is the final report of a subagent '
-                        'this session delegated to.\n  The build directory is stale.\n</agent-message>')})
-    return reminder + report
-
-
-def _auto_continue(prompt_id: str = 'p-continue') -> str:
-    return _entry(type='user', promptId=prompt_id, isMeta=True,
-                  message={'role': 'user', 'content': (
-                      'Your claude.ai usage limit has reset. Continue the task you were working '
-                      'on when the limit was reached; do not repeat work that is already complete.')})
-
-
-def _mid_turn_injections(prompt_id: str = 'p-user') -> str:
-    skill_body = _entry(type='user', promptId=prompt_id, isMeta=True,
-                        message={'role': 'user', 'content': [
-                            {'type': 'text', 'text': 'Base directory for this skill: /skills/x\n\n# X'}]})
-    reminder = _entry(type='attachment', attachment={'type': 'hook_additional_context',
-                                                     'content': ['<system-reminder>ctx</system-reminder>']})
-    absorbed = _entry(type='attachment', attachment={
-        'type': 'queued_command', 'commandMode': 'task-notification',
-        'prompt': '<task-notification>\n<task-id>b2</task-id>\n<status>completed</status>\n</task-notification>'})
-    return _tool_step(prompt_id) + skill_body + reminder + absorbed + _tool_step(prompt_id)
-
-
-def _stop_hook_feedback(prompt_id: str = 'p-user') -> str:
-    text = {'type': 'text', 'text': 'Done.'}
-    return (_entry(type='assistant', message={'role': 'assistant', 'stop_reason': 'end_turn',
-                                              'content': [text]})
-            + _entry(type='system', subtype='stop_hook_summary', hookCount=1, preventedContinuation=False)
-            + _entry(type='user', promptId=prompt_id, isMeta=True,
-                     message={'role': 'user', 'content': (
-                         'Stop hook feedback:\n[playbook:validate] Source files were written this '
-                         'session but no validation command ran afterwards.')})
-            + _tool_step(prompt_id))
-
-
-class _ConsentShapes:
-    """Each entry shape a consent reader meets, read by one gate. Only what the
-    harness marks as sent by the human (`origin.kind == 'human'`) is consent."""
-
-    CONSENT: str
-    SPLIT_CONSENT: tuple[str, str]
-
-    def _lifted(self, transcript: str) -> bool:
-        raise NotImplementedError
-
-    def test_a_compaction_summary_quoting_consent_does_not_lift_the_gate(self):
-        self.assertFalse(self._lifted(_typed(self.CONSENT) + _turn_closed() + _compacted(self.CONSENT)))
-
-    def test_a_turn_a_notification_opened_after_a_compaction_has_no_consent(self):
-        self.assertFalse(self._lifted(_typed(self.CONSENT) + _turn_closed() + _compacted(self.CONSENT)
-                                      + _task_notification() + _tool_step('p-notified')))
-
-    def test_consent_typed_after_a_compaction_lifts_the_gate(self):
-        self.assertTrue(self._lifted(_typed('keep going') + _turn_closed() + _compacted('keep going')
-                                     + _typed(self.CONSENT, 'p-next') + _tool_step('p-next')))
-
-    def test_an_interrupt_marker_is_not_consent(self):
-        self.assertFalse(self._lifted(_typed(self.CONSENT) + _tool_step() + _interrupted()))
-
-    def test_a_built_in_slash_command_is_not_consent(self):
-        self.assertFalse(self._lifted(_builtin_command(self.CONSENT)))
-
-    def test_a_skill_slash_command_the_user_typed_is_consent(self):
-        self.assertTrue(self._lifted(_skill_command(self.CONSENT)))
-
-    def test_bash_mode_input_is_not_consent(self):
-        self.assertFalse(self._lifted(_bash_mode(f'echo "{self.CONSENT}"')))
-
-    def test_an_sdk_prompt_is_not_consent(self):
-        self.assertFalse(self._lifted(_sdk_prompt(self.CONSENT)))
-
-    def test_a_plugin_message_is_not_consent(self):
-        self.assertFalse(self._lifted(_plugin_message(self.CONSENT)))
-
-    def test_a_prompt_typed_while_busy_and_sent_as_the_next_turn_is_consent(self):
-        self.assertTrue(self._lifted(_typed(self.CONSENT, source='queued')))
-
-    def test_an_accepted_prompt_suggestion_is_consent(self):
-        self.assertTrue(self._lifted(_typed(self.CONSENT, source='suggestion_accepted')))
-
-    def test_consent_typed_mid_turn_lifts_the_gate(self):
-        self.assertTrue(self._lifted(_typed('clean up the project') + _tool_step()
-                                     + _typed_mid_turn(self.CONSENT) + _tool_step()))
-
-    def test_consent_typed_into_a_turn_a_notification_opened_lifts_the_gate(self):
-        self.assertTrue(self._lifted(_typed('clean up the project') + _turn_closed()
-                                     + _task_notification() + _typed_mid_turn(self.CONSENT)
-                                     + _tool_step('p-notified')))
-
-    def test_consent_typed_mid_turn_does_not_carry_into_the_next_turn(self):
-        self.assertFalse(self._lifted(_typed('clean up the project') + _typed_mid_turn(self.CONSENT)
-                                      + _turn_closed() + _task_notification()))
-
-    def test_a_hand_back_delivered_mid_turn_is_not_consent(self):
-        self.assertFalse(self._lifted(_typed('clean up the project') + _tool_step()
-                                      + _peer_mid_turn(self.CONSENT) + _tool_step()))
-
-    def test_a_phrase_is_not_matched_across_two_messages(self):
-        first, second = self.SPLIT_CONSENT
-        self.assertFalse(self._lifted(_typed(first) + _tool_step() + _typed_mid_turn(second)))
-
-
 class _Base(unittest.TestCase):
 
     def setUp(self):
@@ -659,7 +462,7 @@ class _RepoBase(_Base):
         return _out(result).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny'
 
 
-class TestReviewGate(_ConsentShapes, _RepoBase):
+class TestReviewGate(_RepoBase):
 
     def test_unreviewed_commit_is_denied(self):
         self._commit('src/app.ts', 'unreviewed')
@@ -680,80 +483,20 @@ class TestReviewGate(_ConsentShapes, _RepoBase):
         self._commit('src/extra.ts', 'sneaked in')
         self.assertTrue(self._denied(self._push()))
 
-    def test_user_bypass_phrase_allows_the_push(self):
+    def test_a_waiver_typed_in_the_chat_does_not_allow_the_push(self):
         self._commit('src/app.ts', 'unreviewed')
-        self._write(_ul('pode pushar direto, sem review'))
-        self.assertFalse(self._denied(self._push()))
-
-    def test_a_waiver_only_inside_a_pasted_block_does_not_allow_the_push(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_ul('<pasted_content id="1">release notes: skip review for hotfixes'
-                        '</pasted_content id="1">\npush it'))
-        self.assertTrue(self._denied(self._push()))
-
-    def test_a_waiver_typed_next_to_a_pasted_block_allows_the_push(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_ul('<pasted_content id="1">ci log</pasted_content id="1">\n'
-                        'pode pushar sem review'))
-        self.assertFalse(self._denied(self._push()))
-
-    def test_a_waiver_after_an_unclosed_pasted_block_is_pasted(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_ul('push it\n<pasted_content id="1">checklist\nskip review'))
-        self.assertTrue(self._denied(self._push()))
+        for waiver in ('pode pushar direto, sem review', 'skip review', 'no review needed'):
+            with self.subTest(waiver=waiver):
+                self._write(_ul(waiver))
+                result = self._push()
+                self.assertTrue(self._denied(result))
+                self.assertIn('Nothing written in the chat', _out(result).get('systemMessage', ''))
 
     def test_model_cannot_write_its_own_bypass(self):
         # The phrase only counts in the user's message; assistant text must not clear it.
         self._commit('src/app.ts', 'unreviewed')
         self._write(_ul('push it') + _al('the user said skip review'))
         self.assertTrue(self._denied(self._push()))
-
-    WAIVER = 'pode pushar direto, sem review'
-    CONSENT = WAIVER
-    SPLIT_CONSENT = ('pode pushar sem', 'review')
-
-    def _lifted(self, transcript: str) -> bool:
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(transcript)
-        return not self._denied(self._push())
-
-    def test_a_waiver_does_not_carry_into_a_turn_a_task_notification_started(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_typed(self.WAIVER) + _tool_step() + _turn_closed() + _task_notification())
-        self.assertTrue(self._denied(self._push()))
-
-    def test_a_waiver_does_not_carry_into_a_notification_turn_that_kept_its_prompt_id(self):
-        # Recorded once: the notification turn reused the user turn's promptId,
-        # which is why the turn is told apart by its close, not by that id.
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_typed(self.WAIVER) + _turn_closed() + _task_notification('p-user'))
-        self.assertTrue(self._denied(self._push()))
-
-    def test_a_waiver_does_not_carry_into_a_turn_a_subagent_hand_back_started(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_typed(self.WAIVER) + _turn_closed() + _handback())
-        self.assertTrue(self._denied(self._push()))
-
-    def test_a_waiver_does_not_carry_into_an_automatic_continuation(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_typed(self.WAIVER) + _turn_closed() + _auto_continue())
-        self.assertTrue(self._denied(self._push()))
-
-    def test_a_waiver_survives_what_is_injected_into_the_users_turn(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_typed(self.WAIVER) + _mid_turn_injections())
-        self.assertFalse(self._denied(self._push()))
-
-    def test_a_waiver_survives_a_stop_hook_that_kept_the_turn_going(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_typed(self.WAIVER) + _stop_hook_feedback())
-        self.assertFalse(self._denied(self._push()))
-
-    def test_a_waiver_typed_after_a_notification_turn_counts(self):
-        self._commit('src/app.ts', 'unreviewed')
-        self._write(_typed('push it') + _turn_closed() + _task_notification() + _turn_closed()
-                    + _typed(self.WAIVER, 'p-next'))
-        self.assertFalse(self._denied(self._push()))
 
     def test_environment_bypass_allows_the_push(self):
         self._commit('src/app.ts', 'unreviewed')
@@ -883,20 +626,11 @@ class TestReviewGateAcrossWorktrees(_RepoBase):
         guard._CWD = self.repo
         for command in ('cd "$WT" && git push origin feat', 'git push origin "$BRANCH"',
                         f'cd {self.dir}/not-yet && git push origin feat'):
-            verdict = guard._check_push_gate(self._state(), self.transcript, command)
+            verdict = guard._check_push_gate(self._state(), command)
             self.assertTrue(verdict and verdict['block'], command)
             self.assertIn('could not determine', verdict['msg'])
         self.assertIsNone(guard._check_push_gate(
-            self._state(), self.transcript, f'cd {self.worktree} && git push origin feat'))
-
-    def test_the_user_waiver_covers_the_commits_it_was_given_for(self):
-        self._commit_in(self.worktree, 'src/app.ts', 'unreviewed')
-        self._write(_ul('pode pushar sem review'))
-        self.assertFalse(self._denied(self._push_from_worktree()))
-        self._write(_ul('push it'))
-        self.assertFalse(self._denied(self._push_from_worktree()))
-        self._commit_in(self.worktree, 'src/extra.ts', 'after the waiver')
-        self.assertTrue(self._denied(self._push_from_worktree()))
+            self._state(), f'cd {self.worktree} && git push origin feat'))
 
 
 class TestUnknownPushOption(_RepoBase):
@@ -941,12 +675,11 @@ class TestUnknownPushOption(_RepoBase):
         guard._CWD = self.repo
         for command in self.UNKNOWN:
             with self.subTest(command=command):
-                verdict = guard._check_push_gate(self._state(), self.transcript, command)
+                verdict = guard._check_push_gate(self._state(), command)
                 self.assertTrue(verdict and verdict['block'])
                 self.assertIn('[playbook:review-gate]', verdict['msg'])
                 self.assertIn('does not read the option', verdict['msg'])
-        self.assertIsNone(guard._check_push_gate(self._state(), self.transcript,
-                                                 'git push --dry-run origin main'))
+        self.assertIsNone(guard._check_push_gate(self._state(), 'git push --dry-run origin main'))
 
 
 class TestAttributionInHistory(_RepoBase):

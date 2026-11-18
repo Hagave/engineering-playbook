@@ -110,7 +110,6 @@ SUSPEND_SKILL = playbook_core.SUSPEND_SKILL
 RESUME_SKILLS = playbook_core.RESUME_SKILLS
 LEARNED_TOKEN = playbook_core.LEARNED_TOKEN
 REVIEW_SKILLS = playbook_core.REVIEW_SKILLS
-REVIEW_BYPASS_RE = playbook_core.REVIEW_BYPASS_RE
 
 IMPL_TOOLS = {'Write', 'Edit', 'MultiEdit'}
 
@@ -666,74 +665,6 @@ def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
     return truncated
 
 
-def _content_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return ' '.join(
-            b.get('text', '') for b in content
-            if isinstance(b, dict) and b.get('type') == 'text'
-        )
-    return ''
-
-
-def _origin_kind(origin: object) -> str | None:
-    return origin.get('kind') if isinstance(origin, dict) else None
-
-
-def _turn_user_prompts(transcript: str | None) -> list[str]:
-    """What the user sent in the current turn: the message that started it, when
-    the user started it, and the messages they typed into it while it ran.
-    Empty when nothing the user sent is in the turn.
-
-    The harness marks what the human sent with `origin.kind == 'human'`: on the
-    user entry that opens a turn, and on the `queued_command` attachment of a
-    message typed mid-turn. Everything else that opens a turn carries another
-    origin (notification, hand-back, plugin) or none (a compaction summary, an
-    interrupt marker, a built-in slash command, bash mode, an SDK prompt), and
-    its text is not the user's.
-
-    The harness also closes every finished turn with a `turn_duration` system
-    entry and writes none for what it injects into a running turn, so the walk
-    never reaches back past one into an earlier turn."""
-    if not transcript or not os.path.exists(transcript):
-        return []
-    prompts: list[str] = []
-    for line in reversed(_read_tail_lines(transcript)):
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        # Trade-off: a background subagent still running after the user's turn
-        # closed reads the parent transcript and so loses that turn's consent;
-        # a compaction in the middle of a turn hides the user's opening message
-        # behind the summary; and a Claude Code that writes no `origin` gives no
-        # consent at all. Each is denied, never wrongly allowed.
-        if obj.get('type') == 'system' and obj.get('subtype') == 'turn_duration':
-            break
-        attachment = obj.get('attachment') if obj.get('type') == 'attachment' else None
-        if isinstance(attachment, dict) and attachment.get('type') == 'queued_command':
-            if (attachment.get('commandMode') == 'prompt'
-                    and _origin_kind(attachment.get('origin')) == 'human'):
-                prompts.append(_content_text(attachment.get('prompt')))
-            continue
-        origin = _origin_kind(obj.get('origin')) if obj.get('type') == 'user' else None
-        if origin is None and not _is_user_prompt(obj):
-            continue
-        if origin == 'human' and _is_user_prompt(obj):
-            prompts.append(_content_text(obj.get('message', {}).get('content')))
-        break
-    return prompts
-
-
-def _turn_typed_words(transcript: str | None) -> list[str]:
-    """What the user typed in each message they sent in the current turn:
-    the review waiver is read from here, never from a block they pasted from
-    elsewhere nor from text the user did not send. One item per message, so a
-    phrase is never matched across two of them."""
-    return [playbook_core.typed_words(prompt) for prompt in _turn_user_prompts(transcript)]
-
-
 # Trade-off: only the modes where a PreToolUse "ask" is documented to put a
 # dialog in front of the user — Manual (`default`), and auto mode, which sends a
 # hook's "ask" to the prompt instead of the classifier (hooks reference,
@@ -1003,10 +934,9 @@ def _check_watch(state: dict, prefs: dict, tool_name: str, tool_input: dict) -> 
 
 def _credited_commits(state: dict) -> list[str]:
     credited: list[str] = []
-    for key in ('reviewed_heads', 'review_bypass_heads'):
-        value = state.get(key)
-        if isinstance(value, list):
-            credited += [str(sha) for sha in value]
+    heads = state.get('reviewed_heads')
+    if isinstance(heads, list):
+        credited += [str(sha) for sha in heads]
     if isinstance(state.get('reviewed_head'), str):
         credited.append(state['reviewed_head'])
     return credited
@@ -1030,15 +960,15 @@ def _check_shell_edit(state: dict) -> dict | None:
     }
 
 
-def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict | None:
-    """Deny a push that publishes a commit no review or user waiver covers.
+def _check_push_gate(state: dict, command: str) -> dict | None:
+    """Deny a push that publishes a commit no review covers.
 
     Read from the repository each push runs in and the revisions it publishes,
     not from the session's directory: a push from another worktree is about
     that worktree's commits. A commit is covered when a remote-tracking ref has
-    it or a credited commit (a reviewed HEAD, a waived push tip) contains it.
-    The waiver is the user's own words in what they sent in the current turn
-    (or PLAYBOOK_SKIP_REVIEW in the environment), never the model's.
+    it or a reviewed HEAD contains it. The only waiver is PLAYBOOK_SKIP_REVIEW
+    in the environment Claude Code was started with, or the user running the
+    push: nothing written in the chat lifts it.
 
     Fails closed when a push's directory or revisions cannot be resolved or git
     cannot list its commits; outside a repository nothing is published."""
@@ -1058,16 +988,10 @@ def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict 
             pending.append((target.repo, target.revs, count))
     if not unknown and not pending:
         return None
-    if any(REVIEW_BYPASS_RE.search(words) for words in _turn_typed_words(transcript)):
-        # Remembered per commit so the rest of this push (and a retry of it)
-        # does not re-prompt for a waiver the user already gave.
-        waived = [tip for repo, revs, _ in pending for tip in playbook_core.pushed_tips(repo, revs)]
-        previous = state.get('review_bypass_heads')
-        state['review_bypass_heads'] = ((previous if isinstance(previous, list) else []) + waived)[-32:]
-        return None
 
-    waiver = ('Bypass: the user says so explicitly (e.g. "pode pushar sem review"), '
-              'or PLAYBOOK_SKIP_REVIEW=1 in the environment. You cannot waive this yourself.')
+    waiver = ('Only the user can skip the review: by running the push themselves, or by '
+              'starting Claude Code with PLAYBOOK_SKIP_REVIEW=1. Nothing written in the chat '
+              'lifts this block, and you cannot waive it yourself.')
     if not pending:
         return {
             'block': True,
@@ -1409,7 +1333,7 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
                       if is_push else None)
                   or (playbook_core.check_push_secrets(runnable, _CWD)
                       if is_push else None)
-                  or (_check_push_gate(state, transcript, runnable)
+                  or (_check_push_gate(state, runnable)
                       if is_push else None))
 
     # Only a deny takes the verdict slot here: a "possible secret" advisory in

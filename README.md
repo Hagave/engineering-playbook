@@ -245,8 +245,9 @@ are fixed before the push. Blocker and Major findings in code the agent wrote
 arm the learn gate (see *Learning from mistakes*).
 
 **How to use it.** Ask "review this diff" or "review PR 42", or just ask for a
-push and the review runs first. Only you can skip it: say "pode pushar sem
-review" / "skip review", or set `PLAYBOOK_SKIP_REVIEW=1`.
+push and the review runs first. Only you can skip it: run the push yourself, or
+start Claude Code with `PLAYBOOK_SKIP_REVIEW=1`. Nothing typed in the chat lifts
+it.
 
 ### Safety gates
 
@@ -720,9 +721,10 @@ it.
 The `PreToolUse` guard also enforces the **review gate**: `git push` is denied
 until the current `HEAD` has been reviewed through `engineering-code-review`.
 The review is pinned to the commit, so committing after a review re-arms the
-gate. Only the user can waive it — in their own words ("pode pushar sem
-review", "skip review") or with `PLAYBOOK_SKIP_REVIEW=1`. The model cannot
-waive it for itself: the bypass is read from the user's message only. The gate
+gate. Only the user can skip it — by running the push themselves or by starting
+Claude Code with `PLAYBOOK_SKIP_REVIEW=1`, which the hook reads from its own
+environment, not from the command the model runs. Nothing typed in the chat
+lifts it, so the model cannot waive it for itself. The gate
 fails open outside a git repository and when nothing is ahead of upstream.
 Blocker and Major findings from a review feed straight back into the learn loop:
 they are journaled, and the learn gate holds the turn open until the defect
@@ -846,7 +848,7 @@ guard shares `check_destructive`, so it does get the false-positive fixes
 (heredoc bodies, SQL statement shape) — but not the dialog, because whether a
 Codex hook's "ask" reaches the user is not confirmed, so Codex keeps the
 stricter behaviour of always blocking. The shared primitives live in `hooks/playbook_core.py`
-(`CORRECTION_RE`, `REVIEW_BYPASS_RE`, `GIT_PUSH_RE`, the journal helpers), but
+(`CORRECTION_RE`, `GIT_PUSH_RE`, the journal helpers), but
 the Codex adapter's transcript and tool-result schemas differ and are not
 confirmed for these events, so the adapter guards have not been wired to them.
 
@@ -1098,8 +1100,8 @@ is treated as a failure.
 
 Edit `hooks/context_guard.py`. The thresholds (`WARN_PCT`, `BLOCK_PCT`,
 `UNLOCK_PCT`) are defined at the top of the file; destructive patterns
-(`DESTRUCTIVE_PATTERNS`), the correction and review-bypass phrase sets
-(`CORRECTION_RE`, `REVIEW_BYPASS_RE`) and the journal helpers live in
+(`DESTRUCTIVE_PATTERNS`), the correction phrase set (`CORRECTION_RE`) and the
+journal helpers live in
 `hooks/playbook_core.py`, shared with the Codex adapter. After editing, run the
 test suites:
 
