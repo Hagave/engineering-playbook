@@ -255,18 +255,19 @@ machine: destructive commands, AI attribution in history, and secrets.
 
 **How it works.**
 - **Destructive commands** (`rm -r`, `git reset --hard`, force push,
-  `git clean`, `DROP TABLE`, and their respellings) are denied until you
-  authorize that act in your own message. The permission lasts one turn. An
-  `rm` inside the session's own scratchpad needs none.
+  `git clean`, `DROP TABLE`, and their respellings) run only after you approve
+  Claude Code's permission dialog for that command, which says what it
+  destroys. Where no dialog can reach you (permission modes other than Manual
+  and auto, a subagent, a cloud session) they are denied, and you run them
+  yourself. An `rm` inside the session's own scratchpad needs none.
 - **AI attribution** (`Co-Authored-By: Claude`, "Generated with Claude") is
   denied in commits, tags, pull requests and their bodies.
 - **Secrets** with a known token shape (AWS, GitHub, Stripe, private keys and
   about a hundred more, from gitleaks' rules) are denied in what a write adds,
   a commit records or a push publishes. Generic patterns only warn.
 
-**How to use it.** When a destructive command is denied, the agent shows it
-and what it destroys. Answer naming the act: "pode apagar", "confirmo o
-reset", "go ahead and delete it"; a plain "ok" does not count. For a secret
+**How to use it.** When a destructive command comes up, read the dialog and
+approve or decline it; typing consent in the chat does not approve it. For a secret
 false positive, add the fingerprint from the denial to
 `.playbook/secrets-allow` yourself; the agent cannot write that file. If your
 team allows attribution, set `PLAYBOOK_ALLOW_AI_ATTRIBUTION=1` in your own
@@ -698,13 +699,16 @@ project key next to the model's own `[HANDOFF]` block, and the `SessionStart:cle
 that follows injects both once and deletes them.
 
 The `PreToolUse` guard's **destructive-command block** (`rm -r`, `git reset
---hard`, force push, `git clean`, mass delete, destructive SQL) lifts for the
-turn in which the user authorizes the operation in their own words, naming the
-act — "pode apagar", "confirmo o reset", "go ahead and delete it". A general
-approval ("pode seguir", "pode rodar os testes", "I confirm") is not consent.
-The authorization is re-read from the user's current message on every call, so
-it never outlives the turn that granted it, negations ("nunca apague isso") do
-not count as consent, and the model cannot authorize itself. An `rm` of literal
+--hard`, force push, `git clean`, mass delete, destructive SQL) answers
+`permissionDecision: "ask"`, so Claude Code shows the user its permission
+dialog with the command and, in the configured language, what it destroys; the
+command runs only if the user approves. Consent is that answer, given to the
+harness for that one call: the guard reads nothing from the transcript, and
+nothing the model or the user writes in the chat approves it. The dialog is
+raised only where it is documented to reach the user — the `default` (Manual)
+and `auto` permission modes, in the main session outside a cloud session.
+Every other mode, an unknown or missing mode, and a subagent's call are denied,
+with the model told to hand the command to the user. An `rm` of literal
 absolute paths inside the session's own scratchpad needs no consent: it deletes
 only what the session made there. Two false-positive sources were also removed: a heredoc body
 written by `cat`, `tee` or a non-shell interpreter is data, not shell about to
@@ -837,14 +841,11 @@ the model for every subagent whose call and definition name none, and the
 built-in `Explore` and `Plan` agents already skip `CLAUDE.md`.
 
 **Codex parity:** the learn loop, the carry-over note, the review gate and the
-destructive-command authorization bypass are Claude Code only for now. The Codex
+destructive-command permission dialog are Claude Code only for now. The Codex
 guard shares `check_destructive`, so it does get the false-positive fixes
-(heredoc bodies, SQL statement shape) — but not the bypass, because scoping an
-authorization to the turn it was given in requires locating the latest user
-message, and Codex's transcript schema for that is not confirmed. A session-wide
-scan would be the easy version and the wrong one: an authorization from an hour
-earlier would clear a block on something the user never saw. Until the schema is
-confirmed, Codex keeps the stricter behaviour of always blocking. The shared primitives live in `hooks/playbook_core.py`
+(heredoc bodies, SQL statement shape) — but not the dialog, because whether a
+Codex hook's "ask" reaches the user is not confirmed, so Codex keeps the
+stricter behaviour of always blocking. The shared primitives live in `hooks/playbook_core.py`
 (`CORRECTION_RE`, `REVIEW_BYPASS_RE`, `GIT_PUSH_RE`, the journal helpers), but
 the Codex adapter's transcript and tool-result schemas differ and are not
 confirmed for these events, so the adapter guards have not been wired to them.

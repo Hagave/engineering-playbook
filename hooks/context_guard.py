@@ -17,6 +17,8 @@ blocking a turn that wrote code without confirming.
 
 Blocking contract (Claude Code hook semantics):
 - PreToolUse deny  → exit 0 + JSON {"hookSpecificOutput": {"permissionDecision": "deny", ...}}
+- PreToolUse ask   → exit 0 + JSON {"hookSpecificOutput": {"permissionDecision": "ask", ...}}:
+                     the harness's permission dialog, the destructive gate's only consent
 - Stop block       → exit 0 + JSON {"decision": "block", "reason": ...}
 - Warning          → exit 0 + JSON {"systemMessage": ...}
 Non-zero exit codes other than 2 are NOT blocking in Claude Code — never use
@@ -50,6 +52,7 @@ import time
 # which does not add the file's directory to sys.path).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import playbook_core
+import playbook_i18n
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -106,7 +109,6 @@ VALIDATION_RE = playbook_core.VALIDATION_RE
 SUSPEND_SKILL = playbook_core.SUSPEND_SKILL
 RESUME_SKILLS = playbook_core.RESUME_SKILLS
 LEARNED_TOKEN = playbook_core.LEARNED_TOKEN
-DESTRUCTIVE_AUTHORIZED_RE = playbook_core.DESTRUCTIVE_AUTHORIZED_RE
 REVIEW_SKILLS = playbook_core.REVIEW_SKILLS
 REVIEW_BYPASS_RE = playbook_core.REVIEW_BYPASS_RE
 
@@ -729,24 +731,61 @@ def _turn_user_prompts(transcript: str | None) -> list[str]:
 
 def _turn_typed_words(transcript: str | None) -> list[str]:
     """What the user typed in each message they sent in the current turn:
-    consent is read from here, never from a block they pasted from elsewhere
-    nor from text the user did not send. One item per message, so a phrase is
-    never matched across two of them."""
+    the review waiver is read from here, never from a block they pasted from
+    elsewhere nor from text the user did not send. One item per message, so a
+    phrase is never matched across two of them."""
     return [playbook_core.typed_words(prompt) for prompt in _turn_user_prompts(transcript)]
 
 
-def _destructive_authorized(transcript: str | None) -> bool:
-    """Whether the user authorized a destructive operation in what they sent in
-    the current turn.
+# Trade-off: only the modes where a PreToolUse "ask" is documented to put a
+# dialog in front of the user — Manual (`default`), and auto mode, which sends a
+# hook's "ask" to the prompt instead of the classifier (hooks reference,
+# "PreToolUse ask decisions in auto mode"). The rest deny even where a dialog
+# might appear: bypassPermissions skips prompts, dontAsk denies them, and
+# acceptEdits (which auto-approves `rm`) and plan are not documented for it.
+_DIALOG_MODES = frozenset({'default', 'auto'})
 
-    Read fresh from the current turn on every call, which is what scopes it: an
-    authorization is good for the turn it was given in and no longer, and a turn
-    a notification, a hand-back or a compaction summary opened has none. It
-    is deliberately not persisted — a stored flag would let a "pode apagar" from
-    an hour ago clear a block on something the user never saw. And because only
-    what the user sent is scanned, the model cannot authorize itself by writing
-    the phrase in its own response or in a summary of earlier turns."""
-    return any(DESTRUCTIVE_AUTHORIZED_RE.search(words) for words in _turn_typed_words(transcript))
+_COMMAND_SHOWN_CHARS = 300
+
+
+def _no_dialog_reason(input_data: dict) -> str:
+    """Why a permission dialog for this call cannot be trusted to reach the
+    user, or '' when it can."""
+    if _AGENT_ID:
+        return ('the call comes from a subagent, and the permission mode its payload reports '
+                'is not documented to be the mode it runs in')
+    if os.environ.get('CLAUDE_CODE_REMOTE') == 'true':
+        return 'in a cloud session a hook-raised permission dialog is not documented to reach the user'
+    mode = input_data.get('permission_mode')
+    if not isinstance(mode, str):
+        return 'the hook payload carries no permission mode'
+    if mode not in _DIALOG_MODES:
+        return f'in permission mode `{mode[:40]}` a permission dialog is not known to reach the user'
+    # Accepted: a `claude -p` run reports `default` too, and nothing in the
+    # payload tells it apart. There the harness denies the "ask" itself, or the
+    # run's own permission host (canUseTool, --permission-prompt-tool) answers
+    # it (headless docs) — never the model.
+    return ''
+
+
+def _destructive_verdict(hit: dict, input_data: dict, command: str, prefs: dict) -> dict:
+    """A permission dialog for `hit` (a check_destructive block), worded for
+    the user in their language, where the dialog reaches them; otherwise a deny
+    telling the model to hand the command to the user. An effect with no text
+    to show is denied too: a crash here would let the command run."""
+    why = _no_dialog_reason(input_data)
+    effect_key = f"destroys_{hit.get('effect')}"
+    if not why and effect_key not in playbook_i18n.STRINGS:
+        why = 'the playbook has no text to show the user for this command'
+    if why:
+        return {**hit, 'msg': hit['msg'].replace(playbook_core.AUTHORIZATION_HINT, (
+            f'No permission dialog can be trusted to reach the user here ({why}), so the '
+            'playbook denies it: ask the user to run the command themselves. Nothing typed in '
+            'the chat lifts this block.'))}
+    language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'))
+    shown = command if len(command) <= _COMMAND_SHOWN_CHARS else command[:_COMMAND_SHOWN_CHARS] + '…'
+    return {'ask': True, 'msg': playbook_i18n.text(
+        language, 'destructive_ask', effect=playbook_i18n.text(language, effect_key), command=shown)}
 
 
 _FINDING_RE = re.compile(r'^\s*[-*]\s+`?[^`\n]+?:\d+`?\s*[—-]', re.MULTILINE)
@@ -1110,6 +1149,22 @@ def _check_spec_gate(transcript: str | None) -> dict | None:
 
 # ─── Output ───────────────────────────────────────────────────────────────────
 
+def _emit_ask(ask: dict, advisory: dict | None) -> None:
+    """The permission dialog, carrying any advisory that came with the call the
+    way _emit_pretooluse would deliver it."""
+    output: dict = {'hookSpecificOutput': {
+        'hookEventName': 'PreToolUse',
+        'permissionDecision': 'ask',
+        'permissionDecisionReason': ask['msg'],
+    }}
+    if advisory:
+        if advisory.get('to_model'):
+            output['hookSpecificOutput']['additionalContext'] = advisory['msg']
+        if not advisory.get('model_only'):
+            output['systemMessage'] = advisory['msg']
+    print(json.dumps(output))
+
+
 def _emit_pretooluse(result: dict) -> None:
     if result.get('block'):
         print(json.dumps({
@@ -1322,11 +1377,12 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
     if not notice:
         notice = _check_budget(int(pct * limit) if pct is not None else None, state, prefs)
     result = notice if notice and notice.get('block') else None
+    # A destructive command the user can approve in a dialog. It is the weakest
+    # verdict: every other gate still runs, and any deny among them wins, so an
+    # approval never carries a command past a gate the dialog does not mention.
+    ask = None
 
     if not result and tool_name == 'Bash':
-        # The authorization lookup reads and parses the transcript tail, so it
-        # runs only once the pattern match has already fired — not on every
-        # Bash call, the vast majority of which are not destructive at all.
         # What a heredoc writes is data, not commands about to run: a commit
         # message that merely mentions a push, or a doc that documents a
         # dangerous command, must not trip gates that inspect commands.
@@ -1338,8 +1394,10 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
             playbook_core.strip_heredoc_bodies(command))
         destructive = _check_destructive(runnable, command, _CWD,
                                          disposable_root=_session_scratchpad())
-        if destructive and _destructive_authorized(transcript):
-            destructive = None
+        if destructive:
+            destructive = _destructive_verdict(destructive, input_data, command, prefs)
+            if destructive.get('ask'):
+                ask, destructive = destructive, None
         is_push = playbook_core.is_git_push(runnable)
         # Attribution and secrets before review: a push carrying either is
         # denied whether or not it was reviewed, and the review would not fix it.
@@ -1406,7 +1464,9 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
 
     _save_state(state)
 
-    if result:
+    if ask and not (result and result.get('block')):
+        _emit_ask(ask, result)
+    elif result:
         _emit_pretooluse(result)
     sys.exit(0)
 

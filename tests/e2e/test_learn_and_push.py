@@ -35,6 +35,7 @@ _PYTHON = sys.executable
 
 sys.path.insert(0, os.path.join(_ROOT, 'hooks'))
 import playbook_core  # noqa: E402
+import playbook_i18n  # noqa: E402
 
 _HOOK_DIR = os.path.expanduser('~/.claude/hooks')
 
@@ -1131,116 +1132,148 @@ class TestAttributionInHistory(_RepoBase):
         self.assertFalse(self._denied(self._pre_bash('git commit -F msg.txt')))
 
 
-# ── Destructive-command authorization ─────────────────────────────────────────
+# ── Destructive-command consent: the harness's permission dialog ──────────────
 
-class TestDestructiveAuthorization(_ConsentShapes, _Base):
-    """The destructive guard blocked even when the user had just authorized the
-    command, with no way to say yes — which reads as arbitrary and intermittent,
-    because whether it fired depended only on how the command happened to be
-    spelled."""
+class TestDestructiveConsentByDialog(_Base):
+    """Consent to a destructive command is the user's answer to the harness's
+    permission dialog, never text read from the transcript. The dialog is
+    raised only where it is known to reach the user; everywhere else the
+    command is denied and handed to the user to run.
 
-    SPLIT_CONSENT = ('ok, pode', 'apagar a pasta build')
-
-    def _lifted(self, transcript: str) -> bool:
-        self._write(transcript)
-        return not self._denied(self._bash(self.DESTRUCTIVE))
-
-    def _bash(self, command: str):
-        return _run(_GUARD, {
-            'session_id': self.session_id,
-            'transcript_path': self.transcript,
-            'hook_event_name': 'PreToolUse',
-            'cwd': self.dir,
-            'tool_name': 'Bash',
-            'tool_input': {'command': command},
-        })
-
-    def _denied(self, result) -> bool:
-        return _out(result).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny'
+    Payloads follow the shape a live Claude Code session sent a plugin hook
+    (auto mode, PreToolUse Bash)."""
 
     DESTRUCTIVE = 'rm -rf build/'
+    DENY_TAIL = 'ask the user to run the command themselves'
 
-    def test_unauthorized_destructive_command_is_denied(self):
-        self._write(_ul('clean up the project'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.dir, 'home')
+        self.tmp = os.path.join(self.dir, 'tmp')
+        os.makedirs(os.path.join(self.home, '.claude', 'hooks'))
+        os.makedirs(self.tmp)
+        self._language('en')
 
-    def test_user_authorization_in_the_current_message_allows_it(self):
-        self._write(_ul('pode apagar a pasta build'))
-        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _language(self, language: str) -> None:
+        with open(os.path.join(self.home, '.claude', 'hooks', '.playbook-prefs.json'), 'w') as f:
+            json.dump({'language': language}, f)
 
-    def test_english_authorization_allows_it(self):
-        self._write(_ul('go ahead and delete the build directory'))
-        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _bash(self, command: str, mode: object = 'auto', env: dict | None = None,
+              **extra) -> subprocess.CompletedProcess:
+        payload = {
+            'session_id': self.session_id,
+            'cwd': self.dir,
+            'prompt_id': 'p-user',
+            'effort': {'level': 'high'},
+            'hook_event_name': 'PreToolUse',
+            'tool_name': 'Bash',
+            'tool_input': {'command': command, 'description': 'Remove the build output'},
+            'tool_use_id': 'toolu_019FFZDbQDfBhkQX2FpJVTHu',
+            'transcript_path': self.transcript,
+            **extra,
+        }
+        if mode is not None:
+            payload['permission_mode'] = mode
+        return _run(_GUARD, payload, env={'HOME': self.home, 'TMPDIR': self.tmp,
+                                          'CLAUDE_CODE_REMOTE': '', **(env or {})})
 
-    def test_authorization_does_not_carry_to_a_later_turn(self):
-        self._write(_ul('pode apagar a pasta build')
-                    + _al('done')
-                    + _ul('now add the retry logic'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _decision(self, result) -> str | None:
+        return _out(result).get('hookSpecificOutput', {}).get('permissionDecision')
 
-    def test_model_cannot_authorize_itself(self):
-        self._write(_ul('clean up the project') + _al('the user said I can delete it'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _ask_reason(self, language: str, effect: str, command: str) -> str:
+        return playbook_i18n.text(language, 'destructive_ask',
+                                  effect=playbook_i18n.text(language, f'destroys_{effect}'),
+                                  command=command)
 
-    CONSENT = 'pode apagar a pasta build'
+    def _assert_denied_to_the_user(self, result) -> None:
+        self.assertEqual(self._decision(result), 'deny')
+        self.assertIn(self.DENY_TAIL, _out(result)['hookSpecificOutput']['permissionDecisionReason'])
 
-    def test_consent_does_not_carry_into_a_turn_a_task_notification_started(self):
-        self._write(_typed(self.CONSENT) + _tool_step() + _turn_closed() + _task_notification())
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def test_each_dialog_mode_asks_with_the_exact_shape(self):
+        for mode in ('default', 'auto'):
+            with self.subTest(mode=mode):
+                self.assertEqual(_out(self._bash(self.DESTRUCTIVE, mode)), {'hookSpecificOutput': {
+                    'hookEventName': 'PreToolUse',
+                    'permissionDecision': 'ask',
+                    'permissionDecisionReason': self._ask_reason('en', 'delete_tree', self.DESTRUCTIVE),
+                }})
 
-    def test_consent_does_not_carry_into_a_notification_turn_that_kept_its_prompt_id(self):
-        self._write(_typed(self.CONSENT) + _turn_closed() + _task_notification('p-user'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def test_the_reason_is_in_the_configured_language(self):
+        for language in ('pt-br', 'es'):
+            with self.subTest(language=language):
+                self._language(language)
+                reason = _out(self._bash(self.DESTRUCTIVE))['hookSpecificOutput'][
+                    'permissionDecisionReason']
+                self.assertEqual(reason, self._ask_reason(language, 'delete_tree', self.DESTRUCTIVE))
+                self.assertIn(f'`{self.DESTRUCTIVE}`', reason)
 
-    def test_consent_does_not_carry_into_a_turn_a_subagent_hand_back_started(self):
-        self._write(_typed(self.CONSENT) + _turn_closed() + _handback())
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def test_the_reason_says_what_each_command_destroys(self):
+        for command, effect in (('git reset --hard HEAD~1', 'reset_hard'),
+                                ('git clean -fdx', 'clean'),
+                                ('git stash drop', 'stash_drop'),
+                                ('psql -c "DROP TABLE users;"', 'sql'),
+                                ('x=rm; $x -rf build', 'dynamic')):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    _out(self._bash(command))['hookSpecificOutput']['permissionDecisionReason'],
+                    self._ask_reason('en', effect, command))
 
-    def test_consent_does_not_carry_into_an_automatic_continuation(self):
-        self._write(_typed(self.CONSENT) + _turn_closed() + _auto_continue())
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def test_modes_outside_the_set_deny(self):
+        for mode in ('acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'):
+            with self.subTest(mode=mode):
+                self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, mode))
 
-    def test_consent_survives_what_is_injected_into_the_users_turn(self):
-        self._write(_typed(self.CONSENT) + _mid_turn_injections())
-        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+    def test_an_unknown_mode_value_denies(self):
+        for mode in ('manual', 'yolo', '', 7, ['auto']):
+            with self.subTest(mode=mode):
+                self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, mode))
 
-    def test_consent_survives_a_stop_hook_that_kept_the_turn_going(self):
-        self._write(_typed(self.CONSENT) + _stop_hook_feedback())
-        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+    def test_a_payload_without_a_mode_denies(self):
+        self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, None))
 
-    def test_consent_typed_after_a_notification_turn_counts(self):
-        self._write(_typed('clean up the project') + _turn_closed() + _task_notification()
-                    + _turn_closed() + _typed(self.CONSENT, 'p-next'))
-        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+    def test_a_subagent_payload_denies(self):
+        for mode in ('default', 'auto'):
+            with self.subTest(mode=mode):
+                self._assert_denied_to_the_user(self._bash(
+                    self.DESTRUCTIVE, mode, agent_id='a1b2c3', agent_type='general-purpose'))
 
-    def test_a_question_about_deleting_is_not_an_authorization(self):
-        self._write(_ul('o que acontece se apagar o build por engano?'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def test_a_cloud_session_denies(self):
+        self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, env={'CLAUDE_CODE_REMOTE': 'true'}))
+
+    def test_the_gate_needs_no_transcript(self):
+        missing = os.path.join(self.dir, 'never-written.jsonl')
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, transcript_path=missing)), 'ask')
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, None, transcript_path=missing)),
+                         'deny')
+
+    def test_consent_typed_in_the_chat_lifts_nothing(self):
+        self._write(_typed('pode apagar a pasta build') + _typed_mid_turn('go ahead and delete it'))
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE)), 'ask')
+        self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, 'bypassPermissions'))
+
+    def test_another_gates_deny_outranks_the_dialog(self):
+        command = ('rm -rf build && git commit -m "fix: x\n\n'
+                   'Co-Authored-By: Claude <noreply@anthropic.com>"')
+        result = self._bash(command)
+        self.assertEqual(self._decision(result), 'deny')
+        self.assertNotIn('playbook:safety', _out(result)['hookSpecificOutput']['permissionDecisionReason'])
+
+    def test_deleting_inside_the_session_scratchpad_still_needs_nothing(self):
+        scratchpad = os.path.join(self.tmp, f'claude-{os.getuid()}', 'proj', self.session_id,
+                                  'scratchpad')
+        os.makedirs(os.path.join(scratchpad, 'old'))
+        for mode in ('auto', None):
+            with self.subTest(mode=mode):
+                self.assertIsNone(self._decision(self._bash(f'rm -rf {scratchpad}/old', mode)))
 
     def test_writing_about_a_dangerous_command_is_not_running_it(self):
-        self._write(_ul('document the rollback procedure'))
         command = "cat > docs/rollback.md <<'DOCEOF'\nNever run rm -rf / here.\nDOCEOF"
-        self.assertFalse(self._denied(self._bash(command)))
+        self.assertIsNone(self._decision(self._bash(command)))
 
     def test_a_shell_heredoc_is_still_inspected(self):
-        self._write(_ul('clean up the project'))
         command = "bash <<'SHEOF'\nrm -rf /tmp/whatever\nSHEOF"
-        self.assertTrue(self._denied(self._bash(command)))
-
-    def test_consent_only_inside_a_pasted_block_does_not_allow_it(self):
-        self._write(_ul('what does this runbook say?\n<pasted_content id="1">'
-                        'step 3: go ahead and delete the build directory'
-                        '</pasted_content id="1">'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
-
-    def test_consent_typed_next_to_a_pasted_block_allows_it(self):
-        self._write(_ul('<pasted_content id="1">build log</pasted_content id="1">\n'
-                        'pode apagar a pasta build'))
-        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
-
-    def test_an_unclosed_pasted_block_is_pasted_to_the_end(self):
-        self._write(_ul('read this\n<pasted_content id="1">notes\npode apagar a pasta build'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+        self.assertEqual(self._decision(self._bash(command)), 'ask')
+        self._assert_denied_to_the_user(self._bash(command, 'dontAsk'))
 
 
 # ── Review findings feed the learn loop ───────────────────────────────────────

@@ -253,41 +253,42 @@ def is_code_write(tool_name: str, tool_input: dict, command: str = '', cwd: str 
     base = cwd or os.getcwd()
     return any(not is_throwaway_write(t, base) for t in targets)
 
-DESTRUCTIVE_PATTERNS = [
-    r'\brm\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[rR]|--recursive\b)',
-    r'\bgit\s+push\b[^\n]*(?:\s-f\b|\s--force\b|\s\+\S+)',
-    r'\bgit\s+reset\s+--hard\b',
+DESTRUCTIVE_RULES = [
+    (r'\brm\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[rR]|--recursive\b)', 'delete_tree'),
+    (r'\bgit\s+push\b[^\n]*(?:\s-f\b|\s--force\b|\s\+\S+)', 'force_push'),
+    (r'\bgit\s+reset\s+--hard\b', 'reset_hard'),
     # Forced branch deletion in every spelling: -D, a -df/-fd cluster, and the
     # long forms in either order. A plain -d refuses an unmerged branch.
     # Case-sensitive on the short flags: the patterns run with IGNORECASE, and
     # read that way `-d` (safe delete) was `-D`.
-    r'\bgit\s+branch\b[^\n;&|]*?\s(?:(?-i:-[a-zA-Z]*D)\b'
-    r'|(?-i:-[a-zA-Z]*(?:d[a-zA-Z]*f|f[a-zA-Z]*d)[a-zA-Z]*)\b'
-    r'|(?:--delete|-d)\b[^\n;&|]*\s(?:--force|-f)\b'
-    r'|(?:--force|-f)\b[^\n;&|]*\s(?:--delete|-d)\b)',
-    r'\bgit\s+checkout\s+--\s',
+    (r'\bgit\s+branch\b[^\n;&|]*?\s(?:(?-i:-[a-zA-Z]*D)\b'
+     r'|(?-i:-[a-zA-Z]*(?:d[a-zA-Z]*f|f[a-zA-Z]*d)[a-zA-Z]*)\b'
+     r'|(?:--delete|-d)\b[^\n;&|]*\s(?:--force|-f)\b'
+     r'|(?:--force|-f)\b[^\n;&|]*\s(?:--delete|-d)\b)', 'branch_delete'),
+    (r'\bgit\s+checkout\s+--\s', 'discard_changes'),
     # `git restore` discards working-tree changes unless it only unstages.
     # Short flags case-sensitive: under IGNORECASE `-s` (--source, which
     # overwrites the working tree) read as `-S` (--staged, which only unstages).
-    r'\bgit\s+restore\b(?=[^\n;&|]*\s(?:--worktree|(?-i:-W))\b)',
-    r'\bgit\s+restore\b(?![^\n;&|]*\s(?:--staged|(?-i:-S))\b)',
-    r'\bgit\s+clean\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[fdx]\b|--force\b)',
+    (r'\bgit\s+restore\b(?=[^\n;&|]*\s(?:--worktree|(?-i:-W))\b)', 'discard_changes'),
+    (r'\bgit\s+restore\b(?![^\n;&|]*\s(?:--staged|(?-i:-S))\b)', 'discard_changes'),
+    (r'\bgit\s+clean\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[fdx]\b|--force\b)', 'clean'),
     # History and stash that no reflog brings back.
-    r'\bgit\s+stash\s+(?:clear|drop)\b',
-    r'\bgit\s+reflog\s+(?:expire|delete)\b',
-    r'\bgit\s+update-ref\s+(?:[^\n;&|]*\s)?-d\b',
-    r'\bgit\s+filter-(?:branch|repo)\b',
+    (r'\bgit\s+stash\s+(?:clear|drop)\b', 'stash_drop'),
+    (r'\bgit\s+reflog\s+(?:expire|delete)\b', 'history'),
+    (r'\bgit\s+update-ref\s+(?:[^\n;&|]*\s)?-d\b', 'history'),
+    (r'\bgit\s+filter-(?:branch|repo)\b', 'history'),
     # A forced worktree removal discards its uncommitted changes.
-    r'\bgit\s+worktree\s+remove\b[^\n;&|]*\s(?:--force|-f)\b',
-    r'\brsync\b[^\n;&|]*\s--delete',
-    r'\bshred\s',
-    r'\btruncate\s+[^\n;&|]*(?:-s\s*0+\b|--size(?:=|\s+)0+\b)',
-    r'\bfind\s+[^\n]*-delete\b',
-    r'\bxargs\b[^\n]*\brm\b',
-    r'\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?[`"\[]?\w',
-    r'\bTRUNCATE\s+(?:TABLE\s+|ONLY\s+)?[`"\[]?\w+[`"\]]?\s*(?:;|$|\s+(?:CASCADE|RESTART))',
-    r'(?s)\bDELETE\s+FROM\b(?!.*\bWHERE\b)',
+    (r'\bgit\s+worktree\s+remove\b[^\n;&|]*\s(?:--force|-f)\b', 'worktree_remove'),
+    (r'\brsync\b[^\n;&|]*\s--delete', 'sync_delete'),
+    (r'\bshred\s', 'shred'),
+    (r'\btruncate\s+[^\n;&|]*(?:-s\s*0+\b|--size(?:=|\s+)0+\b)', 'truncate'),
+    (r'\bfind\s+[^\n]*-delete\b', 'mass_delete'),
+    (r'\bxargs\b[^\n]*\brm\b', 'mass_delete'),
+    (r'\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?[`"\[]?\w', 'sql'),
+    (r'\bTRUNCATE\s+(?:TABLE\s+|ONLY\s+)?[`"\[]?\w+[`"\]]?\s*(?:;|$|\s+(?:CASCADE|RESTART))', 'sql'),
+    (r'(?s)\bDELETE\s+FROM\b(?!.*\bWHERE\b)', 'sql'),
 ]
+DESTRUCTIVE_PATTERNS = [pattern for pattern, _ in DESTRUCTIVE_RULES]
 
 # AI attribution on anything a team reads as project history. The harness injects
 # two forms by default -- the commit trailer and a "Generated with Claude Code"
@@ -342,39 +343,6 @@ PUBLISH_CMD_RE = re.compile(
 # attribution check reads pull request bodies too, and those arrive almost
 # exclusively as `--body "$(cat <<'EOF' ...)"`.
 PUBLISH_TOOLS = frozenset({'git', 'gh', 'glab', 'az'})
-
-# The user authorizing a destructive operation in their own words. Scoped to the
-# message it appears in (see context_guard._destructive_authorized): the guard
-# re-reads the latest user message on every call, so an authorization never
-# outlives the turn that granted it, and the model can never grant itself one.
-# Negation directly before a permission phrase inverts it: "não pode apagar" and
-# "never delete the database" are prohibitions, and reading either as consent is
-# the worst failure this pattern can have.
-_NOT = r'(?<!não )(?<!nao )(?<!nunca )(?<!never )(?<!not )(?<!don\'t )'
-# A bare imperative only counts where the sentence actually starts with it, or
-# after an explicit yes. Otherwise any sentence that merely contains "delete the
-# database" reads as an instruction to delete it.
-_AFFIRMATIVE = r'(?:^|[.!?;]\s+|\b(?:yes|sim|ok|beleza|claro|please|por\s+favor),?\s+)'
-
-# Every form names the destructive act itself. A general approval ("pode
-# seguir", "pode rodar os testes", "I confirm the spec") answers another
-# question, and read as consent it unlocked rm -rf and force push for the turn.
-_PT_VERBS = 'apagar|deletar|remover|excluir|limpar|resetar|sobrescrever|forçar|forcar'
-_PT_ACTS = r'exclus[ãa]o|remo[çc][ãa]o|reset|push\s+for[çc]ado'
-_EN_VERBS = 'delete|remove|drop|wipe|reset|overwrite|force'
-_EN_ACTS = r'deletion|removal|force\s+push'
-
-DESTRUCTIVE_AUTHORIZED_RE = re.compile(
-    _NOT + rf'\bpode\s+(?:{_PT_VERBS})\b'
-    + '|' + _AFFIRMATIVE + r'(?:apaga|apague|deleta|remova|remove|exclua|limpa|limpe'
-    r'|reseta|resete)\s+(?:isso|isto|esse|este|essa|esta|tudo|o\s+\S+|a\s+\S+)\b'
-    + rf'|\b(?:eu\s+)?(?:autorizo|confirmo)\s+(?:(?:a|o)\s+)?(?:{_PT_VERBS}|{_PT_ACTS})\b'
-    + rf'|\bgo\s+ahead\s+and\s+(?:{_EN_VERBS})\b'
-    + '|' + _AFFIRMATIVE + rf'(?:{_EN_VERBS})\s+(?:it|this|that|them|the\s+\S+)\b'
-    + rf'|\byou\s+(?:can|may)\s+(?:{_EN_VERBS})\b'
-    + rf'|\bi\s+(?:authorize|confirm)\s+(?:the\s+)?(?:{_EN_VERBS}|{_EN_ACTS})\b',
-    re.IGNORECASE | re.MULTILINE,
-)
 
 # A heredoc body written by cat/tee, or fed to a non-shell interpreter, is data
 # or foreign-language source — not shell about to run. Scanning it with shell and
@@ -1690,14 +1658,15 @@ def is_suspended(transcript_lines: list[str]) -> bool:
 
 
 AUTHORIZATION_HINT = (
-    'The block lifts for the turn in which the user authorizes it in their own words '
-    '(e.g. "pode apagar", "go ahead and delete it") — authorization does not carry to '
-    'later turns, and you cannot grant it to yourself.'
+    'Nothing typed in the chat lifts this block, and you cannot authorize it yourself.'
 )
 
 
-def _destructive_block(reason: str) -> dict:
-    return {'block': True, 'msg': f'[playbook:safety] {reason} {AUTHORIZATION_HINT}'}
+def _destructive_block(reason: str, effect: str) -> dict:
+    """`effect` names what the command destroys, for the text the user reads
+    (playbook_i18n `destroys_<effect>`)."""
+    return {'block': True, 'effect': effect,
+            'msg': f'[playbook:safety] {reason} {AUTHORIZATION_HINT}'}
 
 
 # Commands whose arguments are text being searched for, never a command: a
@@ -1762,7 +1731,8 @@ def _pattern_lines(command: str, disposable_root: str = '') -> list[str]:
 
 def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 0,
                       disposable_root: str = '') -> dict | None:
-    """Deny a command that destroys work, until the user authorizes it.
+    """Flag a command that destroys work; the adapter decides how the user
+    approves it (Claude Code: a permission dialog; Codex: never in-session).
 
     `command` is the runnable command (heredoc bodies and inline scripts
     stripped). Four readings of it, each closing a way past the one before:
@@ -1788,20 +1758,19 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
     does)."""
     command = strip_heredoc_bodies(command)
     for line in _pattern_lines(command, disposable_root):
-        for pattern in DESTRUCTIVE_PATTERNS:
+        for pattern, effect in DESTRUCTIVE_RULES:
             match = re.search(pattern, line, re.IGNORECASE)
             if match:
                 return _destructive_block(
-                    f'Destructive operation detected (`{match.group(0).strip()}`). Confirm '
-                    'with the user explicitly before proceeding: show the exact command and '
-                    'what it destroys, and wait.')
+                    f'Destructive operation detected (`{match.group(0).strip()}`). Show the '
+                    'user the exact command and what it destroys.', effect)
     unknown = unattestable_command(command) if _depth == 0 else ''
     if unknown:
         return _destructive_block(
             f'Command decided at run time (`{unknown[:120]}`): its program comes from a '
             'variable or a command substitution, so the destructive check cannot read what '
             'it runs. Write the command literally; if it has to stay dynamic, show the user '
-            'what it expands to and wait.')
+            'what it expands to.', 'dynamic')
     # Heredoc bodies that are data (a PR body, a doc) are left out: one quoting
     # `node -e "fs.rmSync(dir, opts)"` is text. A heredoc fed to a shell stays.
     for payload in inline_payloads(strip_heredoc_bodies(raw or command)):
@@ -1809,8 +1778,7 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
         if match:
             return _destructive_block(
                 f'Recursive deletion in an interpreter script (`{match.group(0).strip()}`). '
-                'Confirm with the user explicitly before proceeding: show what it deletes, '
-                'and wait.')
+                'Show the user what it deletes.', 'script_delete')
     if _depth == 0:
         for line in interpreter_shell_commands(raw or command, cwd):
             inner = check_destructive(strip_heredoc_bodies(line), line, cwd, _SCRIPT_MAX_DEPTH)
@@ -1831,8 +1799,8 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
         call = _recursive_delete_call(source)
         if call:
             return _destructive_block(
-                f'Recursive deletion in the script `{source.origin}` (`{call}`). Confirm with '
-                'the user explicitly before proceeding: show what it deletes, and wait.')
+                f'Recursive deletion in the script `{source.origin}` (`{call}`). Show the '
+                'user what it deletes.', 'script_delete')
     return None
 
 
