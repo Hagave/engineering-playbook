@@ -9,6 +9,7 @@ PLAYBOOK_LAB_IT=1 (it downloads the scanner image).
 import copy
 import importlib.util
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -267,7 +268,7 @@ class TestSqlmap(_LabCase):
             service='app', port=8080, path='/', minutes=1, startup_seconds=0,
             project_dir='.', compose_file=['compose.yml'],  active=False,
             active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=True, endpoint='/items?id=1',
-            level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC)
+            level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
@@ -848,7 +849,7 @@ class TestEnvironment(unittest.TestCase):
                                        active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
-                                      time_sec=lab.SQLMAP_TIME_SEC)
+                                      time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
@@ -876,7 +877,7 @@ class TestEnvironment(unittest.TestCase):
                                        active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
-                                      time_sec=lab.SQLMAP_TIME_SEC)
+                                      time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
@@ -1074,7 +1075,7 @@ class TestScanOrchestration(unittest.TestCase):
         base = dict(service=None, port=None, path='/', minutes=1, startup_seconds=0,
                     project_dir='.', compose_file=['c.yml'], active=False,
                     active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False, endpoint=None,
-                    level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC)
+                    level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
         base.update(over)
         return lab.argparse.Namespace(**base)
 
@@ -1121,6 +1122,54 @@ class TestScanOrchestration(unittest.TestCase):
         with self.assertRaises(lab.LabError):
             self._run_scan([lab.parse_target('api', 8081, '/')],
                            {'api': lab.LabError('boom', lab.EXIT_ERROR)})
+
+    def test_gate_mode_scans_the_commit_records_it_and_removes_the_worktrees(self):
+        targets = [lab.parse_target('api', 8081, '/')]
+        recorded: dict = {}
+        removed: list[str] = []
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'acquire_lab_lock',
+                                  return_value=os.open(os.devnull, os.O_RDONLY)), \
+                mock.patch.object(lab, 'remove_stale_workdirs'), \
+                mock.patch.object(lab, '_resolve_targets', return_value=({}, targets)), \
+                mock.patch.object(lab, '_git_commit', return_value='deadbeef'), \
+                mock.patch.object(lab, '_prepare_worktrees', return_value={'/proj': '/wt'}) as prepare, \
+                mock.patch.object(lab, '_scan_target', return_value=lab.EXIT_FINDINGS) as scan_one, \
+                mock.patch.object(lab, '_remove_worktree', side_effect=lambda r, w: removed.append(w)), \
+                mock.patch.object(lab, 'write_gate_result',
+                                  side_effect=lambda root, c, t, v: recorded.update(commit=c, verdict=v)), \
+                mock.patch.object(lab.sys, 'stderr', io.StringIO()):
+            code = lab.scan(self._args(gate=True))
+        self.assertEqual(code, lab.EXIT_FINDINGS)
+        self.assertEqual(recorded, {'commit': 'deadbeef', 'verdict': lab.EXIT_FINDINGS})
+        self.assertEqual(removed, ['/wt'])  # the worktree is always removed
+        # The worktree map reached the per-target build.
+        self.assertEqual(scan_one.call_args.args[-1], {'/proj': '/wt'})
+        # The worktrees carry the project prefix, so a killed run's leftover is
+        # swept by remove_stale_workdirs (which matches `<project>.`).
+        prefix = prepare.call_args.args[-1]
+        self.assertTrue(prefix.endswith('.wt-') and prefix.startswith('redlab-'), prefix)
+
+    def test_gate_worktrees_are_removed_even_when_a_target_raises(self):
+        removed: list[str] = []
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'acquire_lab_lock',
+                                  return_value=os.open(os.devnull, os.O_RDONLY)), \
+                mock.patch.object(lab, 'remove_stale_workdirs'), \
+                mock.patch.object(lab, '_resolve_targets',
+                                  return_value=({}, [lab.parse_target('api', 8081, '/')])), \
+                mock.patch.object(lab, '_git_commit', return_value='sha'), \
+                mock.patch.object(lab, '_prepare_worktrees', return_value={'/proj': '/wt'}), \
+                mock.patch.object(lab, '_scan_target',
+                                  side_effect=lab.LabError('boom', lab.EXIT_ERROR)), \
+                mock.patch.object(lab, '_remove_worktree', side_effect=lambda r, w: removed.append(w)), \
+                mock.patch.object(lab, 'write_gate_result'), \
+                mock.patch.object(lab.sys, 'stderr', io.StringIO()):
+            with self.assertRaises(lab.LabError):
+                lab.scan(self._args(gate=True))
+        self.assertEqual(removed, ['/wt'])
 
 
 class TestResolveTargets(unittest.TestCase):
@@ -1183,6 +1232,169 @@ class TestResolveTargets(unittest.TestCase):
                 self._args(service='api', port=8081, endpoint='/items?id=1', compose_file=['c.yml']),
                 '/r', 'sqlmap')
         self.assertEqual(targets[0].query, 'id=1')
+
+
+class TestGateState(unittest.TestCase):
+    """The --gate result file: written whole, keyed by commit, outside any repo."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        patcher = mock.patch.object(lab, 'GATE_STATE_DIR', self.dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_result_is_read_back_only_for_the_same_commit(self):
+        targets = [lab.parse_target('api', 8081, '/')]
+        lab.write_gate_result('/proj', 'abc123', targets, lab.EXIT_CLEAN)
+        record = lab.read_gate_result('/proj', 'abc123')
+        self.assertEqual(record['verdict'], lab.EXIT_CLEAN)
+        self.assertEqual(record['targets'], [{'service': 'api', 'port': 8081}])
+        self.assertIsNone(lab.read_gate_result('/proj', 'def456'))  # another commit: not this one's
+
+    def test_no_file_reads_as_no_result(self):
+        self.assertIsNone(lab.read_gate_result('/never-scanned', 'abc123'))
+
+    def test_two_projects_do_not_share_a_file(self):
+        lab.write_gate_result('/a', 'sha', [], lab.EXIT_FINDINGS)
+        lab.write_gate_result('/b', 'sha', [], lab.EXIT_CLEAN)
+        self.assertEqual(lab.read_gate_result('/a', 'sha')['verdict'], lab.EXIT_FINDINGS)
+        self.assertEqual(lab.read_gate_result('/b', 'sha')['verdict'], lab.EXIT_CLEAN)
+
+    def test_a_wrong_version_is_ignored(self):
+        lab.write_gate_result('/proj', 'sha', [], lab.EXIT_CLEAN)
+        path = lab._gate_state_path('/proj')
+        with open(path, encoding='utf-8') as fh:
+            record = json.load(fh)
+        record['version'] = lab.GATE_RESULT_VERSION + 1
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(record, fh)
+        self.assertIsNone(lab.read_gate_result('/proj', 'sha'))
+
+
+class TestBuildRemap(unittest.TestCase):
+    """Redirecting build paths at the worktrees of the committed tree."""
+
+    WT = {'/work/shop': '/tmp/wt-shop'}
+
+    def test_a_context_inside_a_mapped_repo_is_redirected(self):
+        self.assertEqual(lab._remap_build_path('/work/shop/api', self.WT), '/tmp/wt-shop/api')
+
+    def test_the_repo_root_itself_maps_to_the_worktree_root(self):
+        self.assertEqual(lab._remap_build_path('/work/shop', self.WT), '/tmp/wt-shop')
+
+    def test_a_path_outside_every_mapped_repo_is_left_alone(self):
+        self.assertIsNone(lab._remap_build_path('/elsewhere/api', self.WT))
+
+    def test_an_image_context_is_not_a_path_and_is_left_alone(self):
+        self.assertIsNone(lab._remap_build_path('docker-image://alpine:3', self.WT))
+
+    def test_remap_rewrites_context_and_additional_contexts(self):
+        service = {'build': {'context': '/work/shop/api', 'additional_contexts': {
+            'seed': '/work/shop/seed', 'base': 'docker-image://alpine'}}}
+        lab._remap_build(service, self.WT)
+        self.assertEqual(service['build']['context'], '/tmp/wt-shop/api')
+        self.assertEqual(service['build']['additional_contexts']['seed'], '/tmp/wt-shop/seed')
+        self.assertEqual(service['build']['additional_contexts']['base'], 'docker-image://alpine')
+
+    def test_build_lab_config_redirects_the_built_service_to_the_worktree(self):
+        base = copy.deepcopy(BASE)  # app builds from /work/shop
+        config = lab.build_lab_config(base, lab.parse_target('app', 8080, '/'), 'redlab-shop',
+                                      tempfile.gettempdir(), 2, worktrees={'/work/shop': '/tmp/wt'})
+        self.assertEqual(config['services']['app']['build']['context'], '/tmp/wt')
+
+    def test_a_gate_build_is_not_refused_as_outside_the_project(self):
+        """Regression: the remapped worktree context (under /tmp) tripped
+        validate_lab_config's "outside the project" refusal, so every --gate run
+        was refused before any scan. Validation must accept the worktree roots."""
+        report_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, report_dir, True)
+        worktree = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, worktree, True)
+        worktrees = {'/work/shop': worktree}  # BASE's app builds from /work/shop
+        config = lab.build_lab_config(copy.deepcopy(BASE), lab.parse_target('app', 8080, '/'),
+                                      'redlab-shop', report_dir, 2, worktrees=worktrees)
+        self.assertEqual(config['services']['app']['build']['context'], worktree)
+        problems = lab.validate_lab_config(config, 'app', report_dir, '/work/shop',
+                                           worktrees=worktrees)
+        self.assertEqual(problems, [])  # and specifically no "outside the project"
+
+    def test_remap_mounts_redirects_an_in_project_read_only_bind(self):
+        config = {'services': {'db': {'volumes': [
+            {'type': 'bind', 'source': '/work/shop/init', 'target': '/x', 'read_only': True},
+            {'type': 'bind', 'source': '/elsewhere/data', 'target': '/y', 'read_only': True}]}}}
+        lab._remap_mounts(config, {'/work/shop': '/tmp/wt'})
+        volumes = config['services']['db']['volumes']
+        self.assertEqual(volumes[0]['source'], '/tmp/wt/init')     # in-project -> worktree
+        self.assertEqual(volumes[1]['source'], '/elsewhere/data')  # outside -> left for validate
+
+    def test_remap_mounts_redirects_a_host_bound_volume_device(self):
+        config = {'services': {}, 'volumes': {'seed': {'driver_opts': {'device': '/work/shop/seed'}}}}
+        lab._remap_mounts(config, {'/work/shop': '/tmp/wt'})
+        self.assertEqual(config['volumes']['seed']['driver_opts']['device'], '/tmp/wt/seed')
+
+    def test_build_lab_config_remaps_an_in_project_read_only_mount(self):
+        """build_lab_config must apply the mount remap, so a committed init
+        script is read from the worktree, not the working tree."""
+        base = copy.deepcopy(BASE)
+        base['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/work/shop/init', 'target': '/x', 'read_only': True}]
+        config = lab.build_lab_config(base, lab.parse_target('app', 8080, '/'), 'redlab-shop',
+                                      tempfile.gettempdir(), 2, worktrees={'/work/shop': '/tmp/wt'})
+        sources = [v['source'] for v in config['services']['postgres']['volumes']]
+        self.assertEqual(sources, ['/tmp/wt/init'])
+
+    def test_service_build_paths_skips_image_contexts(self):
+        service = {'build': {'context': '/work/shop', 'additional_contexts':
+                             ['seed=/work/shop/seed', 'base=docker-image://alpine']}}
+        self.assertEqual(lab._service_build_paths(service), ['/work/shop', '/work/shop/seed'])
+
+
+class TestPrepareWorktrees(unittest.TestCase):
+
+    def _config(self, services: dict) -> dict:
+        return {'services': services}
+
+    def test_the_project_repo_builds_from_the_commit_and_others_from_head(self):
+        config = self._config({
+            'api': {'build': {'context': '/proj/api'}},
+            'web': {'build': {'context': '/sibling/web'}},
+            'db': {'image': 'postgres:17'}})
+        added: list[tuple[str, str]] = []
+
+        def repo_top(path: str) -> str:
+            return '/proj' if path.startswith('/proj') else '/sibling'
+
+        def git_commit(repo: str, ref: str) -> str:
+            return f'head-of-{os.path.basename(repo)}'
+
+        def add_worktree(repo: str, commit: str, _parent: str, _prefix: str) -> str:
+            added.append((repo, commit))
+            return f'/wt/{os.path.basename(repo)}'
+
+        with mock.patch.object(lab, '_repo_toplevel', side_effect=repo_top), \
+                mock.patch.object(lab, '_run', return_value=mock.Mock(returncode=0, stdout='', stderr='')), \
+                mock.patch.object(lab, '_git_commit', side_effect=git_commit), \
+                mock.patch.object(lab, '_add_worktree', side_effect=add_worktree):
+            worktrees = lab._prepare_worktrees(config, '/proj', 'SHA', '/tmp', 'redlab-proj.wt-')
+        self.assertEqual(worktrees, {'/proj': '/wt/proj', '/sibling': '/wt/sibling'})
+        self.assertIn(('/proj', 'SHA'), added)                 # project repo: the pushed commit
+        self.assertIn(('/sibling', 'head-of-sibling'), added)  # other repo: its own HEAD
+
+    def test_a_failure_removes_the_worktrees_already_made(self):
+        config = self._config({'api': {'build': {'context': '/proj/api'}},
+                               'web': {'build': {'context': '/sibling/web'}}})
+        removed: list[str] = []
+        with mock.patch.object(lab, '_repo_toplevel',
+                               side_effect=lambda p: '/proj' if p.startswith('/proj') else '/sibling'), \
+                mock.patch.object(lab, '_run', return_value=mock.Mock(returncode=0, stdout='', stderr='')), \
+                mock.patch.object(lab, '_git_commit', side_effect=lambda r, ref: 'h'), \
+                mock.patch.object(lab, '_add_worktree',
+                                  side_effect=['/wt/a', lab.LabError('boom', lab.EXIT_ERROR)]), \
+                mock.patch.object(lab, '_remove_worktree', side_effect=lambda r, w: removed.append(w)):
+            with self.assertRaises(lab.LabError):
+                lab._prepare_worktrees(config, '/proj', 'SHA', '/tmp', 'redlab-proj.wt-')
+        self.assertEqual(removed, ['/wt/a'])  # the one that succeeded is cleaned up
 
 
 if __name__ == '__main__':
