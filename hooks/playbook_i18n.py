@@ -280,6 +280,20 @@ STRINGS: dict[str, dict[str, str]] = {
         'es': ('Filtro de salida: {count} salidas filtradas, {before} -> {after} caracteres '
                '(-{percent} %, unos {tokens} tokens)'),
     },
+    'lsp_hint': {
+        'en': ('[playbook] {stack} project without a code-intelligence plugin: with '
+               '`{plugin}`, Claude sees type and name errors right after each edit, before '
+               'any build. Install the `{binary}` language server, then run '
+               '`/plugin install {plugin}@claude-plugins-official`. Shown once per project.'),
+        'pt-br': ('[playbook] Projeto {stack} sem plugin de code intelligence: com o '
+                  '`{plugin}`, o Claude vê erros de tipo e de nome logo após cada edição, antes '
+                  'de qualquer build. Instale o language server `{binary}` e depois rode '
+                  '`/plugin install {plugin}@claude-plugins-official`. Aviso único por projeto.'),
+        'es': ('[playbook] Proyecto {stack} sin plugin de code intelligence: con '
+               '`{plugin}`, Claude ve errores de tipo y de nombre justo después de cada edición, '
+               'antes de cualquier build. Instala el language server `{binary}` y luego ejecuta '
+               '`/plugin install {plugin}@claude-plugins-official`. Aviso único por proyecto.'),
+    },
 }
 
 # The panel's own strings, sent whole in `show --json` as `ui`.

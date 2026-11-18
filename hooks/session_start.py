@@ -19,10 +19,14 @@ suspended does not get re-nudged. Fail-open on any error.
 
 import json
 import os
+import shutil
+import subprocess
 import sys
+from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import playbook_core  # noqa: E402
+import playbook_i18n  # noqa: E402
 
 STATE_DIR = os.path.expanduser('~/.claude/hooks')
 _ONBOARD_MARKER = os.path.join(STATE_DIR, '.onboarded')
@@ -158,6 +162,117 @@ def _memory_notice(cwd: str) -> str:
     )
 
 
+class LspPlugin(NamedTuple):
+    name: str
+    binary: str
+    label: str
+
+
+# From the table in https://code.claude.com/docs/en/plugins/code-intelligence.md,
+# cross-checked against the official marketplace's manifest. Only the languages
+# playbook_core.detect_languages knows are listed: the docs also cover C/C++,
+# Python, PHP, Lua, Swift and Liquid, which get no hint until the detector does.
+LSP_PLUGINS: dict[str, LspPlugin] = {
+    'typescript': LspPlugin('typescript-lsp', 'typescript-language-server', 'TypeScript'),
+    'rust': LspPlugin('rust-analyzer-lsp', 'rust-analyzer', 'Rust'),
+    'go': LspPlugin('gopls-lsp', 'gopls', 'Go'),
+    'csharp': LspPlugin('csharp-lsp', 'csharp-ls', 'C#'),
+    'kotlin': LspPlugin('kotlin-lsp', 'kotlin-lsp', 'Kotlin'),
+    'java': LspPlugin('jdtls-lsp', 'jdtls', 'Java'),
+    'ruby': LspPlugin('ruby-lsp', 'ruby-lsp', 'Ruby'),
+}
+
+_PLUGIN_LIST_TIMEOUT = 3
+# Claude Code stops offering LSP plugins after this many ignored recommendation
+# dialogs (code-intelligence docs, "Turn recommendations back on").
+_LSP_IGNORED_LIMIT = 5
+
+
+def _lsp_hint_path(cwd: str) -> str:
+    return os.path.join(STATE_DIR, f'.lsp-hint-{playbook_core.project_key(cwd)}.json')
+
+
+def _plugin_names(cwd: str) -> set[str] | None:
+    """Name (the id before '@') of every plugin `claude plugin list --json`
+    reports for this project, enabled or not; None when the list cannot be read.
+
+    The CLI is the documented reader of the merged enabledPlugins and the install
+    records, so the hook does not re-implement their precedence. A plugin the
+    session loads with --plugin-dir is not in that list, so such a user can get
+    the hint once although the server already runs; accepted for one line."""
+    binary = shutil.which('claude')
+    if not binary:
+        return None
+    try:
+        done = subprocess.run((binary, 'plugin', 'list', '--json'), cwd=cwd,
+                              capture_output=True, text=True, timeout=_PLUGIN_LIST_TIMEOUT)
+        listed = json.loads(done.stdout) if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not isinstance(listed, list):
+        return None
+    names: set[str] = set()
+    for entry in listed:
+        plugin_id = entry.get('id') if isinstance(entry, dict) else None
+        if not isinstance(plugin_id, str) or not plugin_id:
+            return None
+        names.add(plugin_id.split('@', 1)[0])
+    return names
+
+
+def _declined_plugins() -> tuple[bool, set[str]]:
+    """(all LSP recommendations declined, names declined one by one), as the
+    user answered Claude Code's own LSP recommendation dialog in .claude.json."""
+    config_dir = os.environ.get('CLAUDE_CONFIG_DIR')
+    path = (os.path.join(config_dir, '.claude.json') if config_dir
+            else os.path.expanduser('~/.claude.json'))
+    try:
+        with open(path, encoding='utf-8') as f:
+            config = json.load(f)
+    except (OSError, ValueError):
+        return False, set()
+    if not isinstance(config, dict):
+        return False, set()
+    ignored = config.get('lspRecommendationIgnoredCount')
+    declined_all = (config.get('lspRecommendationDisabled') is True
+                    or (isinstance(ignored, int) and ignored >= _LSP_IGNORED_LIMIT))
+    never = config.get('lspRecommendationNeverPlugins')
+    names = {str(i).split('@', 1)[0] for i in never} if isinstance(never, list) else set()
+    return declined_all, names
+
+
+def _lsp_hint(cwd: str) -> str:
+    """One line per detected language whose code-intelligence plugin is not
+    installed, in the user's language, '' otherwise. Each language is settled
+    once per project, whatever the outcome, so a later session neither repeats
+    the hint nor runs the plugin list again; a list that cannot be read settles
+    nothing and the next session retries."""
+    path = _lsp_hint_path(cwd)
+    settled = playbook_core.load_state(path).get('settled')
+    settled = set(settled) if isinstance(settled, list) else set()
+    pending = [lang for lang, _ in playbook_core.detect_languages(cwd)
+               if lang in LSP_PLUGINS and lang not in settled]
+    if not pending:
+        return ''
+    declined_all, declined = _declined_plugins()
+    missing: list[str] = []
+    if not declined_all:
+        listed = _plugin_names(cwd)
+        if listed is None:
+            return ''
+        missing = [lang for lang in pending
+                   if LSP_PLUGINS[lang].name not in listed | declined]
+    os.makedirs(STATE_DIR, exist_ok=True)
+    playbook_core.save_state(path, {'settled': sorted(settled | set(pending))})
+    if not missing:
+        return ''
+    language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
+    return '\n'.join(
+        playbook_i18n.text(language, 'lsp_hint', stack=LSP_PLUGINS[lang].label,
+                           plugin=LSP_PLUGINS[lang].name, binary=LSP_PLUGINS[lang].binary)
+        for lang in missing)
+
+
 HANDOFF_HEADER = (
     '\n\n--- Handoff from the previous session (engineering-playbook) ---\n'
     'Written by the model before the /clear: the goal, what is done, and the next step.\n\n'
@@ -240,12 +355,24 @@ def main() -> None:
     if sast:
         context += '\n\n' + sast
 
-    sys.stdout.write(json.dumps({
+    output: dict[str, object] = {
         'hookSpecificOutput': {
             'hookEventName': 'SessionStart',
             'additionalContext': context,
         },
-    }, separators=(',', ':')))
+    }
+    # The hint is for the person: a synchronous hook's systemMessage is shown to
+    # them, not added to the model's context. Not after a compaction (mid-task)
+    # nor in a headless run, where nobody would read the one-time line.
+    if source != 'compact' and _attended():
+        try:
+            hint = _lsp_hint(str(input_data.get('cwd') or os.getcwd()))
+        except Exception:
+            hint = ''  # fail-open: a suggestion is never worth losing the session context
+        if hint:
+            output['systemMessage'] = hint
+
+    sys.stdout.write(json.dumps(output, separators=(',', ':')))
     sys.exit(0)
 
 

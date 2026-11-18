@@ -17,6 +17,7 @@ not need to be manually re-ported to a second implementation.
 import ast
 import contextlib
 import glob
+import hashlib
 import json
 import os
 import re
@@ -2793,6 +2794,12 @@ def check_push_secrets(command: str, cwd: str = '') -> dict | None:
         if verdict:
             return verdict
     return None
+
+
+def project_key(cwd: str) -> str:
+    """Stable name for a project's state files: the same directory, reached by
+    any path or symlink, gets the same key."""
+    return hashlib.sha256(os.path.realpath(cwd).encode()).hexdigest()[:16]
 
 
 def state_path(state_dir: str, session_id: str = '', cwd: str | None = None,
