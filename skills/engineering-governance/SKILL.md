@@ -109,6 +109,21 @@ Confirm the plan before proceeding. Weak success criteria ("make it work") requi
 
 ---
 
+## Writing code
+
+**Comments.** A comment goes in for exactly two reasons:
+
+- a trade-off that was accepted or is known: what was given up, and why;
+- a palliative fix that is meant to be redone: what the proper fix is.
+
+Nothing else is a comment. Not what the code does, not a name said again in prose, not a doc block on every member, and not history — a date, a ticket, what the code used to do, who asked for it. History belongs in the commit message. Code that needs a sentence to be understood is renamed or restructured until it does not.
+
+**Layout.** Line breaks, wrapping, quote style, import order and trailing commas belong to the project's formatter and its lint autofix. Write the code and let the tooling lay it out. Never spend an edit re-wrapping a line or re-ordering imports by hand.
+
+If the project has no formatter or autofix wired, so that a layout failure reaches you as work, fix what blocks the task and say so to the user once, in the final message: adopting one removes that work for good. Do not install or configure one unasked.
+
+---
+
 ## Prohibited behaviors
 
 - Assuming requirements not stated.
