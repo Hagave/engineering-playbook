@@ -102,7 +102,7 @@ class _SessionWalk:
         self.rewritten: collections.Counter[str] = collections.Counter()
         self.events: list[str] = []                    # non-edit calls, in order
         self.events_at_edit: dict[str, int] = {}       # path -> len(events) at its last edit
-        self.rewrite_rows: dict[tuple[str, str], str] = {}
+        self.rewrite_rows: dict[tuple[str, str, int], str] = {}
         self.loop: _FixLoop | None = None
         self.loop_last_ts = 0.0
         self.rewrites: dict[str, list[float]] = collections.defaultdict(list)
@@ -157,7 +157,7 @@ class _SessionWalk:
                 if rewrite:
                     self.rewritten[path] += 1
                     between = set(self.events[self.events_at_edit.get(path, 0):])
-                    self.rewrite_rows[(hunk['tool_use_id'], path)] = next(
+                    self.rewrite_rows[(hunk['tool_use_id'], path, hunk['hunk'])] = next(
                         (name for name in TRIGGERS if name in between), NO_TRIGGER)
                 if self.loop is not None:
                     self.loop.scopes.append((scope, path))
@@ -299,8 +299,8 @@ def derive(conn: sqlite3.Connection) -> int:
                 else:
                     walk.note_event('other')
         walk.finish()
-        conn.executemany('INSERT INTO rewrites (tool_use_id, path, trigger) VALUES (?, ?, ?)',
-                         [(call_id, path, trigger) for (call_id, path), trigger in walk.rewrite_rows.items()])
+        conn.executemany('INSERT INTO rewrites (tool_use_id, path, hunk, trigger) VALUES (?, ?, ?, ?)',
+                         [(*key, trigger) for key, trigger in walk.rewrite_rows.items()])
         conn.executemany(
             'INSERT INTO edited_files (session_id, agent_id, path, target_read, hunks, rewritten_hunks) '
             'VALUES (?, ?, ?, ?, ?, ?)',

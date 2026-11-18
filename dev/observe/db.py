@@ -10,7 +10,7 @@ readable by its owner only.
 import os
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -128,6 +128,12 @@ CREATE TABLE IF NOT EXISTS edits (
     new_start INTEGER NOT NULL,
     new_lines INTEGER NOT NULL,
     via TEXT NOT NULL,
+    -- What the hunk changed (see changes.py), and the lines it added split
+    -- into code and comment-only.
+    change TEXT NOT NULL,
+    tokens_changed INTEGER NOT NULL,
+    added_code INTEGER NOT NULL,
+    added_comment INTEGER NOT NULL,
     PRIMARY KEY (tool_use_id, path, hunk)
 );
 CREATE INDEX IF NOT EXISTS edits_path ON edits (path);
@@ -170,14 +176,15 @@ CREATE TABLE IF NOT EXISTS edited_files (
     PRIMARY KEY (session_id, agent_id, path)
 );
 
--- Derived by episodes.py, rebuilt on every derive: every edit that rewrote
+-- Derived by episodes.py, rebuilt on every derive: every hunk that rewrote
 -- lines the model had written earlier in the same request, with what happened
--- between the two (see episodes.TRIGGERS).
+-- between the two (see episodes.TRIGGERS). What it changed is in `edits`.
 CREATE TABLE IF NOT EXISTS rewrites (
     tool_use_id TEXT NOT NULL,
     path TEXT NOT NULL,
+    hunk INTEGER NOT NULL,
     trigger TEXT NOT NULL,
-    PRIMARY KEY (tool_use_id, path)
+    PRIMARY KEY (tool_use_id, path, hunk)
 );
 
 -- Derived by episodes.py, rebuilt on every derive.

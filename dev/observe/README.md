@@ -42,10 +42,10 @@ python3 dev/observe/cli.py query \
 | `requests`, `api_calls`, `api_blocks` | API call: model, effort, token usage, thinking time |
 | `tool_calls` | tool call with its outcome: error, exit code, denial, which check it ran |
 | `reads` | file view, with the line range when known (Read, and `cat`/`sed -n`/`head`/`grep` in Bash) |
-| `edits` | changed hunk (Edit, Write, and edits made through Bash) |
+| `edits` | changed hunk (Edit, Write, and edits made through Bash), with what it changed and the code and comment lines it added (see `changes.py`) |
 | `hook_events` | hook result: outcome, duration, and the playbook gate that spoke |
 | `edited_files` | file a session edited: what had been read first, hunks, hunks rewritten |
-| `rewrites` | edit that rewrote lines written earlier in the same request, and what came in between |
+| `rewrites` | hunk that rewrote lines written earlier in the same request, and what came in between |
 | `episodes` | rework episode (see `episodes.py`) |
 | `unknown_records` | transcript shape the reader did not recognise |
 
@@ -62,6 +62,9 @@ python3 dev/observe/cli.py query \
 - A file view is seen through Read and through `cat`, `sed`, `head`, `tail`
   and `grep` in Bash. A view made any other way (a script, `awk`, an editor)
   is not, so "had not read the file" is an upper bound.
+- A comment is recognised by how its line opens (`#`, `//`, `*`, `--`, a
+  docstring's quotes), in any language: the body of a multi-line docstring
+  counts as code, so the comment figures are a lower bound.
 - "Lines the model wrote" follows line numbers through later edits of the
   same file by the model; a change made outside the session is not seen.
 - The episode columns are observations (where the fix landed, what had been

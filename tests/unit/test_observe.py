@@ -18,6 +18,8 @@ import unittest
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(_ROOT, 'dev', 'observe'))
+import changes  # noqa: E402
+import cli  # noqa: E402
 import db  # noqa: E402
 import episodes  # noqa: E402
 import ingest  # noqa: E402
@@ -225,6 +227,40 @@ class ErrorClassTests(unittest.TestCase):
         self.assertEqual(shell.error_class('F401 imported but unused\nFound 1 error.', 'ruff check'), 'lint')
 
 
+class ChangeClassTests(unittest.TestCase):
+    def kind(self, *lines: str) -> str:
+        return changes.classify(list(lines)).kind
+
+    def test_one_per_class(self):
+        for expected, lines in (
+            (changes.CONSTRUCTION, ['+def a():', '+    return 1']),
+            (changes.CONSTRUCTION, ['-def a():', '+def a():', '+    """Doc."""', ' context']),
+            (changes.DELETION, ['-x = 1', '-y = 2']),
+            (changes.REFLOW, ['-call(a,', '-     b)', '+call(a, b)']),
+            (changes.COMMENT, ['-# the old reason', '+# the new reason', ' x = 1']),
+            (changes.COMMENT, ['-x = compute()', '+# why this is computed here', '+x = compute()', '-# stale']),
+            (changes.CODE_SMALL, ['-aim = body.GetWeaponAim()', '+aim = body.GetAim()']),
+            (changes.CODE_MEDIUM, ['-return a + b', '+return (a + b) * scale if scale else 0']),
+            (changes.CODE_LARGE, ['-return a', '+if a is None:', '+    raise ValueError("a")',
+                                  '+total = sum(v.amount for v in a if v.open)', '+return total / len(a)']),
+            (changes.UNKNOWN, []),
+        ):
+            with self.subTest(lines=lines):
+                self.assertEqual(self.kind(*lines), expected)
+
+    def test_added_lines_are_split_into_code_and_comment(self):
+        change = changes.classify(['+# why', '+// also why', '+x = 1', '+', '+    y = 2  # trailing is code'])
+        self.assertEqual((change.added_code, change.added_comment), (2, 2))
+
+    def test_a_huge_hunk_is_large_without_being_aligned(self):
+        lines = ['-' + ' '.join(f'a{i}' for i in range(1500)), '+' + ' '.join(f'b{i}' for i in range(1500))]
+        change = changes.classify(lines)
+        self.assertEqual((change.kind, change.tokens_changed), (changes.CODE_LARGE, 1500))
+
+    def test_small_change_counts_its_tokens(self):
+        self.assertEqual(changes.classify(['-toast.showWarn(a)', '+toast.showWarning(a)']).tokens_changed, 1)
+
+
 class IngestTests(StoreCase):
     def test_tool_call_with_its_result(self):
         t = Transcript()
@@ -273,6 +309,21 @@ class IngestTests(StoreCase):
         self.assertEqual((rows['/work/app/a.py']['old_lines'], rows['/work/app/a.py']['new_lines']), (2, 5))
         self.assertEqual((rows['/work/app/new.py']['old_lines'], rows['/work/app/new.py']['new_lines']), (0, 7))
         self.assertEqual(rows['/work/app/c.py']['via'], 'bash')
+
+    def test_each_hunk_records_what_it_changed(self):
+        t = Transcript()
+        t.call('Edit', {'file_path': '/work/app/a.py'}, {'filePath': '/work/app/a.py', 'structuredPatch': [
+            {'oldStart': 3, 'oldLines': 1, 'newStart': 3, 'newLines': 1,
+             'lines': ['-aim = body.GetWeaponAim()', '+aim = body.GetAim()']},
+            {'oldStart': 9, 'oldLines': 1, 'newStart': 9, 'newLines': 2,
+             'lines': ['-# old', '+# new', '+# and more']}]})
+        t.call('Write', {'file_path': '/work/app/new.py'}, {
+            'type': 'create', 'filePath': '/work/app/new.py', 'structuredPatch': [],
+            'content': '# header\nx = 1\ny = 2'})
+        self.load(t)
+        rows = [tuple(row) for row in self.conn.execute(
+            'SELECT change, tokens_changed, added_code, added_comment FROM edits ORDER BY path, hunk')]
+        self.assertEqual(rows, [('code_small', 1, 1, 0), ('comment', 0, 0, 2), ('construction', 0, 2, 1)])
 
     def test_hook_outcomes_and_a_denied_call(self):
         t = Transcript()
@@ -384,6 +435,31 @@ class QueryTests(StoreCase):
         self.assertEqual(refused.returncode, 1)
         self.conn = db.connect(self.db_path)
         self.assertEqual(self.count('tool_calls'), 1)
+
+
+class ReportTests(StoreCase):
+    def build(self) -> None:
+        t = Transcript()
+        t.prompt('build it')
+        t.create('/work/app/svc.py')
+        for lines in (['-x = 1', '+x = 2'], ['-# old reason', '+# new reason']):
+            t.call('Edit', {'file_path': '/work/app/svc.py'}, {'filePath': '/work/app/svc.py', 'structuredPatch': [
+                {'oldStart': 3, 'oldLines': 1, 'newStart': 3, 'newLines': 1, 'lines': lines}]})
+        self.load(t)
+        episodes.derive(self.conn)
+
+    def test_rewrites_are_reported_as_a_rate_over_the_hunks_edited(self):
+        self.build()
+        text = cli.report(self.conn)
+        row = next(line.split() for line in text.splitlines() if line.startswith('code_small'))
+        self.assertEqual(row[1:4], ['1', '50.0', '33.33'])   # 1 of 2 rewrites; 3 hunks edited
+        self.assertIn('all rewrites', text)
+
+    def test_by_project_report_names_each_project(self):
+        self.build()
+        text = cli.report(self.conn, by_project=True)
+        self.assertIn('proj', text)
+        self.assertIn('per 100 hunks edited', text)
 
 
 class StoreTests(unittest.TestCase):

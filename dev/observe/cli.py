@@ -16,6 +16,7 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import changes  # noqa: E402
 import db  # noqa: E402
 import episodes  # noqa: E402
 import ingest  # noqa: E402
@@ -31,6 +32,50 @@ def _table(title: str, header: tuple[str, ...], rows: list[tuple]) -> str:
 
 def _query(conn: sqlite3.Connection, sql: str) -> list[tuple]:
     return [tuple(row) for row in conn.execute(sql)]
+
+
+_CHANGE_ORDER = (changes.CONSTRUCTION, changes.DELETION, changes.REFLOW, changes.COMMENT,
+                 changes.CODE_SMALL, changes.CODE_MEDIUM, changes.CODE_LARGE, changes.UNKNOWN)
+_REWRITES = '''FROM rewrites r JOIN edits e USING (tool_use_id, path, hunk)
+               JOIN tool_calls c USING (tool_use_id)
+               JOIN sessions s ON s.session_id = c.session_id AND s.agent_id = c.agent_id'''
+# Scratch files and prose are left out of the per-line figures, as they are out of the rewrites.
+_PROJECT_CODE = """e.path NOT LIKE '%/tmp/%' AND e.path NOT LIKE '%/.claude/%' AND e.path NOT LIKE '%/.work/%'
+                   AND e.path NOT LIKE '%/scratchpad/%' AND e.path NOT LIKE '%.md' AND e.path NOT LIKE '%.txt'
+                   AND e.path NOT LIKE '%.rst'"""
+
+
+def _rewrites_by_change(conn: sqlite3.Connection, by_project: bool) -> str:
+    """Rewrites by what they changed, as a count and as a rate over the hunks
+    edited in the same scope: a project with few edits is read by its own size,
+    not by its share of the machine's total."""
+    scope = 's.project' if by_project else "''"
+    hunks = dict(_query(conn, f'''SELECT {scope}, SUM(f.hunks) FROM edited_files f
+                                  JOIN sessions s USING (session_id, agent_id) GROUP BY 1'''))
+    counts = {(row[0], row[1]): row[2] for row in _query(
+        conn, f'SELECT {scope}, e.change, COUNT(*) {_REWRITES} GROUP BY 1, 2')}
+    rows = []
+    for name in sorted(hunks):
+        total = sum(count for (scoped, _), count in counts.items() if scoped == name)
+        for kind in _CHANGE_ORDER:
+            count = counts.get((name, kind), 0)
+            if count:
+                rows.append(((name,) if by_project else ()) + (
+                    kind, count, f'{100.0 * count / total:.1f}', f'{100.0 * count / hunks[name]:.2f}'))
+        rows.append(((name,) if by_project else ()) + (
+            'all rewrites', total, '100.0', f'{100.0 * total / hunks[name]:.2f}' if hunks[name] else ''))
+    header = (('project',) if by_project else ()) + ('change', 'rewrites', 'share %', 'per 100 hunks edited')
+    return _table('Rewrites of own lines, by what they changed', header, rows)
+
+
+def _change_by_trigger(conn: sqlite3.Connection) -> str:
+    triggers = (episodes.NO_TRIGGER,) + episodes.TRIGGERS
+    counts = {(row[0], row[1]): row[2] for row in _query(
+        conn, f'SELECT e.change, r.trigger, COUNT(*) {_REWRITES} GROUP BY 1, 2')}
+    rows = [(kind,) + tuple(counts.get((kind, trigger), 0) for trigger in triggers)
+            for kind in _CHANGE_ORDER if any(counts.get((kind, trigger)) for trigger in triggers)]
+    return _table('Rewrites: what changed (rows) by what came between the write and the rewrite (columns)',
+                  ('change',) + triggers, rows)
 
 
 def report(conn: sqlite3.Connection, by_project: bool = False) -> str:
@@ -83,6 +128,21 @@ def report(conn: sqlite3.Connection, by_project: bool = False) -> str:
             FROM rewrites r JOIN tool_calls c USING (tool_use_id)
                  JOIN sessions s ON s.session_id = c.session_id AND s.agent_id = c.agent_id
             GROUP BY {project} r.trigger ORDER BY {project} COUNT(*) DESC''')))
+
+    parts.append(_rewrites_by_change(conn, by_project))
+    if not by_project:
+        parts.append(_change_by_trigger(conn))
+
+    parts.append(_table(
+        'Lines added to project code: code and comment-only',
+        project_header + ('code lines', 'comment lines', 'comment %', 'comment-only hunks'),
+        _query(conn, f'''
+            SELECT {project} SUM(e.added_code), SUM(e.added_comment),
+                   ROUND(100.0 * SUM(e.added_comment) / MAX(SUM(e.added_code) + SUM(e.added_comment), 1), 1),
+                   SUM(e.change = 'comment')
+            FROM edits e JOIN tool_calls c USING (tool_use_id)
+                 JOIN sessions s ON s.session_id = c.session_id AND s.agent_id = c.agent_id
+            WHERE {_PROJECT_CODE} GROUP BY {project} 1 = 1 ORDER BY 1''')))
 
     parts.append(_table(
         'Fix loops by kind of failure',

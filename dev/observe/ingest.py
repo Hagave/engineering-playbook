@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import changes  # noqa: E402
 import shell  # noqa: E402
 from shell import playbook_core  # noqa: E402
 
@@ -311,9 +312,10 @@ class Ingester:
         if result.get('filePath') and isinstance(result.get('structuredPatch'), list):
             hunks = result['structuredPatch']
             if not hunks and isinstance(result.get('content'), str):
-                # A file created whole: one hunk covering all of it.
-                hunks = [{'oldStart': 0, 'oldLines': 0, 'newStart': 1,
-                          'newLines': result['content'].count('\n') + 1}]
+                # A file created whole: one hunk adding all of it.
+                body = result['content'].split('\n')
+                hunks = [{'oldStart': 0, 'oldLines': 0, 'newStart': 1, 'newLines': len(body),
+                          'lines': ['+' + line for line in body]}]
             self._hunks(tool_use_id, str(result['filePath']), hunks, 'edit')
         diff = result.get('bashEditDiff')
         if isinstance(diff, dict):
@@ -325,11 +327,15 @@ class Ingester:
         for index, hunk in enumerate(hunks):
             if not isinstance(hunk, dict):
                 continue
+            lines = hunk.get('lines')
+            change = changes.classify([str(line) for line in lines] if isinstance(lines, list) else [])
             self.conn.execute(
                 'INSERT OR REPLACE INTO edits (tool_use_id, path, hunk, old_start, old_lines, '
-                'new_start, new_lines, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                'new_start, new_lines, via, change, tokens_changed, added_code, added_comment) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (tool_use_id, path, index, int(hunk.get('oldStart') or 0), int(hunk.get('oldLines') or 0),
-                 int(hunk.get('newStart') or 0), int(hunk.get('newLines') or 0), via))
+                 int(hunk.get('newStart') or 0), int(hunk.get('newLines') or 0), via,
+                 change.kind, change.tokens_changed, change.added_code, change.added_comment))
 
     def _attachment(self, obj: dict, ts: float, session_id: str, agent_id: str) -> None:
         attachment = obj.get('attachment') if isinstance(obj.get('attachment'), dict) else {}
