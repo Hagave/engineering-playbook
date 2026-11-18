@@ -843,6 +843,25 @@ def _tracked_by_git(path: str) -> bool:
     return done.returncode == 0
 
 
+# The playbook's own scripts that its skills tell the model to run, as
+# `python3 <playbook>/<path>`. Installed by `install.sh` (a release tarball) or
+# `claude plugin install` (the plugin cache), none of them is in a git work
+# tree, so the tracked-file exemption below never applied: the destructive gate
+# read lab/run.py, found the `shutil.rmtree` of its own temporary directory,
+# and denied every lab step outside this repository. A fixed list, not every
+# file under the root: a script written into the plugin directory and run from
+# there is still read.
+PLAYBOOK_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+PLAYBOOK_ENTRY_SCRIPTS = ('lab/run.py', 'scripts/playbook_config.py', 'hooks/output_filter.py')
+
+
+def _is_playbook_entry_script(path: str) -> bool:
+    """Whether `path`, links resolved, is one of PLAYBOOK_ENTRY_SCRIPTS. A link
+    inside the plugin that points elsewhere resolves to where it points."""
+    real = os.path.realpath(path)
+    return any(real == os.path.join(PLAYBOOK_ROOT, rel) for rel in PLAYBOOK_ENTRY_SCRIPTS)
+
+
 def script_sources(raw: str, cwd: str, untracked_only: bool = False) -> list[ScriptSource]:
     """Scripts `raw` hands an interpreter other than inline: a heredoc body fed
     to python/node/ruby/perl/php, and a script file named as an interpreter's
@@ -855,7 +874,8 @@ def script_sources(raw: str, cwd: str, untracked_only: bool = False) -> list[Scr
     build and test scripts (`./mvnw`, `tests/run_all.py`) clean up after
     themselves, and reading them blocked 184 of 6885 recorded commands. A
     script the agent writes and then runs is untracked, and that is the way
-    past the gate this closes."""
+    past the gate this closes. The playbook's own entry scripts are left out
+    the same way, wherever it is installed (`_is_playbook_entry_script`)."""
     sources: list[ScriptSource] = []
     for start in _HEREDOC_START_RE.finditer(raw):
         language = _interpreter_language(_segment_command_word(raw, start.start()))
@@ -871,7 +891,7 @@ def script_sources(raw: str, cwd: str, untracked_only: bool = False) -> list[Scr
         if not path or not _is_literal_path(path):
             continue
         full = os.path.join(root, os.path.expanduser(path))
-        if untracked_only and _tracked_by_git(full):
+        if untracked_only and (_is_playbook_entry_script(full) or _tracked_by_git(full)):
             continue
         text = _read_script(path, root)
         if text is None:

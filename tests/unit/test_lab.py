@@ -370,6 +370,18 @@ class TestValidation(_LabCase):
                             for p in problems), problems)
         self.assertEqual(self.problems(config, allow_bind=True), [])
 
+    def test_a_read_only_bind_mount_is_named_as_read_only(self):
+        """The refusal said "read and write" for a `:ro` mount, which the lab
+        can only read."""
+        base = copy.deepcopy(BASE)
+        base['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/work/shop/init', 'target': '/docker-entrypoint-initdb.d',
+             'read_only': True},
+            {'type': 'bind', 'source': '/work/shop/data', 'target': '/var/lib/postgresql/data'}]
+        found = lab.bind_mounts(self.build(base))
+        self.assertIn('postgres: /work/shop/init -> /docker-entrypoint-initdb.d (read-only)', found)
+        self.assertIn('postgres: /work/shop/data -> /var/lib/postgresql/data', found)
+
     def test_named_volume_bound_to_a_host_path_counts_as_a_bind_mount(self):
         # `docker compose config` keeps it as `type: volume`; only driver_opts shows the host path.
         base = copy.deepcopy(BASE)
@@ -574,6 +586,137 @@ class TestEnvironment(unittest.TestCase):
                 lab.scan(args)
         self.assertEqual(len(made), 1)
         self.assertFalse(os.path.exists(made[0]))
+
+    def _scan_with(self, compose: object) -> list[tuple[str, ...]]:
+        """Run `scan` with Docker replaced by `compose`; the compose verbs it
+        was called with, in order. A LabError from the scan is swallowed: the
+        tests read what ran, and what did not."""
+        calls: list[tuple[str, ...]] = []
+
+        def recording(project: str, config: str, *args: str, timeout: float = 900) -> object:
+            calls.append(args)
+            return compose(project, config, *args, timeout=timeout)
+
+        args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
+                                      startup_seconds=0, project_dir='.', compose_file=None,
+                                      allow_bind_mounts=False, active=False,
+                                      active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
+                                      endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
+                                      time_sec=lab.SQLMAP_TIME_SEC)
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'resolved_config', return_value={}), \
+                mock.patch.object(lab, 'build_lab_config', return_value={}), \
+                mock.patch.object(lab, 'validate_lab_config', return_value=[]), \
+                mock.patch.object(lab, '_compose', side_effect=recording), \
+                mock.patch.object(lab.sys, 'stderr', io.StringIO()):
+            try:
+                lab.scan(args)
+            except lab.LabError:
+                pass
+        return calls
+
+    def test_a_leftover_of_a_killed_run_is_removed_before_the_lab_starts(self):
+        """A run killed before its teardown (SIGKILL) left its containers,
+        volumes and images behind, and nothing ever removed them."""
+        def compose(_p: str, _c: str, *args: str, timeout: float = 900) -> mock.Mock:
+            if 'config' in args:
+                return self._completed(out='{}')
+            return self._completed(0 if 'down' in args else 1, err='up failed')
+        verbs = [next(a for a in call if a in ('config', 'down', 'up')) for call in self._scan_with(compose)]
+        self.assertEqual(verbs, ['config', 'down', 'up', 'down'])
+
+    def test_a_leftover_that_cannot_be_removed_starts_nothing(self):
+        def compose(_p: str, _c: str, *args: str, timeout: float = 900) -> mock.Mock:
+            if 'config' in args:
+                return self._completed(out='{}')
+            return self._completed(1, err='network in use')
+        calls = self._scan_with(compose)
+        self.assertFalse(any('up' in call for call in calls), calls)
+
+    def test_a_second_run_of_the_same_project_is_refused_while_one_runs(self):
+        """Two sessions share the project's lab name; without the lock the
+        second would tear down the first one's lab as a leftover."""
+        held = lab.acquire_lab_lock(lab._project_name('.'))
+        try:
+            def compose(*_args: str, timeout: float = 900) -> mock.Mock:
+                raise AssertionError('Docker must not be called while another run holds the lab')
+            with mock.patch.object(lab, 'check_docker'), \
+                    mock.patch.object(lab, 'image_present', return_value=True), \
+                    mock.patch.object(lab, 'resolved_config', return_value={}), \
+                    mock.patch.object(lab, '_compose', side_effect=compose), \
+                    mock.patch.object(lab.sys, 'stderr', io.StringIO()) as err:
+                code = lab.main(['--service', 'app', '--port', '8080'])
+            self.assertEqual(code, lab.EXIT_REFUSED)
+            self.assertIn('in progress', err.getvalue())
+        finally:
+            os.close(held)
+
+    def test_the_lock_is_released_when_a_run_ends(self):
+        def compose(_p: str, _c: str, *args: str, timeout: float = 900) -> mock.Mock:
+            return self._completed(out='{}') if 'config' in args else self._completed(1)
+        self._scan_with(compose)
+        os.close(lab.acquire_lab_lock(lab._project_name('.')))  # raises if still held
+
+    def _private_tmp(self) -> str:
+        """A temporary directory the lab sees as the system one for this test."""
+        private = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, private, True)
+        patcher = mock.patch.object(lab.tempfile, 'tempdir', private)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return private
+
+    def test_a_killed_runs_work_dir_is_removed_before_the_next_run(self):
+        """A run killed before its `finally` kept its work dir, and with it
+        compose.json and the environment values resolved into it. Another
+        project whose name extends this one, and a link, are left alone."""
+        private = self._private_tmp()
+        project = lab._project_name('.')
+        stale = os.path.join(private, f'{project}.killed')
+        other = os.path.join(private, f'{project}-v2.running')
+        elsewhere = os.path.join(private, 'elsewhere')
+        for path in (stale, other, elsewhere):
+            os.mkdir(path)
+            with open(os.path.join(path, 'compose.json'), 'w', encoding='utf-8') as fh:
+                fh.write('{}')
+        os.symlink(elsewhere, os.path.join(private, f'{project}.link'))
+
+        def compose(_p: str, _c: str, *args: str, timeout: float = 900) -> mock.Mock:
+            return self._completed(out='{}') if 'config' in args else self._completed(1)
+        self._scan_with(compose)
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.exists(os.path.join(other, 'compose.json')))
+        self.assertTrue(os.path.exists(os.path.join(elsewhere, 'compose.json')))
+        # The run's own work dir went too: only the lock file is new.
+        self.assertEqual(set(os.listdir(private)),
+                         {os.path.basename(other), 'elsewhere', f'{project}.link',
+                          f'{project}-{os.getuid()}.lock'})
+
+    def test_the_lock_does_not_follow_a_link_planted_at_its_path(self):
+        private = self._private_tmp()
+        project = lab._project_name('.')
+        victim = os.path.join(private, 'victim')
+        open(victim, 'w', encoding='utf-8').close()
+        os.symlink(victim, os.path.join(private, f'{project}-{os.getuid()}.lock'))
+        with self.assertRaises(lab.LabError):
+            lab.acquire_lab_lock(project)
+
+    def test_a_lock_file_another_user_created_is_refused(self):
+        self._private_tmp()
+        with mock.patch.object(lab.os, 'fstat',
+                               return_value=mock.Mock(st_uid=os.getuid() + 1)), \
+                self.assertRaises(lab.LabError) as ctx:
+            lab.acquire_lab_lock(lab._project_name('.'))
+        self.assertIn('another user', str(ctx.exception))
+
+    def test_without_fcntl_the_lab_points_to_wsl(self):
+        """A top-level `import fcntl` failed on native Windows before any
+        message could say where the lab runs."""
+        with mock.patch.dict(lab.sys.modules, {'fcntl': None}), \
+                self.assertRaises(lab.LabError) as ctx:
+            lab.acquire_lab_lock('redlab-x')
+        self.assertIn('WSL 2', str(ctx.exception))
 
     def test_the_outer_timeout_covers_every_phase_zap_bounds(self):
         """Ultra review of 4.0.0: zap-baseline applies -T to its start-up wait

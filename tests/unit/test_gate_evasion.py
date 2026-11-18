@@ -12,11 +12,13 @@ do not delete it. Commands are only passed to the check functions as text;
 nothing here runs them.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(_ROOT, 'hooks'))
@@ -446,6 +448,56 @@ class TestScriptFiles(unittest.TestCase):
         subprocess.run(git + ('add', 'mvnw'), check=True)
         subprocess.run(git + ('commit', '-q', '-m', 'wrapper'), check=True)
         self.assertFalse(self._destructive('./mvnw -q compile'))
+
+    def test_the_playbooks_installed_entry_scripts_are_its_own(self):
+        """An installed playbook (release tarball, plugin cache) is in no git
+        work tree, so the destructive gate read lab/run.py, found the rmtree of
+        its own temporary directory and denied every lab step outside this
+        repository (2026-11-17)."""
+        plugin = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, plugin)
+        os.makedirs(os.path.join(plugin, 'lab'))
+        shutil.copy(os.path.join(_ROOT, 'lab', 'run.py'), os.path.join(plugin, 'lab', 'run.py'))
+        installed = os.path.join(plugin, 'lab', 'run.py')
+        with mock.patch.object(playbook_core, 'PLAYBOOK_ROOT', plugin):
+            self.assertFalse(self._destructive(f'python3 {installed} --setup'))
+            self.assertFalse(self._destructive(f'python3 {installed} --service app --port 8080'))
+            # Outside a plugin root the very same file is read, and denied.
+            with mock.patch.object(playbook_core, 'PLAYBOOK_ROOT', self.repo):
+                self.assertTrue(self._destructive(f'python3 {installed} --setup'))
+
+    def test_another_script_in_the_plugin_directory_is_still_read(self):
+        plugin = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, plugin)
+        os.makedirs(os.path.join(plugin, 'lab'))
+        with open(os.path.join(plugin, 'lab', 'clean.py'), 'w') as f:
+            f.write('import shutil\nshutil.rmtree("build")\n')
+        with mock.patch.object(playbook_core, 'PLAYBOOK_ROOT', plugin):
+            self.assertTrue(self._destructive(f'python3 {plugin}/lab/clean.py'))
+
+    def test_an_entry_script_linked_to_a_file_elsewhere_is_still_read(self):
+        plugin = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, plugin)
+        os.makedirs(os.path.join(plugin, 'lab'))
+        self._script('evil.py', 'import shutil\nshutil.rmtree("build")\n')
+        os.symlink(os.path.join(self.repo, 'evil.py'), os.path.join(plugin, 'lab', 'run.py'))
+        with mock.patch.object(playbook_core, 'PLAYBOOK_ROOT', plugin):
+            self.assertTrue(self._destructive(f'python3 {plugin}/lab/run.py --setup'))
+
+    def test_every_script_the_skills_tell_the_model_to_run_is_an_entry_script(self):
+        """A new `python3 <playbook>/x.py` in a skill, missing from the list,
+        would be denied on every installed copy, as lab/run.py was."""
+        named: set[str] = set()
+        for folder in ('skills', 'agents'):
+            for dirpath, _dirs, files in os.walk(os.path.join(_ROOT, folder)):
+                for name in files:
+                    if name.endswith('.md'):
+                        with open(os.path.join(dirpath, name), encoding='utf-8') as f:
+                            named.update(re.findall(r'<playbook>/([\w./-]+\.(?:py|sh))', f.read()))
+        self.assertTrue(named, 'no <playbook>/ script found: the pattern no longer matches the docs')
+        self.assertLessEqual(named, set(playbook_core.PLAYBOOK_ENTRY_SCRIPTS))
+        for rel in playbook_core.PLAYBOOK_ENTRY_SCRIPTS:
+            self.assertTrue(os.path.isfile(os.path.join(_ROOT, rel)), rel)
 
     def test_missing_script_is_not_read(self):
         self.assertFalse(self._destructive('python3 not_there.py'))
