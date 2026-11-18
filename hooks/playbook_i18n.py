@@ -98,6 +98,7 @@ STRINGS: dict[str, dict[str, str]] = {
     'learn': {'en': 'Learn', 'pt-br': 'Aprender', 'es': 'Aprender'},
     'diff': {'en': 'Diff panel', 'pt-br': 'Painel de diff', 'es': 'Panel de diff'},
     'back': {'en': 'Back', 'pt-br': 'Voltar', 'es': 'Volver'},
+    'custom': {'en': 'Custom value', 'pt-br': 'Personalizado', 'es': 'Personalizado'},
     'exit': {'en': 'Exit', 'pt-br': 'Sair', 'es': 'Salir'},
     # red-lab-playbook: the name is kept in every language; the words after it
     # say what it is, because a bare "lab" told the person nothing.
@@ -284,7 +285,7 @@ STRINGS: dict[str, dict[str, str]] = {
 # The panel's own strings, sent whole in `show --json` as `ui`.
 UI_KEYS = (
     'title', 'hint_main', 'hint_sub', 'opened', 'no_entry', 'current', 'default',
-    'status', 'learn', 'lab', 'diff', 'back', 'exit',
+    'status', 'learn', 'lab', 'diff', 'back', 'exit', 'custom',
     'lab_title', 'lab_help', 'lab_setup', 'lab_passive', 'lab_active', 'lab_sqlmap',
     'lab_uninstall',
 )

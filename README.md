@@ -90,6 +90,22 @@ What [`install.sh`](install.sh) does:
 - **Claude Code:** adds this repository as a plugin marketplace and installs
   the plugin through the `claude` CLI; a second run updates it. It does not
   download anything itself.
+- **Several Claude Code accounts:** Claude Code keeps plugins inside each
+  config directory, so an account run with its own `CLAUDE_CONFIG_DIR` does
+  not see a plugin installed in another. The script finds `~/.claude`, the
+  `~/.claude-*` directories Claude Code has used and the `CLAUDE_CONFIG_DIR`
+  values set in your shell startup files (read as text, never run), and asks
+  which of them to install into. It remembers the answer, so the next run
+  updates the same accounts and asks only about a new one. Without a terminal
+  (CI, a container) it installs into the current account only. To skip the
+  question, pass `--all-accounts`, or `--accounts default,~/.claude-work` for
+  a given list:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash -s -- --all-accounts
+  ```
+
+  Auto-update (below) is set per account: turn it on in each one.
 - **Codex and Antigravity:** downloads the latest release's archive, checks
   it against the SHA-256 published with it, unpacks it into
   `~/.local/share/engineering-playbook/<version>` and links it as `current`,
@@ -760,7 +776,7 @@ personal travels with the plugin.
 |---|---|---|---|---|
 | Prose level | `prose` | `mid` | Claude Code, Codex, Antigravity | Response verbosity budget, read at session start: applies from the next session. |
 | Known-failure warnings | `watch` | `off` | Claude Code | Known-failure warnings before risky actions. |
-| Context budget | `context_budget` | `off` | Claude Code | Context size past which the session is told to wrap up, hand off and `/clear`. |
+| Context budget | `context_budget` | `550k` | Claude Code | Context size past which the session is told to wrap up, hand off and `/clear`. |
 | CLAUDE.md budget | `claude_md_budget` | `40000` | Claude Code | Characters the project `CLAUDE.md` may grow to before the turn end is blocked. |
 | Language | `language` | `auto` | Claude Code | Language of the numbered menu's own text; `auto` follows the system locale. Elsewhere the model writes the menu in the language the user writes in. |
 
@@ -843,7 +859,9 @@ confirmed for these events, so the adapter guards have not been wired to them.
 Those percentages protect the window. They do not protect the bill: every call
 re-reads the whole context, so cost grows with context size times call count, and
 on a 1M window the first warning arrives at 700k tokens. `context_budget` is the
-cost-side threshold — an absolute token count (`250k`), off by default. Past it,
+cost-side threshold — an absolute token count (`250k`), 550k by default (`0`
+turns it off), so on a 1M window the handoff comes before the 700k warning; on a
+smaller window the 70% warning comes first and the budget never fires. Past it,
 the model is told once per multiple of the budget (1x, 2x, ...) to finish the step
 in progress, write the handoff and ask for `/clear`. It never blocks a tool call,
 and subagents are exempt. The trade is real: a `/clear` keeps only what the

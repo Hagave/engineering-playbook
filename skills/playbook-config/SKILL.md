@@ -58,7 +58,7 @@ Cost budgets screen:
 | Entry | Key | Values | What it does |
 |---|---|---|---|
 | CLAUDE.md budget | `claude_md_budget` | characters, `0` = off (default 40000) | Blocks the end of a turn that grew the project `CLAUDE.md` past this size. The file is re-sent to every session and every subagent. |
-| Context budget | `context_budget` | tokens, e.g. `250k`, `0` = off (default) | Past this much context, tells the model once per multiple to finish the step, write the handoff and ask for `/clear`. Never blocks. |
+| Context budget | `context_budget` | `off`, `550k` (default), `650k`, `850k`, or a custom token count the user types (e.g. `700k`) | Past this much context, tells the model once per multiple to finish the step, write the handoff and ask for `/clear`. Never blocks. |
 
 Selecting an entry opens a screen with its values (plus **Back**). Apply the choice with:
 
