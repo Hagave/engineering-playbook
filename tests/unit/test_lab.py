@@ -55,8 +55,8 @@ class _LabCase(unittest.TestCase):
         return lab.build_lab_config(copy.deepcopy(base or BASE), self.target,
                                     'redlab-shop', self.report_dir, 2)
 
-    def problems(self, config, allow_bind=False):
-        return lab.validate_lab_config(config, 'app', self.report_dir, allow_bind)
+    def problems(self, config, project_root='/work/shop'):
+        return lab.validate_lab_config(config, 'app', self.report_dir, project_root)
 
 
 class TestTarget(unittest.TestCase):
@@ -213,7 +213,7 @@ class TestSqlmap(_LabCase):
 
     def test_the_sqlmap_scanner_is_as_isolated_as_the_zap_one(self):
         config = self.build_sqlmap()
-        self.assertEqual(lab.validate_lab_config(config, 'app', self.report_dir, False,
+        self.assertEqual(lab.validate_lab_config(config, 'app', self.report_dir, '/work/shop',
                                                  lab.SQLMAP_IMAGE), [])
         scanner = config['services'][lab.SCANNER]
         self.assertEqual(scanner['cap_drop'], ['ALL'])
@@ -223,7 +223,8 @@ class TestSqlmap(_LabCase):
     def test_a_tampered_sqlmap_image_is_refused(self):
         config = self.build_sqlmap()
         config['services'][lab.SCANNER]['image'] = 'sqlmap:evil'
-        problems = lab.validate_lab_config(config, 'app', self.report_dir, False, lab.SQLMAP_IMAGE)
+        problems = lab.validate_lab_config(config, 'app', self.report_dir, '/work/shop',
+                                           lab.SQLMAP_IMAGE)
         self.assertTrue(any('pinned' in p for p in problems), problems)
 
     def test_results_csv_lists_injectable_parameters(self):
@@ -264,7 +265,7 @@ class TestSqlmap(_LabCase):
 
         args = lab.argparse.Namespace(
             service='app', port=8080, path='/', minutes=1, startup_seconds=0,
-            project_dir='.', compose_file=None, allow_bind_mounts=False, active=False,
+            project_dir='.', compose_file=None,  active=False,
             active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=True, endpoint='/items?id=1',
             level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC)
         with mock.patch.object(lab, 'check_docker'), \
@@ -360,44 +361,77 @@ class TestValidation(_LabCase):
         config['services']['postgres']['network_mode'] = 'host'
         self.assertRefused(config, 'network_mode')
 
-    def test_bind_mounts_are_refused_unless_allowed(self):
+    def test_a_writable_bind_is_dropped_so_the_lab_never_writes_to_the_host(self):
+        """A read-write bind would write to the developer's files. build drops
+        it (the image's own content stands in), so the config that starts holds
+        no such mount and validate passes."""
         base = copy.deepcopy(BASE)
         base['services']['postgres']['volumes'] = [
             {'type': 'bind', 'source': '/work/shop/data', 'target': '/var/lib/postgresql/data'}]
         config = self.build(base)
-        problems = self.problems(config)
-        self.assertTrue(any('/work/shop/data' in p and '--allow-bind-mounts' in p
-                            for p in problems), problems)
-        self.assertEqual(self.problems(config, allow_bind=True), [])
+        self.assertEqual(lab.host_mounts(config), [])
+        self.assertEqual(self.problems(config), [])
 
-    def test_a_read_only_bind_mount_is_named_as_read_only(self):
-        """The refusal said "read and write" for a `:ro` mount, which the lab
-        can only read."""
+    def test_a_writable_bind_reaching_validation_is_refused(self):
+        """build should have dropped it; if an unresolved form reaches validate,
+        it is refused rather than run."""
+        config = self.build()
+        config['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/work/shop/data', 'target': '/var/lib/postgresql/data'}]
+        self.assertRefused(config, 'is writable')
+
+    def test_a_read_only_bind_inside_the_project_is_kept_and_allowed(self):
         base = copy.deepcopy(BASE)
         base['services']['postgres']['volumes'] = [
             {'type': 'bind', 'source': '/work/shop/init', 'target': '/docker-entrypoint-initdb.d',
-             'read_only': True},
-            {'type': 'bind', 'source': '/work/shop/data', 'target': '/var/lib/postgresql/data'}]
-        found = lab.bind_mounts(self.build(base))
-        self.assertIn('postgres: /work/shop/init -> /docker-entrypoint-initdb.d (read-only)', found)
-        self.assertIn('postgres: /work/shop/data -> /var/lib/postgresql/data', found)
+             'read_only': True}]
+        config = self.build(base)
+        self.assertEqual([m.target for m in lab.host_mounts(config)],
+                         ['/docker-entrypoint-initdb.d'])
+        self.assertEqual(self.problems(config), [])
 
-    def test_named_volume_bound_to_a_host_path_counts_as_a_bind_mount(self):
+    def test_a_read_only_bind_outside_the_project_is_refused(self):
+        base = copy.deepcopy(BASE)
+        base['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/etc/ssl', 'target': '/etc/ssl', 'read_only': True}]
+        config = self.build(base)
+        self.assertRefused(config, '/etc/ssl')
+        self.assertTrue(any('outside the project' in p for p in self.problems(config)))
+
+    def test_a_sibling_path_is_not_inside_the_project(self):
+        """`/work/shop-data` shares a prefix with `/work/shop` but is not under
+        it; the separator check must not treat it as inside."""
+        base = copy.deepcopy(BASE)
+        base['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/work/shop-data', 'target': '/data', 'read_only': True}]
+        config = self.build(base)
+        self.assertRefused(config, '/work/shop-data')
+
+    def test_a_writable_host_bound_volume_becomes_a_fresh_volume(self):
         # `docker compose config` keeps it as `type: volume`; only driver_opts shows the host path.
         base = copy.deepcopy(BASE)
         base['volumes']['pgdata']['driver_opts'] = {
             'type': 'none', 'o': 'bind', 'device': '/home/dev/pgdata'}
         config = self.build(base)
-        problems = self.problems(config)
-        self.assertTrue(any('/home/dev/pgdata' in p and '--allow-bind-mounts' in p
-                            for p in problems), problems)
-        self.assertEqual(self.problems(config, allow_bind=True), [])
+        self.assertNotIn('driver_opts', config['volumes']['pgdata'])
+        self.assertEqual(lab.host_mounts(config), [])
+        self.assertEqual(self.problems(config), [])
+
+    def test_a_read_only_host_bound_volume_inside_the_project_is_kept(self):
+        base = copy.deepcopy(BASE)
+        base['volumes']['pgdata']['driver_opts'] = {
+            'type': 'none', 'o': 'bind', 'device': '/work/shop/seed'}
+        base['services']['postgres']['volumes'][0]['read_only'] = True
+        config = self.build(base)
+        self.assertEqual(config['volumes']['pgdata']['driver_opts']['device'], '/work/shop/seed')
+        self.assertEqual(self.problems(config), [])
+        # Same mount, project root elsewhere: now outside the project, refused.
+        self.assertTrue(any('/work/shop/seed' in p for p in self.problems(config, project_root='/other')))
 
     def test_volumes_of_a_container_outside_the_lab_are_refused(self):
         config = self.build()
         config['services']['postgres']['volumes_from'] = ['container:shop-postgres']
         self.assertRefused(config, 'shop-postgres')
-        self.assertTrue(self.problems(config, allow_bind=True))
         config = self.build()
         config['services']['postgres']['volumes_from'] = ['app']  # a lab service: fine
         self.assertEqual(self.problems(config), [])
@@ -495,6 +529,87 @@ class TestValidation(_LabCase):
             'volumes', [{'type': 'bind', 'source': '/var/run/docker.sock',
                          'target': '/var/run/docker.sock'}], 'Docker socket')
 
+    def test_config_or_secret_from_a_host_file_outside_the_project(self):
+        """A `configs:`/`secrets:` entry sourced from `file:` mounts a file of
+        this computer; outside the project it is refused, as a bind mount is."""
+        for kind in ('configs', 'secrets'):
+            config = self.build()
+            config[kind] = {'app_conf': {'file': '/etc/app.conf'}}
+            with self.subTest(kind=kind):
+                self.assertRefused(config, '/etc/app.conf')
+
+    def test_config_or_secret_from_a_host_file_inside_the_project_is_allowed(self):
+        for kind in ('configs', 'secrets'):
+            config = self.build()
+            config[kind] = {'app_conf': {'file': '/work/shop/app.conf'}}
+            with self.subTest(kind=kind):
+                self.assertEqual(self.problems(config), [])
+
+    def test_external_config_or_secret(self):
+        for kind in ('configs', 'secrets'):
+            config = self.build()
+            config[kind] = {'app_conf': {'external': True}}
+            with self.subTest(kind=kind):
+                self.assertRefused(config, 'is external')
+
+    def test_a_config_or_secret_without_a_host_source_is_allowed(self):
+        """An env-var-sourced config carries no file of this computer."""
+        config = self.build()
+        config['configs'] = {'app_conf': {'environment': 'APP_CONF'}}
+        self.assertEqual(self.problems(config), [])
+
+    def test_service_extra_hosts_host_gateway(self):
+        """`host.docker.internal:host-gateway` reaches the host; compose may
+        render extra_hosts as a mapping or as a list of `host:addr`."""
+        self.assertServiceRefused(
+            'extra_hosts', {'host.docker.internal': 'host-gateway'}, 'host-gateway')
+        self.assertServiceRefused(
+            'extra_hosts', ['host.docker.internal:host-gateway'], 'host-gateway')
+
+    def test_service_extra_hosts_to_a_fixed_address_is_allowed(self):
+        """A pinned address is not routable on the lab's internal network, and
+        is not predictable since the lab strips fixed subnets."""
+        self.assertServiceAllowed('extra_hosts', {'api.internal': '10.5.0.9'})
+
+    # The lab keeps `build:` and builds on the host daemon, so a build that
+    # reaches files of this computer is a host reach too. One test per field.
+
+    def test_service_build_forwards_ssh(self):
+        self.assertServiceRefused('build', {'context': '/work/shop', 'ssh': ['default']}, 'build.ssh')
+
+    def test_service_build_context_outside_the_project(self):
+        self.assertServiceRefused('build', {'context': '/home/dev/other'},
+                                  'context outside the project')
+
+    def test_service_build_context_inside_the_project_is_allowed(self):
+        self.assertServiceAllowed('build', {'context': '/work/shop/api'})
+
+    def test_service_build_additional_context_outside_the_project(self):
+        for extra in ({'seed': '/home/dev/private'}, ['seed=/home/dev/private']):
+            with self.subTest(form=type(extra).__name__):
+                self.assertServiceRefused('build',
+                                          {'context': '/work/shop', 'additional_contexts': extra},
+                                          'extra context outside')
+
+    def test_service_build_additional_context_inside_or_an_image_is_allowed(self):
+        self.assertServiceAllowed('build', {'context': '/work/shop', 'additional_contexts': {
+            'seed': '/work/shop/seed', 'base': 'docker-image://alpine:3.20'}})
+
+    def test_a_host_volume_used_rw_anywhere_is_freshened_for_every_user(self):
+        """`freshen` is keyed by volume name, so a host-bound volume used
+        read-write by one service loses its host binding for the read-only
+        user too: that consumer gets a fresh empty volume, not the seed data.
+        Fails closed (no host write); documented here."""
+        base = copy.deepcopy(BASE)
+        base['volumes']['shared'] = {
+            'driver_opts': {'type': 'none', 'o': 'bind', 'device': '/work/shop/shared'}}
+        base['services']['app']['volumes'] = [{'type': 'volume', 'source': 'shared', 'target': '/a'}]
+        base['services']['postgres']['volumes'].append(
+            {'type': 'volume', 'source': 'shared', 'target': '/b', 'read_only': True})
+        config = self.build(base)
+        self.assertNotIn('driver_opts', config['volumes']['shared'])
+        self.assertEqual(self.problems(config), [])
+
 
 class TestReport(unittest.TestCase):
 
@@ -571,7 +686,7 @@ class TestEnvironment(unittest.TestCase):
 
         args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
                                       startup_seconds=0, project_dir='.', compose_file=None,
-                                      allow_bind_mounts=False, active=False,
+                                       active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
                                       time_sec=lab.SQLMAP_TIME_SEC)
@@ -599,7 +714,7 @@ class TestEnvironment(unittest.TestCase):
 
         args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
                                       startup_seconds=0, project_dir='.', compose_file=None,
-                                      allow_bind_mounts=False, active=False,
+                                       active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
                                       time_sec=lab.SQLMAP_TIME_SEC)

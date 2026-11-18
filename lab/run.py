@@ -298,27 +298,58 @@ def parse_target(service: str, port: int, path: str, endpoint: str | None = None
     return Target(service, port, path_part, query)
 
 
-def bind_mounts(config: dict) -> list[str]:
-    """`service: host path -> container path` for every bind mount, including
-    a named volume the local driver binds to a host path (`driver_opts.device`):
-    Compose resolves it as `type: volume`, but it writes the same files."""
+@dataclass(frozen=True)
+class HostMount:
+    """A place a project service mounts a path of this computer."""
+    service: str
+    source: str              # the host path
+    target: str              # where it lands in the container
+    read_only: bool
+    volume_name: str | None  # set when it is a named volume bound to a host path
+
+
+def _within(path: str, root: str) -> bool:
+    """Whether `path`, links resolved, is `root` or sits under it. A mount of
+    `/work/shop-data` is not inside `/work/shop`: the separator guards that."""
+    if not path or not root:
+        return False
+    try:
+        real_root, real = os.path.realpath(root), os.path.realpath(path)
+    except (OSError, ValueError):
+        return False
+    return real == real_root or real.startswith(real_root + os.sep)
+
+
+def host_mounts(config: dict) -> list[HostMount]:
+    """Every place a project service mounts a path of this computer: a
+    `type: bind`, and a named volume the local driver binds to a host path via
+    `driver_opts.device` (Compose keeps it `type: volume`, but it is the same
+    host path). The scanner's own report mount is not a project mount."""
     host_volumes = {}
     for volume_name, volume in (config.get('volumes') or {}).items():
         device = (volume.get('driver_opts') or {}).get('device') if isinstance(volume, dict) else None
         if device:
             host_volumes[volume_name] = device
-    found = []
+    mounts: list[HostMount] = []
     for name, service in (config.get('services') or {}).items():
+        if name == SCANNER:
+            continue
         for volume in service.get('volumes') or []:
             if not isinstance(volume, dict):
                 continue
             source, target = volume.get('source'), volume.get('target')
-            mode = ' (read-only)' if volume.get('read_only') else ''
+            read_only = bool(volume.get('read_only'))
             if volume.get('type') == 'bind':
-                found.append(f'{name}: {source} -> {target}{mode}')
+                mounts.append(HostMount(name, str(source), str(target), read_only, None))
             elif volume.get('type') == 'volume' and source in host_volumes:
-                found.append(f'{name}: {host_volumes[source]} (volume {source!r}) -> {target}{mode}')
-    return found
+                mounts.append(HostMount(name, host_volumes[source], str(target), read_only, str(source)))
+    return mounts
+
+
+def _describe_mount(mount: HostMount) -> str:
+    mode = ' (read-only)' if mount.read_only else ''
+    via = f' (volume {mount.volume_name!r})' if mount.volume_name else ''
+    return f'{mount.service}: {mount.source}{via} -> {mount.target}{mode}'
 
 
 def scanner_command(url: str, minutes: int, active: bool, active_minutes: int) -> list[str]:
@@ -392,6 +423,28 @@ def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
             if isinstance(attachment, dict):
                 attachment.pop('ipv4_address', None)
                 attachment.pop('ipv6_address', None)
+    # Drop the host reach of writable mounts, so the lab never writes to the
+    # developer's files: a read-write bind is removed (the image's own content
+    # stands in at that path), and a named volume bound to a host path and used
+    # read-write loses that binding and becomes a fresh, empty volume. Read-only
+    # mounts are kept; validate_lab_config refuses any whose source is outside
+    # the project. Runs before the scanner is added, so its report mount stays.
+    device_volumes = {n for n, v in (config.get('volumes') or {}).items()
+                      if isinstance(v, dict) and (v.get('driver_opts') or {}).get('device')}
+    freshen: set[str] = set()
+    for service in services.values():
+        kept = []
+        for volume in service.get('volumes') or []:
+            if isinstance(volume, dict) and not volume.get('read_only'):
+                if volume.get('type') == 'bind':
+                    continue
+                if volume.get('type') == 'volume' and volume.get('source') in device_volumes:
+                    freshen.add(volume['source'])
+            kept.append(volume)
+        if 'volumes' in service:
+            service['volumes'] = kept
+    for name in freshen:
+        config['volumes'][name].pop('driver_opts', None)
     target_service = services[target.service]
     networks = target_service.get('networks') or {'default': None}
     networks[NETWORK] = None
@@ -441,6 +494,42 @@ def scanner_timeout_seconds(minutes: int, active: bool = False,
     return total * 60 + SCANNER_MARGIN_SECONDS
 
 
+def _is_local_build_path(source: str) -> bool:
+    """Whether a build context / additional context names a path of this
+    computer, as opposed to an image or a remote context the build fetches
+    over the network (which, like a base image, the build reaches anyway)."""
+    s = str(source)
+    return not (s.startswith(('docker-image://', 'oci-layout://')) or '://' in s)
+
+
+def _build_reach(name: str, service: dict, project_root: str) -> list[str]:
+    """Fields of a service's `build:` that read this computer at build time.
+    The lab keeps `build:` and runs `up` (it builds on the host daemon), so a
+    build that forwards SSH, pulls in a host directory as an extra context, or
+    builds from a context outside the project reaches files of this computer,
+    the same as a mount does. Build-time network (a base image, a remote
+    context) is inherent to building and is not refused here."""
+    build = service.get('build')
+    if isinstance(build, str):
+        build = {'context': build}
+    if not isinstance(build, dict):
+        return []
+    problems = []
+    context = build.get('context')
+    if context and _is_local_build_path(context) and not _within(context, project_root):
+        problems.append(f'service {name!r} builds from {context}, a context outside the project')
+    if build.get('ssh'):
+        problems.append(f'service {name!r} forwards SSH to its build (build.ssh), reaching '
+                        'the credentials of this computer')
+    extra = build.get('additional_contexts') or {}
+    sources = extra.values() if isinstance(extra, dict) else [str(e).split('=', 1)[-1] for e in extra]
+    for source in sources:
+        if _is_local_build_path(source) and not _within(str(source), project_root):
+            problems.append(f'service {name!r} builds from an extra context outside the project '
+                            f'({source})')
+    return problems
+
+
 def _host_reach(name: str, service: dict) -> list[str]:
     """Every field of a compose service that shares something of this computer,
     or of a container outside the lab, with it."""
@@ -465,6 +554,19 @@ def _host_reach(name: str, service: dict) -> list[str]:
         problems.append(f'service {name!r} uses network_mode {network_mode!r}')
     if service.get('external_links'):
         problems.append(f'service {name!r} links to containers outside the lab (external_links)')
+    # `extra_hosts: host.docker.internal:host-gateway` resolves to the host, the
+    # one extra_hosts target that reaches it without a fixed IP (the lab strips
+    # fixed subnets, so a hard-coded host IP is not predictable). Compose
+    # resolves extra_hosts to a mapping of host -> address(es).
+    extra_hosts = service.get('extra_hosts') or {}
+    if isinstance(extra_hosts, dict):
+        pairs = [(h, a) for h, addrs in extra_hosts.items()
+                 for a in (addrs if isinstance(addrs, list) else [addrs])]
+    else:
+        pairs = [(str(e).split(':', 1) + [''])[0:2] for e in extra_hosts]
+    for host, address in pairs:
+        if str(address) == 'host-gateway':
+            problems.append(f'service {name!r} maps {host!r} to the host (extra_hosts host-gateway)')
     for source in service.get('volumes_from') or []:
         if str(source).startswith('container:'):
             problems.append(f'service {name!r} takes the volumes of container '
@@ -477,10 +579,12 @@ def _host_reach(name: str, service: dict) -> list[str]:
 
 
 def validate_lab_config(config: dict, target_service: str, report_dir: str,
-                        allow_bind_mounts: bool, scanner_image: str = ZAP_IMAGE) -> list[str]:
+                        project_root: str, scanner_image: str = ZAP_IMAGE) -> list[str]:
     """Every way `config` could let the scanner reach beyond the lab, or let the
     lab reach into the developer's environment. [] when it is safe to start.
-    `scanner_image` is the pinned image the scanner must be (ZAP or sqlmap)."""
+    `project_root` is the project's directory: a read-only mount inside it is
+    kept, anything else refused. `scanner_image` is the pinned image the scanner
+    must be (ZAP or sqlmap)."""
     problems: list[str] = []
     networks = config.get('networks') or {}
     services = config.get('services') or {}
@@ -500,6 +604,22 @@ def validate_lab_config(config: dict, target_service: str, report_dir: str,
     for name, volume in (config.get('volumes') or {}).items():
         if isinstance(volume, dict) and volume.get('external'):
             problems.append(f'volume {name!r} is external: the lab would reuse real data')
+    # configs: and secrets: with a `file:` source mount a file of this computer
+    # into the container, the same host reach as a bind mount; `external: true`
+    # reuses one this project did not create. `docker compose config` resolves
+    # the file path to absolute. (`environment:` as a source reads an env var,
+    # which the resolved config already inlines, not a file of this computer.)
+    for kind in ('configs', 'secrets'):
+        singular = kind[:-1]
+        for name, item in (config.get(kind) or {}).items():
+            if not isinstance(item, dict):
+                continue
+            if item.get('external'):
+                problems.append(f'{singular} {name!r} is external: the lab would reuse a '
+                                f'{singular} it does not own')
+            elif item.get('file') and not _within(item['file'], project_root):
+                problems.append(f'{singular} {name!r} reads {item["file"]}, a file outside '
+                                'the project')
 
     scanner = services.get(SCANNER)
     if not scanner:
@@ -537,19 +657,22 @@ def validate_lab_config(config: dict, target_service: str, report_dir: str,
                 if isinstance(attachment, dict) and attachment.get(key):
                     problems.append(f'service {name!r} has a fixed {key} on {network_name!r}')
         problems += _host_reach(name, service)
+        problems += _build_reach(name, service, project_root)
     for name, network in networks.items():
         if isinstance(network, dict) and ((network.get('ipam') or {}).get('config')
                                           or (network.get('driver_opts') or {}).get(_BRIDGE_NAME_OPT)):
             problems.append(f'network {name!r} has a fixed subnet or bridge name')
-    if not allow_bind_mounts:
-        found = [b for b in bind_mounts(config) if not b.startswith(f'{SCANNER}:')]
-        if found:
-            problems.append(
-                'the project mounts folders of this computer into its containers, so the '
-                'lab would use the same files as your development setup (reading them, '
-                'and writing those not marked read-only):\n    '
-                + '\n    '.join(found)
-                + '\n  Re-run with --allow-bind-mounts if that is acceptable for this scan.')
+    # The lab keeps only read-only mounts whose source is inside the project
+    # (committed init scripts, seed data). A writable mount would write to the
+    # developer's files; one outside the project reads folders the scan has no
+    # business touching. build_lab_config has already dropped writable mounts,
+    # so a writable one reaching here is an unresolved form and is refused too.
+    for mount in host_mounts(config):
+        if mount.read_only and _within(mount.source, project_root):
+            continue
+        why = 'is writable' if not mount.read_only else 'is outside the project'
+        problems.append(f'the project mounts a folder of this computer that {why}, so the lab '
+                        f'would use your own files:\n    {_describe_mount(mount)}')
     return problems
 
 
@@ -642,6 +765,17 @@ def _project_name(project_dir: str) -> str:
     return f'redlab-{base.strip("-") or "project"}'
 
 
+def _repo_root(project_dir: str) -> str:
+    """The boundary for "inside the project": the git work tree the project
+    sits in, so a read-only mount of a committed file is kept. Without git (not
+    a work tree, or git absent), the project directory itself."""
+    done = _run(['git', '-C', project_dir, 'rev-parse', '--show-toplevel'], timeout=10)
+    root = (done.stdout or '').strip()
+    if done.returncode == 0 and root:
+        return root
+    return os.path.abspath(project_dir)
+
+
 def resolved_config(project_dir: str, compose_files: list[str]) -> dict:
     args = ['docker', 'compose']
     for file in compose_files:
@@ -676,6 +810,7 @@ def scan(args: argparse.Namespace) -> int:
                        + (f' ({ZAP_DOWNLOAD_HINT}).' if tool == 'zap' else '.'))
     base = resolved_config(args.project_dir, args.compose_file)
     project = _project_name(args.project_dir)
+    project_root = _repo_root(args.project_dir)
     lock = acquire_lab_lock(project)
     remove_stale_workdirs(project)
 
@@ -695,7 +830,7 @@ def scan(args: argparse.Namespace) -> int:
                                   tool=tool, level=args.level, risk=args.risk,
                                   time_sec=args.time_sec)
         problems = validate_lab_config(config, target.service, report_dir,
-                                       args.allow_bind_mounts, needed)
+                                       project_root, needed)
         with open(config_file, 'w', encoding='utf-8') as fh:
             json.dump(config, fh)
         os.chmod(config_file, 0o600)  # resolved environment values live in it
@@ -706,7 +841,7 @@ def scan(args: argparse.Namespace) -> int:
                 raise LabError('Docker Compose rejected the lab configuration:\n'
                                + effective.stderr.strip(), EXIT_ERROR)
             problems = validate_lab_config(json.loads(effective.stdout), target.service,
-                                           report_dir, args.allow_bind_mounts, needed)
+                                           report_dir, project_root, needed)
         if problems:
             raise LabError('Refused — the lab would not be isolated:\n  - '
                            + '\n  - '.join(problems))
@@ -888,8 +1023,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--minutes', type=int, default=2, help='spider time budget (default: 2)')
     parser.add_argument('--startup-seconds', type=int, default=5,
                         help='extra wait after the service reports started (default: 5)')
-    parser.add_argument('--allow-bind-mounts', action='store_true',
-                        help='scan even though the project mounts folders of this computer')
     parser.add_argument('--active', action='store_true',
                         help='send attack payloads (ZAP full scan), not only a passive read; '
                              'slower, and still only against the isolated target')
