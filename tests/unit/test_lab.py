@@ -265,7 +265,7 @@ class TestSqlmap(_LabCase):
 
         args = lab.argparse.Namespace(
             service='app', port=8080, path='/', minutes=1, startup_seconds=0,
-            project_dir='.', compose_file=None,  active=False,
+            project_dir='.', compose_file=['compose.yml'],  active=False,
             active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=True, endpoint='/items?id=1',
             level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC)
         with mock.patch.object(lab, 'check_docker'), \
@@ -611,6 +611,165 @@ class TestValidation(_LabCase):
         self.assertEqual(self.problems(config), [])
 
 
+class TestDiscovery(unittest.TestCase):
+    """find_compose_stacks over a temporary tree. Every start is nested at
+    least one level inside the tree, so the walk's parent and ancestors stay
+    within it and the result does not depend on what sits in the real /tmp."""
+
+    def _tree(self, *dirs_with_compose: str) -> str:
+        base = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base, True)
+        for rel in dirs_with_compose:
+            path = os.path.join(base, rel)
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, 'docker-compose.yml'), 'w', encoding='utf-8') as fh:
+                fh.write('services: {}\n')
+        return base
+
+    def _primaries(self, start: str) -> list[str]:
+        return [stack[0] for stack in lab.find_compose_stacks(start)]
+
+    def test_finds_a_compose_in_the_starting_directory(self):
+        base = self._tree('ws/app')
+        self.assertIn(os.path.join(base, 'ws/app/docker-compose.yml'),
+                      self._primaries(os.path.join(base, 'ws/app')))
+
+    def test_finds_a_compose_in_a_descendant(self):
+        base = self._tree('ws/app/observability')
+        self.assertIn(os.path.join(base, 'ws/app/observability/docker-compose.yml'),
+                      self._primaries(os.path.join(base, 'ws/app')))
+
+    def test_a_sibling_of_the_start_is_not_searched(self):
+        """Discovery is downward only: a compose beside the start directory is
+        not found (climbing would list every project under a shared workspace).
+        Run from the directory that contains the stack instead."""
+        base = self._tree('ws/local-env')
+        os.makedirs(os.path.join(base, 'ws/repo'))
+        self.assertEqual(self._primaries(os.path.join(base, 'ws/repo')), [])
+        # From the directory above both, descent finds it.
+        self.assertIn(os.path.join(base, 'ws/local-env/docker-compose.yml'),
+                      self._primaries(os.path.join(base, 'ws')))
+
+    def test_several_stacks_are_all_returned_sorted(self):
+        base = self._tree('ws/app', 'ws/local-env')
+        primaries = self._primaries(os.path.join(base, 'ws'))
+        self.assertEqual(primaries, sorted(primaries))
+        self.assertGreaterEqual(len(primaries), 2)
+
+    def test_a_denylisted_directory_is_not_searched(self):
+        base = self._tree('ws/app/node_modules/x')
+        self.assertEqual(self._primaries(os.path.join(base, 'ws/app')), [])
+
+    def test_below_the_depth_limit_is_not_searched(self):
+        base = self._tree('ws/app/a/b/c/d')  # deeper than _DISCOVERY_MAX_DOWN
+        self.assertEqual(self._primaries(os.path.join(base, 'ws/app')), [])
+
+    def test_a_compose_exactly_at_the_depth_limit_is_found(self):
+        base = self._tree('ws/app/a/b/c')  # depth _DISCOVERY_MAX_DOWN (3) from ws/app
+        self.assertIn(os.path.join(base, 'ws/app/a/b/c/docker-compose.yml'),
+                      self._primaries(os.path.join(base, 'ws/app')))
+
+    def test_override_files_ride_with_their_primary(self):
+        base = self._tree('ws/app')
+        for name in ('compose.yaml', 'compose.override.yaml'):
+            with open(os.path.join(base, 'ws/app', name), 'w', encoding='utf-8') as fh:
+                fh.write('services: {}\n')
+        stack = next(s for s in lab.find_compose_stacks(os.path.join(base, 'ws/app'))
+                     if s[0].endswith('ws/app/compose.yaml'))
+        self.assertEqual(stack, [os.path.join(base, 'ws/app/compose.yaml'),
+                                 os.path.join(base, 'ws/app/compose.override.yaml')])
+
+
+class TestTargetDetection(unittest.TestCase):
+
+    def _service(self, **fields: object) -> dict:
+        return fields
+
+    def _config(self, services: dict) -> dict:
+        return {'services': services}
+
+    def test_a_service_built_from_inside_the_project_is_a_target(self):
+        config = self._config({
+            'api': self._service(build={'context': '/work/shop/api'}, ports=[
+                {'mode': 'ingress', 'target': 8080, 'published': '8080', 'protocol': 'tcp'}]),
+            'db': self._service(image='postgres:17')})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual(problems, [])
+        self.assertEqual([(t.service, t.port, t.path) for t in targets], [('api', 8080, '/')])
+
+    def test_a_service_built_outside_the_project_is_not_a_target(self):
+        config = self._config({'api': self._service(
+            build={'context': '/elsewhere/api'}, ports=[{'target': 8080}])})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual((targets, problems), ([], []))
+
+    def test_an_image_only_service_is_not_a_target(self):
+        config = self._config({'db': self._service(image='postgres:17', ports=[{'target': 5432}])})
+        self.assertEqual(lab.detect_targets(config, '/work/shop'), ([], []))
+
+    def test_the_port_comes_from_expose_when_there_is_no_ports(self):
+        config = self._config({'api': self._service(
+            build={'context': '/work/shop'}, expose=['9000'])})
+        targets, _ = lab.detect_targets(config, '/work/shop')
+        self.assertEqual([(t.service, t.port) for t in targets], [('api', 9000)])
+
+    def test_the_container_side_of_a_short_form_port_is_used(self):
+        config = self._config({'api': self._service(
+            build='/work/shop', ports=['127.0.0.1:8081:8081'])})
+        targets, _ = lab.detect_targets(config, '/work/shop')
+        self.assertEqual([t.port for t in targets], [8081])
+
+    def test_the_container_port_is_used_not_the_published_one(self):
+        """The lab scans the service on its internal port; the host-published
+        port is stripped. Long and short form, with the two differing."""
+        for ports in ([{'target': 8080, 'published': '18080'}], ['127.0.0.1:9000:8080']):
+            config = self._config({'api': self._service(build='/work/shop', ports=ports)})
+            targets, _ = lab.detect_targets(config, '/work/shop')
+            with self.subTest(ports=ports):
+                self.assertEqual([t.port for t in targets], [8080])
+
+    def test_a_protocol_suffix_is_stripped(self):
+        config = self._config({'api': self._service(build='/work/shop', expose=['8080/tcp'])})
+        targets, _ = lab.detect_targets(config, '/work/shop')
+        self.assertEqual([t.port for t in targets], [8080])
+
+    def test_a_port_range_reads_as_more_than_one_port(self):
+        """A range is not a single port; it must be reported ambiguous, never
+        silently dropped (which would skip the service as having no port)."""
+        for ports in (['8000-8005'], ['127.0.0.1:8000-8005:8000-8005'],
+                      [{'target': '8000-8005'}]):
+            config = self._config({'api': self._service(build='/work/shop', ports=ports)})
+            targets, problems = lab.detect_targets(config, '/work/shop')
+            with self.subTest(ports=ports):
+                self.assertEqual(targets, [])
+                self.assertTrue(any('more than one port' in p for p in problems), problems)
+
+    def test_a_degenerate_range_is_a_single_port(self):
+        self.assertEqual(lab._port_ints('8080-8080'), [8080])
+
+    def test_more_than_one_port_is_ambiguous_and_refused(self):
+        config = self._config({'api': self._service(
+            build={'context': '/work/shop'}, ports=[{'target': 8080}, {'target': 9090}])})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual(targets, [])
+        self.assertTrue(any('more than one port' in p for p in problems), problems)
+
+    def test_a_built_service_with_no_port_is_refused(self):
+        config = self._config({'api': self._service(build={'context': '/work/shop'})})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual(targets, [])
+        self.assertTrue(any('no port' in p for p in problems), problems)
+
+    def test_two_targets_in_one_stack(self):
+        config = self._config({
+            'api': self._service(build={'context': '/work/shop/api'}, expose=['8081']),
+            'web': self._service(build={'context': '/work/shop/web'}, expose=['80']),
+            'db': self._service(image='postgres:17')})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual(problems, [])
+        self.assertEqual(sorted((t.service, t.port) for t in targets), [('api', 8081), ('web', 80)])
+
+
 class TestReport(unittest.TestCase):
 
     REPORT = {'site': [{'@name': 'http://app:8080', 'alerts': [
@@ -664,7 +823,7 @@ class TestEnvironment(unittest.TestCase):
     def test_scan_without_the_image_points_to_setup(self):
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=False):
-            code = lab.main(['--service', 'app', '--port', '8080'])
+            code = lab.main(['--service', 'app', '--port', '8080', '--compose-file', 'c.yml'])
         self.assertEqual(code, lab.EXIT_REFUSED)
 
     def test_a_failed_teardown_still_removes_the_resolved_config(self):
@@ -685,7 +844,7 @@ class TestEnvironment(unittest.TestCase):
             return self._completed(1, err='up failed')
 
         args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
-                                      startup_seconds=0, project_dir='.', compose_file=None,
+                                      startup_seconds=0, project_dir='.', compose_file=['compose.yml'],
                                        active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
@@ -713,7 +872,7 @@ class TestEnvironment(unittest.TestCase):
             return compose(project, config, *args, timeout=timeout)
 
         args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
-                                      startup_seconds=0, project_dir='.', compose_file=None,
+                                      startup_seconds=0, project_dir='.', compose_file=['compose.yml'],
                                        active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
@@ -761,7 +920,7 @@ class TestEnvironment(unittest.TestCase):
                     mock.patch.object(lab, 'resolved_config', return_value={}), \
                     mock.patch.object(lab, '_compose', side_effect=compose), \
                     mock.patch.object(lab.sys, 'stderr', io.StringIO()) as err:
-                code = lab.main(['--service', 'app', '--port', '8080'])
+                code = lab.main(['--service', 'app', '--port', '8080', '--compose-file', 'c.yml'])
             self.assertEqual(code, lab.EXIT_REFUSED)
             self.assertIn('in progress', err.getvalue())
         finally:
@@ -894,7 +1053,7 @@ class TestEnvironment(unittest.TestCase):
                     mock.patch.object(lab, 'validate_lab_config', return_value=[]), \
                     mock.patch.object(lab, '_compose', side_effect=compose), \
                     mock.patch.object(lab.sys, 'stderr', err):
-                code = lab.main(['--service', 'app', '--port', '8080', '--startup-seconds', '0'])
+                code = lab.main(['--service', 'app', '--port', '8080', '--startup-seconds', '0', '--compose-file', 'c.yml'])
             self.assertEqual(code, lab.EXIT_ERROR)
             return err.getvalue()
         self.assertIn('the lab was removed', run(0))
@@ -905,6 +1064,125 @@ class TestEnvironment(unittest.TestCase):
     def test_version_parsing(self):
         self.assertEqual(lab.parse_version('v2.29.7-desktop.1'), (2, 29, 7))
         self.assertEqual(lab.parse_version('garbage'), (0, 0, 0))
+
+
+class TestScanOrchestration(unittest.TestCase):
+    """scan()'s target resolution and the multi-target loop, with the per-target
+    scan and the environment mocked."""
+
+    def _args(self, **over: object) -> "lab.argparse.Namespace":
+        base = dict(service=None, port=None, path='/', minutes=1, startup_seconds=0,
+                    project_dir='.', compose_file=['c.yml'], active=False,
+                    active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False, endpoint=None,
+                    level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC)
+        base.update(over)
+        return lab.argparse.Namespace(**base)
+
+    def _run_scan(self, targets: list, outcomes: dict) -> tuple[int, list[str]]:
+        scanned: list[str] = []
+
+        def scan_target(target, *_a: object, **_k: object) -> int:
+            scanned.append(target.service)
+            result = outcomes[target.service]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'acquire_lab_lock',
+                                  return_value=os.open(os.devnull, os.O_RDONLY)), \
+                mock.patch.object(lab, 'remove_stale_workdirs'), \
+                mock.patch.object(lab, '_resolve_targets', return_value=({}, targets)), \
+                mock.patch.object(lab, '_scan_target', side_effect=scan_target), \
+                mock.patch.object(lab.sys, 'stderr', io.StringIO()):
+            return lab.scan(self._args()), scanned
+
+    def test_the_worst_exit_code_across_targets_is_returned(self):
+        targets = [lab.parse_target('api', 8081, '/'), lab.parse_target('web', 80, '/')]
+        code, scanned = self._run_scan(targets, {'api': lab.EXIT_FINDINGS, 'web': lab.EXIT_CLEAN})
+        self.assertEqual(code, lab.EXIT_FINDINGS)
+        self.assertEqual(scanned, ['api', 'web'])
+
+    def test_an_error_on_one_target_does_not_stop_the_others(self):
+        targets = [lab.parse_target('api', 8081, '/'), lab.parse_target('web', 80, '/')]
+        code, scanned = self._run_scan(
+            targets, {'api': lab.LabError('boom', lab.EXIT_ERROR), 'web': lab.EXIT_FINDINGS})
+        self.assertEqual(scanned, ['api', 'web'])
+        self.assertEqual(code, lab.EXIT_ERROR)  # worst of error(3) and findings(1)
+
+    def test_a_refusal_aborts_the_whole_run(self):
+        targets = [lab.parse_target('api', 8081, '/'), lab.parse_target('web', 80, '/')]
+        with self.assertRaises(lab.LabError):
+            self._run_scan(targets, {'api': lab.LabError('not isolated'),  # default EXIT_REFUSED
+                                     'web': lab.EXIT_CLEAN})
+
+    def test_a_single_target_error_propagates_unchanged(self):
+        with self.assertRaises(lab.LabError):
+            self._run_scan([lab.parse_target('api', 8081, '/')],
+                           {'api': lab.LabError('boom', lab.EXIT_ERROR)})
+
+
+class TestResolveTargets(unittest.TestCase):
+
+    def _args(self, **over: object) -> "lab.argparse.Namespace":
+        base = dict(service=None, port=None, path='/', project_dir='.', compose_file=[],
+                    endpoint=None)
+        base.update(over)
+        return lab.argparse.Namespace(**base)
+
+    def test_a_named_service_is_the_only_target_and_discovery_is_skipped(self):
+        with mock.patch.object(lab, 'resolved_config', return_value={}) as resolved, \
+                mock.patch.object(lab, 'find_compose_stacks') as find:
+            base, targets = lab._resolve_targets(
+                self._args(service='api', port=8081, compose_file=['c.yml']), '/root', 'zap')
+        find.assert_not_called()
+        resolved.assert_called_once()
+        self.assertEqual([(t.service, t.port) for t in targets], [('api', 8081)])
+
+    def test_a_named_service_without_a_port_is_refused(self):
+        with mock.patch.object(lab, 'resolved_config', return_value={}):
+            with self.assertRaises(lab.LabError):
+                lab._resolve_targets(self._args(service='api', compose_file=['c.yml']), '/r', 'zap')
+
+    def test_detected_targets_when_no_service_is_named(self):
+        config = {'services': {'api': {'build': {'context': '/r/api'},
+                                       'ports': [{'target': 8081}]}}}
+        with mock.patch.object(lab, 'resolved_config', return_value=config), \
+                mock.patch.object(lab, 'find_compose_stacks', return_value=[['/r/c.yml']]):
+            _base, targets = lab._resolve_targets(self._args(), '/r', 'zap')
+        self.assertEqual([(t.service, t.port) for t in targets], [('api', 8081)])
+
+    def test_nothing_to_scan_is_refused(self):
+        with mock.patch.object(lab, 'resolved_config', return_value={'services': {}}), \
+                mock.patch.object(lab, 'find_compose_stacks', return_value=[['/r/c.yml']]):
+            with self.assertRaises(lab.LabError) as ctx:
+                lab._resolve_targets(self._args(), '/r', 'zap')
+        self.assertIn('Nothing to scan', str(ctx.exception))
+
+    def test_more_than_one_stack_is_refused_with_the_list(self):
+        with mock.patch.object(lab, 'find_compose_stacks',
+                               return_value=[['/a/compose.yml'], ['/b/compose.yml']]):
+            with self.assertRaises(lab.LabError) as ctx:
+                lab._resolve_targets(self._args(), '/r', 'zap')
+        self.assertIn('/a/compose.yml', str(ctx.exception))
+        self.assertIn('/b/compose.yml', str(ctx.exception))
+
+    def test_no_stack_found_is_refused(self):
+        with mock.patch.object(lab, 'find_compose_stacks', return_value=[]):
+            with self.assertRaises(lab.LabError) as ctx:
+                lab._resolve_targets(self._args(), '/r', 'zap')
+        self.assertIn('No compose file', str(ctx.exception))
+
+    def test_sqlmap_needs_a_service_port_and_endpoint(self):
+        with mock.patch.object(lab, 'resolved_config', return_value={}):
+            with self.assertRaises(lab.LabError):
+                lab._resolve_targets(self._args(service='api', port=8081, compose_file=['c.yml']),
+                                     '/r', 'sqlmap')  # no --endpoint
+            _b, targets = lab._resolve_targets(
+                self._args(service='api', port=8081, endpoint='/items?id=1', compose_file=['c.yml']),
+                '/r', 'sqlmap')
+        self.assertEqual(targets[0].query, 'id=1')
 
 
 if __name__ == '__main__':
