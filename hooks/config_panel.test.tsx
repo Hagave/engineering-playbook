@@ -28,6 +28,7 @@ const UI = {
   diff: 'Diff panel',
   back: 'Back',
   exit: 'Exit',
+  custom: 'Custom value',
   lab_title: 'red-lab-playbook',
   lab_help: 'Security scanners run against your own app inside an isolated copy of its stack.',
   lab_setup: 'Set up',
@@ -54,6 +55,7 @@ const SNAPSHOT = {
         { value: 'mid', label: 'mid' },
         { value: 'high', label: 'high' },
       ],
+      custom: false,
     },
     {
       key: 'watch',
@@ -66,8 +68,25 @@ const SNAPSHOT = {
         { value: 'on', label: 'on' },
         { value: 'off', label: 'off' },
       ],
+      custom: false,
     },
   ],
+}
+
+const BUDGET = {
+  key: 'context_budget',
+  label: 'Context budget',
+  description: 'context tokens past which to wrap up',
+  help: 'Past this much context, the model is told once to hand off.',
+  value: '550000',
+  default: '550000',
+  choices: [
+    { value: '0', label: 'off' },
+    { value: '550000', label: '550k' },
+    { value: '650000', label: '650k' },
+    { value: '850000', label: '850k' },
+  ],
+  custom: true,
 }
 
 // What the engine would stamp on a command the person typed.
@@ -302,6 +321,38 @@ test('the main menu lists red-lab-playbook with what it is, and it opens its ste
   }
   expect(labels).toEqual([UI.lab_setup, UI.lab_passive, UI.lab_active, UI.lab_sqlmap, UI.lab_uninstall, 'Back'])
   await lab.unmount()
+})
+
+test('a setting that takes a typed value offers it after its buttons and hands it to the model', async ($, on) => {
+  const toModel: string[] = []
+  const withBudget = { ...SNAPSHOT, settings: [...SNAPSHOT.settings, BUDGET] }
+  on('process.run', () => exited(0, JSON.stringify(withBudget)))
+  on('prompt.submit', (_, e) => {
+    toModel.push(e.text)
+
+    return { text: e.text }
+  })
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('3'))
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const custom = await band.find({ type: 'Button', key: 'entry-5' })
+  expect(custom?.props.label).toBe('Custom value')
+
+  // Four values, then the typed one: no `set` runs, the model asks for the number.
+  await $.prompt.submit(sent('5'))
+  expect(toModel.at(-1)).toContain('context_budget to a custom value')
+})
+
+test('a setting without a typed value has only its buttons and Back', async ($, on) => {
+  on('process.run', () => exited(0, JSON.stringify(SNAPSHOT)))
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('2'))
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Button', key: 'entry-3' })).toBeUndefined()
 })
 
 test('every red-lab-playbook step closes the menu and hands that step to the model', async ($, on) => {

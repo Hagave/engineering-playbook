@@ -2907,7 +2907,9 @@ PREFS_DEFAULTS: dict = {
     # up and hand off. 0 = off. Not a window limit: on a 1M window the percentage
     # thresholds only speak at 700k, long after the cost has been paid — every call
     # re-reads the whole context, so a session's cost grows with its size squared.
-    'context_budget': 0,
+    # 550k: the handoff and /clear come before the 700k warning on a 1M window;
+    # on a smaller window the 70% guard speaks first and this never fires.
+    'context_budget': 550_000,
     # Language of the fixed text the settings menu shows (playbook_i18n). 'auto'
     # follows the system locale; replies follow the language the user writes in.
     'language': 'auto',

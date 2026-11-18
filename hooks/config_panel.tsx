@@ -35,7 +35,7 @@ const GATE_TAG_RE = /^(?:PreToolUse:\S+ hook error: )?\[playbook:([\w-]+)\]/
 // Change the tag when a stored value's fields change: an earlier version's
 // value is then read as the initial one instead of a wrong shape.
 const snapshot = atom({ plugin: 'engineering-playbook', key: 'snapshot' } as const, null, {
-  shape: 'snapshot-2',
+  shape: 'snapshot-3',
 })
 const notice = atom({ plugin: 'engineering-playbook', key: 'notice' } as const, null, {
   shape: 'notice-1',
@@ -57,6 +57,11 @@ const screen = atom({ plugin: 'engineering-playbook', key: 'screen' } as const, 
 // language to answer in.
 const ASK_STATUS = 'Show the engineering playbook session status (playbook-config, Status).'
 const ASK_LEARN = 'Run the engineering-learn skill for this project (playbook-config, Learn).'
+
+// A typed value cannot be a button: the model asks for the number and runs `set`.
+function askCustom(key: string): string {
+  return `Set the engineering playbook setting ${key} to a custom value (playbook-config, Settings): ask me for the value, then apply it.`
+}
 
 type LabStep = 'setup' | 'passive' | 'active' | 'sqlmap' | 'uninstall'
 
@@ -205,6 +210,13 @@ function entries(current: MenuScreen, loaded: ConfigSnapshot): Entry[] {
         action: { kind: 'set', key: setting.key, value: choice.value },
       }),
     )
+    if (setting.custom) {
+      picks.push({
+        digit: String(picks.length + 1),
+        label: ui.custom,
+        action: { kind: 'ask', text: askText(askCustom(setting.key), loaded) },
+      })
+    }
 
     return [...picks, back]
   }
