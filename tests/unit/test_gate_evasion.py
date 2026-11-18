@@ -578,6 +578,17 @@ class TestGitCalls(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(playbook_core.push_targets(command, '/w/repo')[0].repo)
 
+    def test_an_unknown_push_option_is_unknown_in_every_form(self):
+        """The closed option set holds where the push runs inside another program."""
+        for command in ('git push --dr origin main', 'echo main | xargs git push -fn origin',
+                        "sh -c 'git push --no-dry-run origin main'",
+                        'eval "git push -d --no-delete origin main"'):
+            with self.subTest(command=command):
+                target = playbook_core.push_targets(command, '/w/repo')[0]
+                self.assertEqual(target.repo, '/w/repo')
+                self.assertIsNone(target.revs)
+                self.assertIn('does not read the option', target.reason)
+
     def test_git_run_by_another_program_still_writes_history(self):
         calls = playbook_core.git_calls(r'find . -exec git commit -m x \;', '/w/repo')
         self.assertEqual([(c.sub, c.repo) for c in calls], [('commit', None)])
