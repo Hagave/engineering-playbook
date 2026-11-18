@@ -2143,6 +2143,22 @@ _REDIRECT_RE = re.compile(r'^\d*(?:>>?|<)')
 _REDIRECT_ONLY_RE = re.compile(r'^\d*(?:>>?|<)$')
 
 
+def _push_dry_run_flag(arg: str) -> bool | None:
+    """Whether a `git push` word turns the dry run on (True) or off (False);
+    None for any other word. git takes `-n` bundled with other short flags
+    (`-fn`; after `-o` the rest of the bundle is its value) and a long option
+    cut to any unambiguous prefix (`--dr`, `--no-dry`)."""
+    if arg.startswith('--'):
+        if len(arg) >= len('--dr') and '--dry-run'.startswith(arg):
+            return True
+        if len(arg) >= len('--no-dr') and '--no-dry-run'.startswith(arg):
+            return False
+        return None
+    if arg.startswith('-') and 'n' in arg[1:].split('o', 1)[0]:
+        return True
+    return None
+
+
 def push_revisions(args: list[str]) -> list[str] | None:
     """Revisions a `git push` with these arguments (the words after `push`)
     would publish, as `git log` revision arguments.
@@ -2150,12 +2166,14 @@ def push_revisions(args: list[str]) -> list[str] | None:
     No refspec means the current branch, which is what `push.default` simple,
     current and upstream all push. `src:dst` publishes `src`, `:dst` and
     `--delete` publish nothing, a bare `:` publishes every matching branch
-    (`--branches`), a glob goes through `--glob`, and so does a
-    dry run. None when an argument is built at run time (a variable or a
-    command substitution) and so cannot be known before the shell runs it."""
+    (`--branches`), a glob goes through `--glob`, and a dry run publishes
+    nothing unless a later `--no-dry-run` turns it off. None when an argument
+    is built at run time (a variable or a command substitution) and so cannot
+    be known before the shell runs it, even in a dry run: the word may be the
+    `--no-dry-run`."""
     revs: list[str] = []
     positional: list[str] = []
-    deleting = skip_next = False
+    dry_run = deleting = skip_next = False
     for arg in args:
         if skip_next:
             skip_next = False
@@ -2165,9 +2183,10 @@ def push_revisions(args: list[str]) -> list[str] | None:
             continue
         if '$' in arg or '`' in arg:
             return None
-        if arg in ('-n', '--dry-run'):
-            return []
-        if arg in _PUSH_VALUE_OPTS:
+        dry = _push_dry_run_flag(arg)
+        if dry is not None:
+            dry_run = dry
+        elif arg in _PUSH_VALUE_OPTS:
             skip_next = True
         elif arg in ('--all', '--branches'):
             revs.append('--branches')
@@ -2179,6 +2198,8 @@ def push_revisions(args: list[str]) -> list[str] | None:
             deleting = True
         elif not arg.startswith('-'):
             positional.append(arg)
+    if dry_run:
+        return []
     refspecs = positional[1:]  # positional[0] is the remote
     if deleting:
         return revs
@@ -2852,10 +2873,6 @@ GIT_PUSH_RE = re.compile(_GIT_PREFIX + r'push\b', re.IGNORECASE)
 # attribution in local history however that message was assembled.
 _HISTORY_WRITE_SUBS = frozenset({'commit', 'commit-tree', 'merge', 'pull', 'cherry-pick',
                                  'rebase', 'revert', 'am'})
-
-# A push that only inspects or tests the remote changes nothing — gating it
-# would block the very command used to check what a push would do.
-PUSH_NOOP_RE = re.compile(r'--dry-run\b|--porcelain\b', re.IGNORECASE)
 
 # Skill invocations that count as a review for the pre-push gate: the playbook's
 # own review skill, and Claude Code's built-in /code-review.
