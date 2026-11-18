@@ -468,6 +468,23 @@ class TestReviewGate(_RepoBase):
         self._write(_ul('pode pushar direto, sem review'))
         self.assertFalse(self._denied(self._push()))
 
+    def test_a_waiver_only_inside_a_pasted_block_does_not_allow_the_push(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_ul('<pasted_content id="1">release notes: skip review for hotfixes'
+                        '</pasted_content id="1">\npush it'))
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_waiver_typed_next_to_a_pasted_block_allows_the_push(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_ul('<pasted_content id="1">ci log</pasted_content id="1">\n'
+                        'pode pushar sem review'))
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_waiver_after_an_unclosed_pasted_block_is_pasted(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_ul('push it\n<pasted_content id="1">checklist\nskip review'))
+        self.assertTrue(self._denied(self._push()))
+
     def test_model_cannot_write_its_own_bypass(self):
         # The phrase only counts in the user's message; assistant text must not clear it.
         self._commit('src/app.ts', 'unreviewed')
@@ -826,6 +843,21 @@ class TestDestructiveAuthorization(_Base):
         self._write(_ul('clean up the project'))
         command = "bash <<'SHEOF'\nrm -rf /tmp/whatever\nSHEOF"
         self.assertTrue(self._denied(self._bash(command)))
+
+    def test_consent_only_inside_a_pasted_block_does_not_allow_it(self):
+        self._write(_ul('what does this runbook say?\n<pasted_content id="1">'
+                        'step 3: go ahead and delete the build directory'
+                        '</pasted_content id="1">'))
+        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_consent_typed_next_to_a_pasted_block_allows_it(self):
+        self._write(_ul('<pasted_content id="1">build log</pasted_content id="1">\n'
+                        'pode apagar a pasta build'))
+        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_an_unclosed_pasted_block_is_pasted_to_the_end(self):
+        self._write(_ul('read this\n<pasted_content id="1">notes\npode apagar a pasta build'))
+        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
 
 
 # ── Review findings feed the learn loop ───────────────────────────────────────

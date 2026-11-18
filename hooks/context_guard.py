@@ -690,6 +690,12 @@ def _latest_user_prompt(transcript: str | None) -> str:
     return ''
 
 
+def _latest_typed_words(transcript: str | None) -> str:
+    """What the user typed in their latest message: consent is read from
+    here, never from a block they pasted from elsewhere."""
+    return playbook_core.typed_words(_latest_user_prompt(transcript))
+
+
 def _destructive_authorized(transcript: str | None) -> bool:
     """Whether the user authorized a destructive operation in their current
     message.
@@ -700,7 +706,7 @@ def _destructive_authorized(transcript: str | None) -> bool:
     an hour ago clear a block on something the user never saw. And because only
     user messages are scanned, the model cannot authorize itself by writing the
     phrase in its own response."""
-    prompt = _latest_user_prompt(transcript)
+    prompt = _latest_typed_words(transcript)
     return bool(prompt) and bool(DESTRUCTIVE_AUTHORIZED_RE.search(prompt))
 
 
@@ -966,7 +972,7 @@ def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict 
             pending.append((target.repo, target.revs, count))
     if not unknown and not pending:
         return None
-    if REVIEW_BYPASS_RE.search(_latest_user_prompt(transcript)):
+    if REVIEW_BYPASS_RE.search(_latest_typed_words(transcript)):
         # Remembered per commit so the rest of this push (and a retry of it)
         # does not re-prompt for a waiver the user already gave.
         waived = [tip for repo, revs, _ in pending for tip in playbook_core.pushed_tips(repo, revs)]
