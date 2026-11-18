@@ -90,7 +90,7 @@ Every step runs `python3 <playbook>/lab/run.py` from the project root with Bash,
 | Step | What to do |
 |---|---|
 | `setup` | Run `--setup`. It checks Docker and Compose, downloads the pinned ZAP image (about 1.2 GB, 3.8 GB on disk) and builds the sqlmap image. Say the size before starting; it can take minutes. |
-| `passive` | Read the compose file, list its services with their container ports, and ask which service and port to scan (and a start path, default `/`). Run `--service <svc> --port <port>`. ZAP only reads responses; nothing is attacked. |
+| `passive` | Run `python3 <playbook>/lab/run.py` with no `--service`: it finds the compose file (listing them if there is more than one, to pick with `--compose-file`) and scans every service built from the project, each isolated. To scan one, add `--service <svc> --port <port>` (and a start path, default `/`). ZAP only reads responses; nothing is attacked. |
 | `active` | As `passive`, then add `--active`: ZAP sends attack payloads to the isolated copy. Say so before running. |
 | `sqlmap` | As `passive`, plus ask for one endpoint with the parameter to test (`/items?id=1`). Run `--sqlmap --service <svc> --port <port> --endpoint <path>`. |
 | `uninstall` | Say which images it removes (the ZAP and sqlmap scanner images) and that `setup` downloads them again, confirm, then run `--uninstall`. |

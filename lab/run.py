@@ -5,8 +5,10 @@ machine, with OWASP ZAP — passive by default, active (attack payloads) with
 --active — against an isolated copy of its stack, and nothing else.
 
     python3 lab/run.py --setup                        # check Docker, download the scanner image
-    python3 lab/run.py --service app --port 8080      # passive scan of the `app` service
-    python3 lab/run.py --service app --port 8080 --active   # active scan (sends payloads)
+    python3 lab/run.py                                # find the compose file, passive-scan every
+                                                      #   service built from inside the project
+    python3 lab/run.py --service app --port 8080      # passive scan of one named service
+    python3 lab/run.py --active                       # active scan (sends payloads)
     python3 lab/run.py --uninstall                    # remove the scanner image
 
 Both modes run only against the isolated target on the internal network; the
@@ -787,33 +789,221 @@ def resolved_config(project_dir: str, compose_files: list[str]) -> dict:
     return json.loads(done.stdout)
 
 
+# Compose file names in Docker's precedence order (the first that exists is the
+# base of a stack), and the override files that layer onto it in the same dir.
+_COMPOSE_PRIMARY = ('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml')
+_COMPOSE_OVERRIDE = ('compose.override.yaml', 'compose.override.yml',
+                     'docker-compose.override.yaml', 'docker-compose.override.yml')
+# Not descended into, nor offered as sibling stacks: build output, caches and
+# VCS internals hold no stack of the user's and would slow or mislead the walk.
+_SKIP_DIRS = frozenset({
+    '.git', 'node_modules', '.venv', 'venv', '__pycache__', '.mypy_cache', '.pytest_cache',
+    '.tox', 'dist', 'build', 'target', '.idea', '.vscode', '.cache', '.next', '.gradle',
+})
+_DISCOVERY_MAX_DOWN = 3  # how deep to descend from the start directory
+
+
+def _compose_stack_in(dirpath: str) -> list[str] | None:
+    """The compose files of the stack rooted at `dirpath`: the first primary
+    name that exists (Docker's precedence), then the override files beside it.
+    None when the directory holds no compose file."""
+    primary = next((os.path.join(dirpath, n) for n in _COMPOSE_PRIMARY
+                    if os.path.isfile(os.path.join(dirpath, n))), None)
+    if primary is None:
+        return None
+    return [primary] + [os.path.join(dirpath, n) for n in _COMPOSE_OVERRIDE
+                        if os.path.isfile(os.path.join(dirpath, n))]
+
+
+def find_compose_stacks(start: str) -> list[list[str]]:
+    """Compose stacks in `start` and its descendants, to a bounded depth. Each
+    stack is its files, primary first. Deduplicated by real path and sorted, so
+    the order does not depend on the walk.
+
+    Only downward: climbing to find a compose in an ancestor or a sibling would,
+    from a repo under a workspace like `~/projects/`, list every neighbouring
+    project's compose. A stack whose compose sits above or beside the directory
+    the lab is run from (a shared `../local-env/`) is named with --compose-file
+    or --project-dir instead. Run from the directory that contains the stack
+    (its descendants are searched) and it is found."""
+    start = os.path.abspath(start)
+    seen: set[str] = set()
+    stacks: list[list[str]] = []
+    for root, dirs, _files in os.walk(start):
+        if root[len(start):].count(os.sep) >= _DISCOVERY_MAX_DOWN:
+            dirs[:] = []
+        else:
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        real = os.path.realpath(root)
+        if real in seen:
+            continue
+        seen.add(real)
+        files = _compose_stack_in(root)
+        if files:
+            stacks.append(files)
+    return sorted(stacks, key=lambda files: files[0])
+
+
+def _build_context(service: dict) -> str | None:
+    """The build context of a service, or None if it is image-only. Compose
+    resolves the short form (`build: ./dir`) and the long form to an absolute
+    path under `build.context`."""
+    build = service.get('build')
+    if isinstance(build, str):
+        return build
+    if isinstance(build, dict):
+        context = build.get('context')
+        return str(context) if context else None
+    return None
+
+
+def _port_ints(token: object) -> list[int]:
+    """The port number(s) a compose port token names: a single port, or the two
+    ends of a range (`8000-8005`), so a range reads as more than one port and
+    the service is reported ambiguous, not silently dropped as having none. A
+    `/tcp` suffix and the host side of `host:container` are stripped by the
+    caller; anything that is not a number is ignored."""
+    text = str(token).split('/')[0]
+    if '-' in text:
+        low, _, high = text.partition('-')
+        if low.isdigit() and high.isdigit():
+            return [int(low)] if low == high else [int(low), int(high)]
+        return []
+    return [int(text)] if text.isdigit() else []
+
+
+def _service_ports(service: dict) -> list[int]:
+    """The container-side ports a service listens on, from `ports` (the
+    `target`, not the host `published`) and `expose`. Sorted and deduplicated.
+    A range contributes both of its ends (see `_port_ints`)."""
+    ports: set[int] = set()
+    for port in service.get('ports') or []:
+        if isinstance(port, dict):
+            if port.get('target') is not None:
+                ports.update(_port_ints(port['target']))
+        elif isinstance(port, (str, int)):
+            ports.update(_port_ints(str(port).rsplit(':', 1)[-1]))
+    for exposed in service.get('expose') or []:
+        ports.update(_port_ints(exposed))
+    return sorted(ports)
+
+
+def detect_targets(config: dict, project_root: str) -> tuple[list[Target], list[str]]:
+    """The services to scan — those built from inside the project (a
+    `build.context` within `project_root`); image-only services are
+    dependencies. Each becomes a Target on `/` with its single listening port.
+    The second list is the reasons a built service could not be targeted (no
+    port, or more than one and so ambiguous): the caller refuses with them."""
+    targets: list[Target] = []
+    problems: list[str] = []
+    for name, service in sorted((config.get('services') or {}).items()):
+        context = _build_context(service)
+        if not context or not _within(context, project_root):
+            continue
+        ports = _service_ports(service)
+        if not ports:
+            problems.append(f'service {name!r} builds from the project but declares no port '
+                            '(add `expose:` or `ports:`, or pass --service and --port)')
+        elif len(ports) > 1:
+            problems.append(f'service {name!r} listens on more than one port ({", ".join(map(str, ports))}); '
+                            'pass --service and --port to pick one')
+        else:
+            targets.append(parse_target(name, ports[0], '/'))
+    return targets, problems
+
+
+def _discover_one_stack(project_dir: str) -> list[str]:
+    """The one compose stack to scan, found near `project_dir`. Raises when none
+    is found, or when more than one is: the lab never guesses which stack to
+    bring up — the user picks with --compose-file or --project-dir."""
+    stacks = find_compose_stacks(project_dir)
+    if not stacks:
+        raise LabError(f'No compose file found in {os.path.abspath(project_dir)} or nearby. '
+                       'Pass --compose-file, or run from the project directory.')
+    if len(stacks) > 1:
+        listing = '\n  - '.join(stack[0] for stack in stacks)
+        raise LabError('More than one compose file was found; pass --compose-file (or '
+                       f'--project-dir) to choose one:\n  - {listing}')
+    return stacks[0]
+
+
+def _resolve_targets(args: argparse.Namespace, project_root: str,
+                     tool: str) -> tuple[dict, list[Target]]:
+    """The resolved compose configuration and the services to scan. With
+    --service the user names one target; otherwise the targets are detected
+    (every service built from inside the project). sqlmap scans one named
+    endpoint, never a detected set."""
+    compose_files = args.compose_file or _discover_one_stack(args.project_dir)
+    base = resolved_config(args.project_dir, compose_files)
+    if tool == 'sqlmap':
+        if not args.service or args.port is None or not args.endpoint:
+            raise LabError('--sqlmap scans one endpoint: pass --service, --port and --endpoint.')
+        return base, [parse_target(args.service, args.port, args.path, endpoint=args.endpoint)]
+    if args.service:
+        if args.port is None:
+            raise LabError('--service needs --port (the port the service listens on in the lab).')
+        return base, [parse_target(args.service, args.port, args.path)]
+    targets, problems = detect_targets(base, project_root)
+    if not targets:
+        detail = ('\n  - '.join(problems) if problems
+                  else 'no service in the compose file builds from inside this project')
+        raise LabError(f'Nothing to scan: {detail}.\n  Pass --service and --port to choose one.')
+    if problems:
+        print('[lab] some built services were skipped:\n  - ' + '\n  - '.join(problems),
+              file=sys.stderr)
+    return base, targets
+
+
 def scan(args: argparse.Namespace) -> int:
     tool = 'sqlmap' if args.sqlmap else 'zap'
     if args.sqlmap and args.active:
         raise LabError('--active is a ZAP option; --sqlmap is a separate SQL-injection scan.')
-    if tool == 'sqlmap':
-        if not args.endpoint:
-            raise LabError('--sqlmap needs --endpoint, e.g. --endpoint "/items?id=1".')
-        if not 1 <= args.level <= 5 or not 1 <= args.risk <= 3 or args.time_sec < 1:
-            raise LabError('--level must be 1-5, --risk 1-3, --time-sec 1 or more.')
-        target = parse_target(args.service, args.port, args.path, endpoint=args.endpoint)
-    else:
-        target = parse_target(args.service, args.port, args.path)
     if args.minutes < 1 or args.startup_seconds < 0:
         raise LabError('--minutes must be 1 or more and --startup-seconds 0 or more.')
     if args.active_minutes < 1:
         raise LabError('--active-minutes must be 1 or more.')
+    if tool == 'sqlmap' and (not 1 <= args.level <= 5 or not 1 <= args.risk <= 3 or args.time_sec < 1):
+        raise LabError('--level must be 1-5, --risk 1-3, --time-sec 1 or more.')
     check_docker()
     needed = SQLMAP_IMAGE if tool == 'sqlmap' else ZAP_IMAGE
     if not image_present(needed):
         raise LabError('The scanner image is not installed. Run `lab/run.py --setup` first'
                        + (f' ({ZAP_DOWNLOAD_HINT}).' if tool == 'zap' else '.'))
-    base = resolved_config(args.project_dir, args.compose_file)
     project = _project_name(args.project_dir)
     project_root = _repo_root(args.project_dir)
     lock = acquire_lab_lock(project)
-    remove_stale_workdirs(project)
+    try:
+        remove_stale_workdirs(project)
+        base, targets = _resolve_targets(args, project_root, tool)
+        if len(targets) > 1:
+            print(f'Scanning {len(targets)} services built from this project: '
+                  + ', '.join(t.service for t in targets), flush=True)
+        # The worst code across targets (error > refused > findings > clean).
+        # A later target's error thus outranks an earlier one's findings in the
+        # exit code, but every target's findings are printed as they are found.
+        worst = EXIT_CLEAN
+        for target in targets:
+            try:
+                worst = max(worst, _scan_target(target, base, project, project_root, args,
+                                                 tool, needed))
+            except LabError as exc:
+                # A refusal is stack-wide and would repeat for every target, so
+                # it aborts the run; a single-target run propagates unchanged.
+                if exc.code == EXIT_REFUSED or len(targets) == 1:
+                    raise
+                print(f'[lab] {target.service}: {exc}', file=sys.stderr)
+                worst = max(worst, exc.code)
+        return worst
+    finally:
+        os.close(lock)
 
+
+def _scan_target(target: Target, base: dict, project: str, project_root: str,
+                 args: argparse.Namespace, tool: str, needed: str) -> int:
+    """Bring up an isolated copy with the scanner on `target`'s network, scan it,
+    and remove the lab. One target at a time under the shared compose project
+    name, torn down before the next. Returns this target's exit code; raises
+    LabError on a refusal or a Docker/scanner error."""
     # 0700: only this user can enter. The '.' ends the prefix that
     # remove_stale_workdirs matches; it is not in a project name.
     workdir = tempfile.mkdtemp(prefix=f'{project}.')
@@ -847,13 +1037,14 @@ def scan(args: argparse.Namespace) -> int:
                            + '\n  - '.join(problems))
 
         # Holding the lock, anything under this project name is a leftover: a
-        # run killed before its teardown (SIGKILL, power loss). Removed here so
-        # it neither accumulates nor leaks state into this run.
+        # run killed before its teardown (SIGKILL, power loss), or the previous
+        # target of this run. Removed here so it neither accumulates nor leaks
+        # state into this scan.
         if not teardown(project, config_file):
             raise LabError('A previous lab run of this project left containers that could '
                            'not be removed (see above); nothing was started.', EXIT_ERROR)
-        print(f'Starting an isolated copy of the stack (compose project {project!r})...',
-              flush=True)
+        print(f'Starting an isolated copy of the stack for {target.service!r} '
+              f'(compose project {project!r})...', flush=True)
         started = True
         up = _compose(project, config_file, 'up', '-d', '--wait', target.service)
         if up.returncode != 0:
@@ -909,7 +1100,6 @@ def scan(args: argparse.Namespace) -> int:
                 print('[lab] the lab was removed.', file=sys.stderr)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
-            os.close(lock)
 
 
 def teardown(project: str, config_file: str) -> bool:
@@ -1014,12 +1204,19 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument('--setup', action='store_true',
                       help='check Docker and download the pinned scanner image')
     mode.add_argument('--uninstall', action='store_true', help='remove the scanner image')
-    parser.add_argument('--service', help='compose service to scan')
-    parser.add_argument('--port', type=int, help='port the service listens on inside the network')
+    parser.add_argument('--service',
+                        help='compose service to scan (default: every service built from inside '
+                             'the project)')
+    parser.add_argument('--port', type=int,
+                        help='port the service listens on inside the network (with --service; '
+                             'detected from `ports`/`expose` otherwise)')
     parser.add_argument('--path', default='/', help='path to start from (default: /)')
-    parser.add_argument('--project-dir', default='.', help='directory of the compose project')
+    parser.add_argument('--project-dir', default='.',
+                        help='directory to scan from; the compose file is found here or nearby '
+                             '(default: the current directory)')
     parser.add_argument('--compose-file', action='append', default=[],
-                        help='compose file(s), as with `docker compose -f` (default: Compose\'s own)')
+                        help='compose file(s), as with `docker compose -f` (default: discovered '
+                             'near --project-dir)')
     parser.add_argument('--minutes', type=int, default=2, help='spider time budget (default: 2)')
     parser.add_argument('--startup-seconds', type=int, default=5,
                         help='extra wait after the service reports started (default: 5)')
@@ -1045,8 +1242,6 @@ def main(argv: list[str] | None = None) -> int:
             return setup()
         if args.uninstall:
             return uninstall()
-        if not args.service or not args.port:
-            parser.error('--service and --port are required to scan (or use --setup)')
         return scan(args)
     except LabError as exc:
         print(f'[lab] {exc}', file=sys.stderr)
