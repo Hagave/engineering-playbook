@@ -24,7 +24,7 @@ Every action must trace to: (a) user's explicit request, (b) code read in the re
 - Whitelist allowed fields. Reject unknown properties.
 - A check over input that can be spelled many ways (a command line, a path, a URL, a flag, a config value) accepts a closed set of known forms, spelled exactly. Anything outside the set is unknown, and unknown takes the safe outcome: deny, fail the parse, or ask. Never recognise some forms and let the rest through, and never list forbidden forms when the accepted set is small and knowable: every spelling nobody foresaw is a hole. A gate that stops a force push by matching `--force` misses `-f`, the bundled `-qf` and the `+main` refspec; it accepts the push forms it knows and denies any other option or refspec as unknown.
   - The cost is that a legitimate form outside the set is refused. The refusal names the form it did not recognise and the accepted spelling, and the set is built from real usage where recorded usage exists.
-  - A denylist is legitimate only when the accepted set is genuinely open-ended and a miss is harmless. The code says so in a comment, as the accepted trade-off.
+  - A denylist is legitimate only when the accepted set is genuinely open-ended and a miss is harmless or caught by a second control. It is checked against the canonical value (parsed, resolved), never against the text as written. The code says so in a comment, as the accepted trade-off.
 - User-facing text inputs must have explicit length caps before reaching processing, storage, or inference layers.
 - Validate format and type before processing: UUIDs, emails, enums, numeric ranges.
 
