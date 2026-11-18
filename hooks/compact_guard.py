@@ -26,7 +26,6 @@ Blocking contract: never blocks. A PreCompact hook that fails or stalls
 interrupts the compaction it was supposed to protect.
 """
 
-import hashlib
 import json
 import os
 import subprocess
@@ -56,16 +55,12 @@ def carryover_path(session_id: str, agent_id: str = '') -> str:
     return path.replace('.state-', '.carryover-').replace('.json', '.md')
 
 
-def _project_key(cwd: str) -> str:
-    return hashlib.sha256(os.path.realpath(cwd).encode()).hexdigest()[:16]
-
-
 def project_carryover_path(cwd: str) -> str:
-    return os.path.join(STATE_DIR, f'.carryover-project-{_project_key(cwd)}.md')
+    return os.path.join(STATE_DIR, f'.carryover-project-{playbook_core.project_key(cwd)}.md')
 
 
 def handoff_path(cwd: str) -> str:
-    return os.path.join(STATE_DIR, f'.handoff-{_project_key(cwd)}.md')
+    return os.path.join(STATE_DIR, f'.handoff-{playbook_core.project_key(cwd)}.md')
 
 
 def _loads(line: str) -> dict:
