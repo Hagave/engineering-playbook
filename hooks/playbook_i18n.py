@@ -280,6 +280,97 @@ STRINGS: dict[str, dict[str, str]] = {
         'es': ('Filtro de salida: {count} salidas filtradas, {before} -> {after} caracteres '
                '(-{percent} %, unos {tokens} tokens)'),
     },
+    'destructive_ask': {
+        'en': ('[playbook] This command {effect}: `{command}`. Approve only if you want exactly '
+               'this to run. Where no one can answer this prompt it is denied: run the command '
+               'yourself.'),
+        'pt-br': ('[playbook] Este comando {effect}: `{command}`. Aprove só se você quer que '
+                  'exatamente isso rode. Onde ninguém pode responder este pedido, ele é negado: '
+                  'rode o comando você mesmo.'),
+        'es': ('[playbook] Este comando {effect}: `{command}`. Apruébalo solo si quieres que se '
+               'ejecute exactamente esto. Donde nadie puede responder esta solicitud, se '
+               'deniega: ejecuta el comando tú mismo.'),
+    },
+    'destroys_delete_tree': {
+        'en': 'deletes files and directories recursively',
+        'pt-br': 'apaga arquivos e diretórios recursivamente',
+        'es': 'borra archivos y directorios de forma recursiva',
+    },
+    'destroys_force_push': {
+        'en': 'overwrites the remote branch, dropping the commits it has that you do not',
+        'pt-br': 'sobrescreve o branch remoto, descartando os commits que ele tem e você não',
+        'es': 'sobrescribe la rama remota y descarta los commits que tiene y tú no',
+    },
+    'destroys_reset_hard': {
+        'en': 'discards every uncommitted change in the working tree and the index',
+        'pt-br': 'descarta toda mudança não commitada na árvore de trabalho e no índice',
+        'es': 'descarta todo cambio sin commit del árbol de trabajo y del índice',
+    },
+    'destroys_branch_delete': {
+        'en': 'deletes a branch even when its commits are not merged',
+        'pt-br': 'apaga um branch mesmo com commits ainda não mesclados',
+        'es': 'borra una rama aunque sus commits no estén fusionados',
+    },
+    'destroys_discard_changes': {
+        'en': 'discards uncommitted changes to the files it names',
+        'pt-br': 'descarta mudanças não commitadas dos arquivos que cita',
+        'es': 'descarta los cambios sin commit de los archivos que nombra',
+    },
+    'destroys_clean': {
+        'en': 'deletes files git does not track',
+        'pt-br': 'apaga arquivos que o git não rastreia',
+        'es': 'borra archivos que git no rastrea',
+    },
+    'destroys_stash_drop': {
+        'en': 'deletes stashed changes',
+        'pt-br': 'apaga mudanças guardadas no stash',
+        'es': 'borra cambios guardados en el stash',
+    },
+    'destroys_history': {
+        'en': 'deletes or rewrites git history that the reflog may not bring back',
+        'pt-br': 'apaga ou reescreve histórico do git que o reflog pode não recuperar',
+        'es': 'borra o reescribe historial de git que el reflog quizá no recupere',
+    },
+    'destroys_worktree_remove': {
+        'en': 'deletes a worktree together with its uncommitted changes',
+        'pt-br': 'apaga um worktree junto com as mudanças não commitadas dele',
+        'es': 'borra un worktree junto con sus cambios sin commit',
+    },
+    'destroys_sync_delete': {
+        'en': 'deletes the files at the destination that the source does not have',
+        'pt-br': 'apaga no destino os arquivos que a origem não tem',
+        'es': 'borra en el destino los archivos que el origen no tiene',
+    },
+    'destroys_shred': {
+        'en': 'overwrites files so they cannot be recovered',
+        'pt-br': 'sobrescreve arquivos para que não possam ser recuperados',
+        'es': 'sobrescribe archivos para que no se puedan recuperar',
+    },
+    'destroys_truncate': {
+        'en': 'empties files',
+        'pt-br': 'esvazia arquivos',
+        'es': 'vacía archivos',
+    },
+    'destroys_mass_delete': {
+        'en': 'deletes every file it matches',
+        'pt-br': 'apaga todo arquivo que casar com o filtro',
+        'es': 'borra todo archivo que coincida con el filtro',
+    },
+    'destroys_sql': {
+        'en': 'deletes data from a database',
+        'pt-br': 'apaga dados de um banco de dados',
+        'es': 'borra datos de una base de datos',
+    },
+    'destroys_dynamic': {
+        'en': 'runs a program decided only at run time, which the playbook cannot read',
+        'pt-br': 'roda um programa decidido só na hora de executar, que o playbook não consegue ler',
+        'es': 'ejecuta un programa decidido solo al ejecutarse, que el playbook no puede leer',
+    },
+    'destroys_script_delete': {
+        'en': 'deletes files recursively from inside a script',
+        'pt-br': 'apaga arquivos recursivamente de dentro de um script',
+        'es': 'borra archivos de forma recursiva desde un script',
+    },
     'lsp_hint': {
         'en': ('[playbook] {stack} project without a code-intelligence plugin: with '
                '`{plugin}`, Claude sees type and name errors right after each edit, before '

@@ -24,6 +24,7 @@ spec.loader.exec_module(cg)
 
 sys.path.insert(0, os.path.join(_ROOT, 'hooks'))
 import playbook_core  # noqa: E402
+import playbook_i18n  # noqa: E402
 
 
 class TestCheckContext(unittest.TestCase):
@@ -857,18 +858,37 @@ class TestDestructiveFalsePositives(unittest.TestCase):
     def test_a_real_destructive_command_is_still_blocked(self):
         self.assertIsNotNone(playbook_core.check_destructive(self.DANGEROUS + 'var/data'))
 
-    def test_authorization_phrases_are_not_questions(self):
-        authorized = ('pode apagar a pasta build', 'go ahead and delete it',
-                      'você pode remover esse arquivo', 'eu autorizo apagar',
-                      'confirmo o reset', 'I confirm the deletion')
-        not_authorized = ('o que acontece se apagar?', 'never delete the database',
-                          'delete is destructive')
-        for text in authorized:
-            with self.subTest(text=text):
-                self.assertTrue(playbook_core.DESTRUCTIVE_AUTHORIZED_RE.search(text))
-        for text in not_authorized:
-            with self.subTest(text=text):
-                self.assertFalse(playbook_core.DESTRUCTIVE_AUTHORIZED_RE.search(text))
+    def test_every_effect_has_dialog_text_in_every_language(self):
+        """A missing string would leave the gate nothing to ask with; it denies
+        then, but the dialog is the path the user is meant to get."""
+        effects = {effect for _, effect in playbook_core.DESTRUCTIVE_RULES} | {
+            'dynamic', 'script_delete'}
+        for effect in sorted(effects):
+            for language in playbook_i18n.LANGUAGE_NAMES:
+                with self.subTest(effect=effect, language=language):
+                    self.assertTrue(playbook_i18n.STRINGS[f'destroys_{effect}'].get(language))
+        for language in playbook_i18n.LANGUAGE_NAMES:
+            with self.subTest(language=language):
+                template = playbook_i18n.STRINGS['destructive_ask'][language]
+                self.assertIn('{effect}', template)
+                self.assertIn('{command}', template)
+
+    def test_each_detection_names_its_effect(self):
+        for command, effect in (('rm -rf build', 'delete_tree'),
+                                ('git push --force origin main', 'force_push'),
+                                ('x=rm; $x -rf build', 'dynamic'),
+                                ('python3 -c "import shutil; shutil.rmtree(\'b\')"', 'script_delete')):
+            with self.subTest(command=command):
+                runnable = playbook_core.strip_inline_payloads(command)
+                self.assertEqual(playbook_core.check_destructive(runnable, command)['effect'], effect)
+
+    def test_an_effect_without_text_is_denied_not_asked(self):
+        hit = {'block': True, 'effect': 'unheard_of',
+               'msg': f'[playbook:safety] x {playbook_core.AUTHORIZATION_HINT}'}
+        with mock.patch.object(cg, '_AGENT_ID', ''), mock.patch.dict(os.environ, {'CLAUDE_CODE_REMOTE': ''}):
+            verdict = cg._destructive_verdict(hit, {'permission_mode': 'auto'}, 'rm -rf b', {})
+        self.assertTrue(verdict.get('block'))
+        self.assertIn('run the command themselves', verdict['msg'])
 
     def test_deleting_inside_the_session_scratchpad_needs_no_consent(self):
         """Decided for 4.0.0: what the session made in its own scratchpad is
@@ -905,14 +925,6 @@ class TestDestructiveFalsePositives(unittest.TestCase):
         with mock.patch.object(cg.tempfile, 'gettempdir', return_value=tmp), \
                 mock.patch.object(cg, '_SESSION_ID', ''):
             self.assertEqual(cg._session_scratchpad(), '')
-
-    def test_a_general_approval_does_not_authorize_destruction(self):
-        """Release review of 4.0.0: each of these unlocked rm -rf for the turn."""
-        for text in ('pode rodar os testes', 'pode executar', 'pode seguir com o plano',
-                     'pode prosseguir', 'eu autorizo', 'confirmo', 'assumo o risco',
-                     'I confirm the spec looks right', 'i authorize it'):
-            with self.subTest(text=text):
-                self.assertFalse(playbook_core.DESTRUCTIVE_AUTHORIZED_RE.search(text))
 
     def test_review_waiver_names_the_review(self):
         for text in ('pode pushar sem review', 'skip review', 'pula o review',
