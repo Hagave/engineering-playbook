@@ -498,6 +498,40 @@ class TestReviewGate(_RepoBase):
     def test_dry_run_is_not_gated(self):
         self._commit('src/app.ts', 'unreviewed')
         self.assertFalse(self._denied(self._push('git push --dry-run origin main')))
+        self.assertFalse(self._denied(self._push('git push -fn origin main')))
+
+    def test_a_publishing_push_chained_with_a_dry_run_is_denied(self):
+        """The dry run is read per push: the other push of the command still publishes."""
+        self._commit('src/app.ts', 'unreviewed')
+        for command in ('git push --dry-run origin main && git push origin main',
+                        'git push origin main; git push --dry-run origin main',
+                        'git push -n --no-dry-run origin main'):
+            with self.subTest(command=command):
+                result = self._push(command)
+                self.assertTrue(self._denied(result))
+                self.assertIn('review-gate', _out(result).get('systemMessage', ''))
+
+    def test_porcelain_push_is_gated(self):
+        """`--porcelain` changes the output; the push still happens."""
+        self._commit('src/app.ts', 'unreviewed')
+        self.assertTrue(self._denied(self._push('git push --porcelain origin main')))
+
+    def test_a_dry_run_inside_another_program_is_read_per_push(self):
+        """The forms the whole-command `--dry-run` match exempted by accident."""
+        self._commit('src/app.ts', 'unreviewed')
+        for command in ('echo main | xargs git push --dry-run origin',
+                        "sh -c 'git push --dry-run origin main'",
+                        'eval git push --dry-run origin main'):
+            with self.subTest(command=command):
+                self.assertFalse(self._denied(self._push(command)))
+        for command in ('echo main | xargs git push --dry-run origin && git push origin main',
+                        "sh -c 'git push --dry-run origin main && git push origin main'",
+                        'eval "git push --dry-run origin main; git push origin main"',
+                        r'find . -maxdepth 0 -exec git push --dry-run origin main \;',
+                        'watch git push --dry-run origin main',
+                        'flock /tmp/l git push --dry-run origin main'):
+            with self.subTest(command=command):
+                self.assertTrue(self._denied(self._push(command)))
 
     def test_push_that_only_deletes_is_not_gated(self):
         self._commit('src/app.ts', 'unreviewed')

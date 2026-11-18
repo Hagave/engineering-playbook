@@ -359,6 +359,35 @@ class TestPushRevisions(unittest.TestCase):
         self.assertEqual(playbook_core.push_revisions(['--dry-run', 'origin', 'main']), [])
         self.assertEqual(playbook_core.push_revisions(['-n', 'origin', 'main']), [])
 
+    def test_dry_run_in_a_short_flag_bundle_or_an_abbreviation(self):
+        """git 2.47 takes `-fn`, `-nf`, `-un` and `--dr`/`--dry` as a dry run."""
+        for flag in ('-fn', '-nf', '-un', '-vn', '-nofoo', '--dr', '--dry', '--dry-ru'):
+            with self.subTest(flag=flag):
+                self.assertEqual(playbook_core.push_revisions([flag, 'origin', 'main']), [])
+
+    def test_n_as_the_value_of_a_bundled_push_option_is_not_a_dry_run(self):
+        """`-on` and `-fon` send the push option `n`; the push still happens."""
+        for flag in ('-on', '-fon'):
+            with self.subTest(flag=flag):
+                self.assertEqual(playbook_core.push_revisions([flag, 'origin', 'main']), ['main'])
+
+    def test_a_later_no_dry_run_turns_the_dry_run_off(self):
+        """`git push -n --no-dry-run` publishes; so do the abbreviations git takes."""
+        for args in (['-n', '--no-dry-run', 'origin', 'main'],
+                     ['--dry-run', '--no-dry-run', 'origin', 'main'],
+                     ['-n', '--no-dr', 'origin', 'main'], ['--dr', '--no-dry', 'origin', 'main'],
+                     ['-fn', 'origin', 'main', '--no-dry-run']):
+            with self.subTest(args=args):
+                self.assertEqual(playbook_core.push_revisions(args), ['main'])
+        self.assertEqual(playbook_core.push_revisions(['--no-dry-run', '-n', 'origin', 'main']), [])
+
+    def test_porcelain_is_not_a_dry_run(self):
+        self.assertEqual(playbook_core.push_revisions(['--porcelain', 'origin', 'main']), ['main'])
+
+    def test_a_run_time_word_in_a_dry_run_is_unresolvable(self):
+        """The word may expand to `--no-dry-run`."""
+        self.assertIsNone(playbook_core.push_revisions(['-n', 'origin', '$FLAGS']))
+
     def test_glab_mr_create_with_co_author_blocks(self):
         cmd = 'glab mr create --description "fix\n\nco-authored-by: claude"'
         self.assertIsNotNone(cg._check_ai_attribution(cmd))
