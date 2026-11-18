@@ -376,12 +376,12 @@ def _measure_context(transcript: str | None) -> tuple[float, int] | None:
 
 # ─── Git helpers ──────────────────────────────────────────────────────────────
 
-def _git(*args: str) -> str:
+def _git(*args: str, cwd: str = '') -> str:
     """Git output, or '' on any failure. Fail-open by construction: a gate that
     cannot read the repo must not block the tool call."""
     try:
         out = subprocess.run(
-            ('git', '-C', _CWD or os.getcwd()) + args,
+            ('git', '-C', cwd or _CWD or os.getcwd()) + args,
             capture_output=True, text=True, timeout=3,
         )
         return out.stdout.strip() if out.returncode == 0 else ''
@@ -393,21 +393,20 @@ def _git_head() -> str:
     return _git('rev-parse', 'HEAD')
 
 
-def _push_range() -> str:
+def _worktree_heads() -> list[str]:
+    listing = _git('worktree', 'list', '--porcelain')
+    return [line[5:] for line in listing.splitlines() if line.startswith('HEAD ')]
+
+
+def _push_range(repo: str) -> str:
     """The diff range a push would publish: everything HEAD has that its
     upstream does not, falling back to the default branch for a branch that has
     no upstream yet."""
-    upstream = _git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')
+    upstream = _git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}', cwd=repo)
     if upstream:
         return f'{upstream}...HEAD'
-    head = _git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD')
+    head = _git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD', cwd=repo)
     return f'{head or "origin/main"}...HEAD'
-
-
-def _nothing_to_push() -> bool:
-    """True only when the upstream already contains HEAD. A branch with no
-    upstream returns '' and is treated as having something to push."""
-    return _git('rev-list', '--count', '@{u}..HEAD') == '0'
 
 
 # ─── Checks ───────────────────────────────────────────────────────────────────
@@ -594,12 +593,17 @@ def _scan_skills(transcript: str | None, state: dict) -> bool:
                     elif base == GOVERNANCE_SKILL:
                         state['gov_loaded'] = True
                     if base in REVIEW_SKILLS:
-                        # Pins the review to the commit it actually read. A
-                        # commit made after the review is unreviewed code, and
-                        # the push gate must see that.
+                        # A review does not say which worktree it read, so it
+                        # credits the HEAD of every worktree of the repository:
+                        # a commit made after it, in any of them, is not
+                        # credited. The cost is a sibling worktree's commits that
+                        # already existed and that this review never looked at.
                         head = _git_head()
                         if head:
                             state['reviewed_head'] = head
+                        heads = _worktree_heads()
+                        if heads:
+                            state['reviewed_heads'] = heads
                         # Findings are only in the text this turn flushes, so the
                         # check itself has to wait for Stop.
                         state['review_turn'] = True
@@ -916,56 +920,84 @@ def _check_watch(state: dict, prefs: dict, tool_name: str, tool_input: dict) -> 
     }
 
 
+def _credited_commits(state: dict) -> list[str]:
+    credited: list[str] = []
+    for key in ('reviewed_heads', 'review_bypass_heads'):
+        value = state.get(key)
+        if isinstance(value, list):
+            credited += [str(sha) for sha in value]
+    if isinstance(state.get('reviewed_head'), str):
+        credited.append(state['reviewed_head'])
+    return credited
+
+
+def _review_command(repo: str) -> str:
+    same = os.path.realpath(repo) == os.path.realpath(_CWD or os.getcwd())
+    return f'git {"" if same else f"-C {repo} "}diff {_push_range(repo)}'
+
+
 def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict | None:
-    """Deny a push whose HEAD has not been reviewed.
+    """Deny a push that publishes a commit no review or user waiver covers.
 
-    Pinned to the commit rather than to the session: reviewing, then committing
-    more, then pushing would otherwise publish unreviewed code under a review
-    that never saw it. The bypass is the user's own words in their latest
-    message (or PLAYBOOK_SKIP_REVIEW in the environment) — never the model's,
-    which would let it clear its own gate by writing the phrase.
+    Read from the repository each push runs in and the revisions it publishes,
+    not from the session's directory: a push from another worktree is about
+    that worktree's commits. A commit is covered when a remote-tracking ref has
+    it or a credited commit (a reviewed HEAD, a waived push tip) contains it.
+    The waiver is the user's own words in their latest message (or
+    PLAYBOOK_SKIP_REVIEW in the environment), never the model's.
 
-    Fail-open on everything it cannot establish: no git, no HEAD, nothing ahead
-    of upstream."""
+    Fails closed when a push's directory or revisions cannot be resolved or git
+    cannot list its commits; outside a repository nothing is published."""
     if PUSH_NOOP_RE.search(command):
         return None
     if os.environ.get('PLAYBOOK_SKIP_REVIEW'):
         return None
-    # A push that only deletes refs publishes no code, so there is nothing to
-    # review — denying `git push origin --delete <merged branch>` until HEAD
-    # was reviewed was a measured false positive. Any push whose revisions are
-    # unknown still goes through the checks below.
-    targets = playbook_core.push_targets(command, _CWD)
-    if targets and all(t.revs == [] for t in targets):
-        return None
-
-    head = _git_head()
-    if not head:
-        return None
-    if state.get('reviewed_head') == head:
-        return None
-    if state.get('review_bypass_head') == head:
+    credited = _credited_commits(state)
+    unknown = ''
+    pending: list[tuple[str, list[str], int]] = []
+    for target in playbook_core.push_targets(command, _CWD):
+        if target.repo is None or target.revs is None:
+            unknown = unknown or target.reason
+            continue
+        count = playbook_core.unreviewed_commits(target.repo, target.revs, credited)
+        if count is None:
+            unknown = unknown or 'git could not list the commits it publishes'
+        elif count:
+            pending.append((target.repo, target.revs, count))
+    if not unknown and not pending:
         return None
     if REVIEW_BYPASS_RE.search(_latest_user_prompt(transcript)):
         # Remembered per commit so the rest of this push (and a retry of it)
         # does not re-prompt for a waiver the user already gave.
-        state['review_bypass_head'] = head
-        return None
-    if _nothing_to_push():
+        waived = [tip for repo, revs, _ in pending for tip in playbook_core.pushed_tips(repo, revs)]
+        previous = state.get('review_bypass_heads')
+        state['review_bypass_heads'] = ((previous if isinstance(previous, list) else []) + waived)[-32:]
         return None
 
+    waiver = ('Bypass: the user says so explicitly (e.g. "pode pushar sem review"), '
+              'or PLAYBOOK_SKIP_REVIEW=1 in the environment. You cannot waive this yourself.')
+    if not pending:
+        return {
+            'block': True,
+            'msg': (
+                f'[playbook:review-gate] Push denied — the hook could not determine what this '
+                f'push publishes ({unknown}), so it cannot confirm that it was reviewed. Push '
+                'with literal arguments from the repository directory (e.g. '
+                '`cd <worktree> && git push origin <branch>`).\n' + waiver
+            ),
+        }
+    repo, _, count = pending[0]
     return {
         'block': True,
         'msg': (
-            f'[playbook:review-gate] Push denied — HEAD {head[:7]} has not been reviewed.\n'
-            f'Load the Skill `engineering-code-review` and review `git diff {_push_range()}` '
+            f'[playbook:review-gate] Push denied — {count} commit(s) it publishes from {repo} '
+            'have not been reviewed.\n'
+            f'Load the Skill `engineering-code-review` and review `{_review_command(repo)}` '
             'before pushing. Report findings as Blocker / Major / Minor and fix every Blocker.\n'
             'Minimum coverage: information leakage (logs, responses, error payloads), N+1, '
             'idempotency, pagination done in memory, atomicity and transaction boundaries, '
             'dead code, algorithmic complexity, functionality that already exists and was not '
-            'reused, leftover console/print debugging, missing explicit types.\n'
-            'Bypass: the user says so explicitly (e.g. "pode pushar sem review"), '
-            'or PLAYBOOK_SKIP_REVIEW=1 in the environment. You cannot waive this yourself.'
+            'reused, leftover console/print debugging, missing explicit types.\n' + waiver
         ),
     }
 

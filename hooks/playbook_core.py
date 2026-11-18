@@ -2056,14 +2056,14 @@ def _time_left(timeout: float) -> float:
     return max(0.0, min(timeout, _hook_deadline - time.monotonic()))
 
 
-def _git_out(cwd: str, *args: str, timeout: float) -> str | None:
+def _git_out(cwd: str, *args: str, timeout: float, stdin: str | None = None) -> str | None:
     """stdout of a git command, or None when it failed, timed out, or the
     hook has no time left for it (the caller decides what None means)."""
     timeout = _time_left(timeout)
     if timeout <= 0:
         return None
     try:
-        done = subprocess.run(('git', '-C', cwd) + args,
+        done = subprocess.run(('git', '-C', cwd) + args, input=stdin,
                               capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -2298,6 +2298,62 @@ def check_push_attribution(command: str, cwd: str) -> dict | None:
             ),
         }
     return None
+
+
+_REVIEW_LOG_TIMEOUT = 4.0
+_OBJECT_NAME_RE = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?')
+
+
+def _in_repository(cwd: str) -> bool | None:
+    """Whether `cwd` is inside a git repository; None when git could not say."""
+    timeout = _time_left(2)
+    if timeout <= 0 or not os.path.isdir(cwd):
+        return None
+    try:
+        done = subprocess.run(('git', '-C', cwd, 'rev-parse', '--git-dir'),
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.returncode == 0
+
+
+def _existing_objects(repo: str, names: list[str]) -> list[str] | None:
+    """The commits and tags among `names` that `repo` holds."""
+    names = [name for name in names if _OBJECT_NAME_RE.fullmatch(name)]
+    if not names:
+        return []
+    listing = _git_out(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
+                       stdin='\n'.join(names) + '\n', timeout=2)
+    if listing is None:
+        return None
+    return [name for name, _, kind in (line.partition(' ') for line in listing.splitlines())
+            if kind in ('commit', 'tag')]
+
+
+def unreviewed_commits(repo: str, revs: list[str], reviewed: list[str]) -> int | None:
+    """How many commits a push of `revs` from `repo` publishes that no
+    remote-tracking ref has and no commit in `reviewed` contains.
+
+    0 for an empty `revs` (a deletion or a dry run) and outside a repository,
+    where nothing is published. None when that cannot be established: `repo`
+    does not exist yet, git failed or timed out, or the hook has no time left."""
+    if not revs:
+        return 0
+    inside = _in_repository(repo)
+    if not inside:
+        return None if inside is None else 0
+    known = _existing_objects(repo, reviewed)
+    if known is None:
+        return None
+    out = _git_out(repo, 'rev-list', '--count', *revs, '--not', '--remotes', *known, '--',
+                   timeout=_REVIEW_LOG_TIMEOUT)
+    return int(out) if out is not None and out.strip().isdigit() else None
+
+
+def pushed_tips(repo: str, revs: list[str]) -> list[str]:
+    """The commits or tags `revs` name in `repo`; [] when git cannot resolve them."""
+    out = _git_out(repo, 'rev-parse', '--revs-only', *revs, timeout=2) if revs else None
+    return [line for line in (out or '').split() if _OBJECT_NAME_RE.fullmatch(line)]
 
 
 def check_new_commit_attribution(command: str, cwd: str) -> str | None:
