@@ -90,6 +90,22 @@ What [`install.sh`](install.sh) does:
 - **Claude Code:** adds this repository as a plugin marketplace and installs
   the plugin through the `claude` CLI; a second run updates it. It does not
   download anything itself.
+- **Several Claude Code accounts:** Claude Code keeps plugins inside each
+  config directory, so an account run with its own `CLAUDE_CONFIG_DIR` does
+  not see a plugin installed in another. The script finds `~/.claude`, the
+  `~/.claude-*` directories Claude Code has used and the `CLAUDE_CONFIG_DIR`
+  values set in your shell startup files (read as text, never run), and asks
+  which of them to install into. It remembers the answer, so the next run
+  updates the same accounts and asks only about a new one. Without a terminal
+  (CI, a container) it installs into the current account only. To skip the
+  question, pass `--all-accounts`, or `--accounts default,~/.claude-work` for
+  a given list:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash -s -- --all-accounts
+  ```
+
+  Auto-update (below) is set per account: turn it on in each one.
 - **Codex and Antigravity:** downloads the latest release's archive, checks
   it against the SHA-256 published with it, unpacks it into
   `~/.local/share/engineering-playbook/<version>` and links it as `current`,
