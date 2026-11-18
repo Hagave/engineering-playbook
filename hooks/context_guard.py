@@ -667,8 +667,16 @@ def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
     return truncated
 
 
-def _latest_user_prompt(transcript: str | None) -> str:
-    """Text of the most recent real user message, or ''."""
+def _turn_user_prompt(transcript: str | None) -> str:
+    """Text of the real user message that started the current turn, or '' when
+    something else started it: a background-task notification, a subagent
+    hand-back, an automatic continuation.
+
+    The harness closes every finished turn with a `turn_duration` system entry
+    and writes none for what it injects into a running turn (reminders, skill
+    bodies, Stop-hook feedback; a notification that arrives mid-turn is an
+    attachment, not a user entry). So a closed turn met before any user message
+    means the user did not start this one."""
     if not transcript or not os.path.exists(transcript):
         return ''
     for line in reversed(_read_tail_lines(transcript)):
@@ -676,6 +684,12 @@ def _latest_user_prompt(transcript: str | None) -> str:
             obj = json.loads(line)
         except Exception:
             continue
+        # Trade-off: a background subagent still running after the user's turn
+        # closed reads the parent transcript and so loses that turn's consent
+        # (denied, never wrongly allowed); and a transcript that records no
+        # `turn_duration` at all falls back to the latest user message.
+        if obj.get('type') == 'system' and obj.get('subtype') == 'turn_duration':
+            return ''
         if not _is_user_prompt(obj):
             continue
         content = obj.get('message', {}).get('content')
@@ -689,23 +703,25 @@ def _latest_user_prompt(transcript: str | None) -> str:
     return ''
 
 
-def _latest_typed_words(transcript: str | None) -> str:
-    """What the user typed in their latest message: consent is read from
-    here, never from a block they pasted from elsewhere."""
-    return playbook_core.typed_words(_latest_user_prompt(transcript))
+def _turn_typed_words(transcript: str | None) -> str:
+    """What the user typed in the message that started the current turn:
+    consent is read from here, never from a block they pasted from elsewhere
+    nor from a turn the user did not start."""
+    return playbook_core.typed_words(_turn_user_prompt(transcript))
 
 
 def _destructive_authorized(transcript: str | None) -> bool:
     """Whether the user authorized a destructive operation in their current
     message.
 
-    Read fresh from the latest user message on every call, which is what scopes
-    it: an authorization is good for the turn it was given in and no longer. It
+    Read fresh from the message that started the current turn on every call,
+    which is what scopes it: an authorization is good for the turn it was given
+    in and no longer, and a turn a notification or a hand-back started has none. It
     is deliberately not persisted — a stored flag would let a "pode apagar" from
     an hour ago clear a block on something the user never saw. And because only
     user messages are scanned, the model cannot authorize itself by writing the
     phrase in its own response."""
-    prompt = _latest_typed_words(transcript)
+    prompt = _turn_typed_words(transcript)
     return bool(prompt) and bool(DESTRUCTIVE_AUTHORIZED_RE.search(prompt))
 
 
@@ -961,7 +977,8 @@ def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict 
     not from the session's directory: a push from another worktree is about
     that worktree's commits. A commit is covered when a remote-tracking ref has
     it or a credited commit (a reviewed HEAD, a waived push tip) contains it.
-    The waiver is the user's own words in their latest message (or
+    The waiver is the user's own words in the message that started the current
+    turn (or
     PLAYBOOK_SKIP_REVIEW in the environment), never the model's.
 
     Fails closed when a push's directory or revisions cannot be resolved or git
@@ -982,7 +999,7 @@ def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict 
             pending.append((target.repo, target.revs, count))
     if not unknown and not pending:
         return None
-    if REVIEW_BYPASS_RE.search(_latest_typed_words(transcript)):
+    if REVIEW_BYPASS_RE.search(_turn_typed_words(transcript)):
         # Remembered per commit so the rest of this push (and a retry of it)
         # does not re-prompt for a waiver the user already gave.
         waived = [tip for repo, revs, _ in pending for tip in playbook_core.pushed_tips(repo, revs)]
