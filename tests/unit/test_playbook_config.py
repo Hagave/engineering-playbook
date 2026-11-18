@@ -84,6 +84,23 @@ class TestSetPrintsTheEffect(unittest.TestCase):
         # The panel shows `help` under each setting's name: none may be blank.
         self.assertTrue(all(s['help'].strip() for s in settings))
 
+    def test_the_context_budget_offers_off_550k_650k_850k_and_a_custom_value(self):
+        _, out = self._run('show', '--json')
+        settings = {s['key']: s for s in json.loads(out)['settings']}
+        budget = settings['context_budget']
+        self.assertEqual([(c['value'], c['label']) for c in budget['choices']],
+                         [('0', 'off'), ('550000', '550k'), ('650000', '650k'), ('850000', '850k')])
+        self.assertEqual((budget['value'], budget['default']), ('550000', '550000'))
+        self.assertTrue(budget['custom'])
+        self.assertEqual([k for k, s in settings.items() if s['custom']], ['context_budget'])
+
+    def test_a_custom_context_budget_is_accepted_and_shown_as_set(self):
+        code, _ = self._run('set', 'context_budget', '700k')
+        self.assertEqual(code, 0)
+        _, out = self._run('show', '--json')
+        budget = next(s for s in json.loads(out)['settings'] if s['key'] == 'context_budget')
+        self.assertEqual(budget['value'], '700000')
+
     def test_every_choice_the_panel_offers_is_accepted_by_set(self):
         for key, choices in config.CHOICES.items():
             for value, _label in choices:
