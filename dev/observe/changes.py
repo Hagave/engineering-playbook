@@ -23,8 +23,12 @@ MEDIUM_TOKENS = 15
 MATCH_LIMIT_TOKENS = 2000
 
 # A line that is only a comment, by its opening. Language-agnostic on purpose,
-# so the body of a multi-line docstring or block comment reads as code.
-_COMMENT_RE = re.compile(r'^\s*(#|//|/\*|\*|;|--\s|"""|\'\'\'|<!--)')
+# so the body of a multi-line docstring or block comment reads as code. A `#`
+# that opens a preprocessor directive (the word right after it, as in
+# `#include`) or a shebang is code; `# if this fails` is a comment.
+_COMMENT_RE = re.compile(
+    r'^\s*(#(?!!|(?:include|define|undef|if|ifdef|ifndef|elif|else|endif|pragma|error|warning|import|region|endregion)\b)'
+    r'|//|/\*|\*|;|--\s|"""|\'\'\'|<!--)')
 _TOKEN_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|\S')
 _SPACE_RE = re.compile(r'\s+')
 

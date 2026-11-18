@@ -257,6 +257,16 @@ class ChangeClassTests(unittest.TestCase):
         change = changes.classify(lines)
         self.assertEqual((change.kind, change.tokens_changed), (changes.CODE_LARGE, 1500))
 
+    def test_preprocessor_directives_and_shebangs_are_code(self):
+        for line in ('#include "Audio/Domain/SoundWay.h"', '#define MAX 3', '  #if WITH_EDITOR', '#endif',
+                     '#pragma once', '#!/usr/bin/env python3'):
+            with self.subTest(line=line):
+                self.assertFalse(changes.is_comment(line))
+        for line in ('# why', '#why', '# if this fails, retry', '# import it lazily', '// why',
+                     '  * continued', '-- sql note', '"""Doc."""'):
+            with self.subTest(line=line):
+                self.assertTrue(changes.is_comment(line))
+
     def test_small_change_counts_its_tokens(self):
         self.assertEqual(changes.classify(['-toast.showWarn(a)', '+toast.showWarning(a)']).tokens_changed, 1)
 
