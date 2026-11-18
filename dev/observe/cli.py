@@ -40,9 +40,9 @@ _REWRITES = '''FROM rewrites r JOIN edits e USING (tool_use_id, path, hunk)
                JOIN tool_calls c USING (tool_use_id)
                JOIN sessions s ON s.session_id = c.session_id AND s.agent_id = c.agent_id'''
 # Scratch files and prose are left out of the per-line figures, as they are out of the rewrites.
-_PROJECT_CODE = """e.path NOT LIKE '%/tmp/%' AND e.path NOT LIKE '%/.claude/%' AND e.path NOT LIKE '%/.work/%'
-                   AND e.path NOT LIKE '%/scratchpad/%' AND e.path NOT LIKE '%.md' AND e.path NOT LIKE '%.txt'
-                   AND e.path NOT LIKE '%.rst'"""
+_PROJECT_CODE = ' AND '.join(
+    [f"e.path NOT LIKE '%{marker}%'" for marker in episodes.SCRATCH_MARKERS]
+    + [f"e.path NOT LIKE '%{suffix}'" for suffix in episodes.PROSE_SUFFIXES])
 
 
 def _rewrites_by_change(conn: sqlite3.Connection, by_project: bool) -> str:

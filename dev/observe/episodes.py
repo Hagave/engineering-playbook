@@ -42,8 +42,8 @@ MACHINE_PROMPT_SOURCES = frozenset({'agent-brief', 'task-notification', 'system'
                                     'local-command'})
 
 # Scratch files are rewritten by design; they are not the project's code.
-_SCRATCH_MARKERS = ('/tmp/', '/.claude/', '/.work/', '/scratchpad/')
-_PROSE_SUFFIXES = ('.md', '.txt', '.rst')
+SCRATCH_MARKERS = ('/tmp/', '/.claude/', '/.work/', '/scratchpad/')
+PROSE_SUFFIXES = ('.md', '.txt', '.rst')
 
 # Most specific first: an episode with fixes of several scopes is filed under
 # the one that says most about what was missing.
@@ -68,7 +68,7 @@ def _verdict(call: sqlite3.Row) -> str | None:
 
 
 def _scratch(path: str) -> bool:
-    return any(marker in path for marker in _SCRATCH_MARKERS)
+    return any(marker in path for marker in SCRATCH_MARKERS)
 
 
 @dataclass
@@ -153,7 +153,7 @@ class _SessionWalk:
                 # Rewriting lines written earlier in this same request. Prose
                 # (notes, docs) is rewritten by design and is not counted.
                 rewrite = (any(w.request == self.request for w in overlapping)
-                           and not path.endswith(_PROSE_SUFFIXES))
+                           and not path.endswith(PROSE_SUFFIXES))
                 if rewrite:
                     self.rewritten[path] += 1
                     between = set(self.events[self.events_at_edit.get(path, 0):])
