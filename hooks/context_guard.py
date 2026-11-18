@@ -232,9 +232,7 @@ def _assistant_text(obj: dict) -> str:
     return ''
 
 
-_NON_PROMPT_RE = re.compile(
-    r'^\s*(?:<system-reminder|<task-notification|<local-command|\[SYSTEM NOTIFICATION)'
-)
+_NON_PROMPT_RE = playbook_core.NON_PROMPT_RE
 
 
 def _is_prompt_text(text: str) -> bool:
@@ -1359,6 +1357,15 @@ def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -
 
     if _is_tool_error(input_data.get('tool_response')):
         sys.exit(0)
+
+    # A subagent's Skill call is written to its own transcript, which no tool
+    # event carries: the scan above reads the parent's, so a subagent that
+    # loaded governance itself stayed denied for good. Its completed call is
+    # the one place that load is visible.
+    if tool_name == 'Skill':
+        loaded = str(tool_input.get('skill') or tool_input.get('command') or '')
+        if loaded.rsplit(':', 1)[-1] == GOVERNANCE_SKILL:
+            state['gov_loaded'] = True
 
     if playbook_core.is_code_write(
             tool_name, tool_input,

@@ -2753,6 +2753,29 @@ CORRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Text that reaches a prompt hook or the transcript as a "user" message without
+# the user having typed it: harness reminders, background-task notifications,
+# local command output, and the report a subagent hands back.
+NON_PROMPT_RE = re.compile(
+    r'^\s*(?:<system-reminder|<task-notification|<local-command|<agent-message|\[SYSTEM NOTIFICATION)'
+)
+# A block the user pasted from somewhere else. An unclosed block runs to the end.
+_PASTED_BLOCK_RE = re.compile(r'<pasted_content\b[^>]*>.*?(?:</pasted_content[^>]*>|\Z)', re.DOTALL)
+
+
+def typed_words(prompt: str) -> str:
+    """What the user wrote themselves in `prompt`: '' for a message they did
+    not write at all, and the message without its pasted blocks otherwise.
+
+    A correction is something the user says. A subagent report that quotes
+    "that's wrong", or a pasted document that contains "reverte", says nothing
+    about the previous turn (measured: 34 of 59 journaled corrections were
+    subagent reports or notifications)."""
+    if NON_PROMPT_RE.match(prompt):
+        return ''
+    return _PASTED_BLOCK_RE.sub(' ', prompt)
+
+
 # Explicit, user-authored opt-out of the pre-push review gate. Only the user's
 # own prompt is scanned for these — the model must never be able to clear its
 # own gate by writing the phrase in its response.

@@ -195,6 +195,36 @@ class TestCorrectionDetection(_Base):
         self._learn('UserPromptSubmit', prompt="that's wrong, not what I asked for")
         self.assertTrue(self._state().get('learn_pending'))
 
+    def test_text_the_user_did_not_type_is_not_a_correction(self):
+        """A subagent report, a notification and local command output reach the
+        hook as prompts. One per form: each quotes a correction phrase."""
+        for prompt in (
+            '<agent-message from="a1b2c3">\n[Subagent hand-back] the earlier claim is wrong; that\'s incorrect',
+            '<task-notification>\n<summary>build still failing</summary>\n</task-notification>',
+            '<system-reminder>\nreverte isso\n</system-reminder>',
+            '<local-command-stdout>undo that</local-command-stdout>',
+            '[SYSTEM NOTIFICATION - NOT USER INPUT]\nyou assumed the wrong file',
+        ):
+            with self.subTest(prompt=prompt[:24]):
+                result = self._learn('UserPromptSubmit', prompt=prompt)
+                self.assertEqual(result.stdout.strip(), '')
+                self.assertFalse(self._state().get('learn_pending'))
+
+    def test_a_pasted_block_is_not_the_users_words(self):
+        pasted = '<pasted_content id="ab12">\nstep 3: reverte o deploy; não é isso\n</pasted_content id="ab12">'
+        result = self._learn('UserPromptSubmit', prompt=f'segue o runbook\n\n{pasted}')
+        self.assertEqual(result.stdout.strip(), '')
+        self.assertFalse(self._state().get('learn_pending'))
+
+    def test_an_unclosed_pasted_block_runs_to_the_end(self):
+        self._learn('UserPromptSubmit', prompt='veja o log\n<pasted_content id="ab12">\nstill failing')
+        self.assertFalse(self._state().get('learn_pending'))
+
+    def test_a_correction_typed_around_a_pasted_block_still_counts(self):
+        pasted = '<pasted_content id="ab12">\nTraceback ...\n</pasted_content id="ab12">'
+        self._learn('UserPromptSubmit', prompt=f'não é isso, olha o erro:\n{pasted}')
+        self.assertTrue(self._state().get('learn_pending'))
+
     def test_state_claims_the_transcript_so_the_guard_does_not_reset_it(self):
         # context_guard resets state whenever session_file does not match the
         # live transcript. A flag written before the first tool call must survive.
