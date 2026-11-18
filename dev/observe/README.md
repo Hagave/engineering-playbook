@@ -70,3 +70,27 @@ python3 dev/observe/cli.py query \
 - The episode columns are observations (where the fix landed, what had been
   read), not a verdict on why. Reading a file is not the same as having
   understood it.
+
+## The continuity ledger
+
+`hooks/ledger.py` is a shipped hook, not part of this tool: as events happen
+it records, from the hook payload alone, the prompts, AskUserQuestion answers,
+files read and written (path and content hash), validation runs (outcome,
+HEAD, working-tree hash), each turn's closing message and the session chain
+across `/clear`. One store per repository, shared by its worktrees, in
+`$PLAYBOOK_LEDGER_DIR` or `${XDG_STATE_HOME:-~/.local/state}/engineering-playbook/ledger/`,
+owner-only. Prompts are kept verbatim (deny-tier secrets cut); no tool output
+or file content is stored. Nothing reads it back into a session yet.
+
+```
+python3 dev/observe/ledger.py stores
+python3 dev/observe/ledger.py sessions            # this project, from any worktree
+python3 dev/observe/ledger.py show 8b1aec1c       # one session, in order
+python3 dev/observe/ledger.py query "SELECT outcome, COUNT(*) FROM runs GROUP BY 1"
+```
+
+A prompt's `kind` in `show` is the reader's guess, not a fact: the payload
+does not say who sent a prompt. `slash command` is the only positive mark
+(UserPromptExpansion); `harness` is text matching `NON_PROMPT_RE`; the rest is
+`unmarked`. A run's `succeeded` is the harness's exit status, so a check piped
+into `tail` reads as succeeded whatever it printed.

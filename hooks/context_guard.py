@@ -159,10 +159,7 @@ _VALIDATION_STARTS_KEPT = 8
 
 
 def _is_validation(tool_name: str, command: str) -> bool:
-    """A Bash command that validates, read with heredoc bodies and interpreter
-    payloads stripped: a doc that merely mentions `npm test` validates nothing."""
-    return tool_name == 'Bash' and bool(VALIDATION_RE.search(
-        playbook_core.strip_inline_payloads(playbook_core.strip_heredoc_bodies(command))))
+    return tool_name == 'Bash' and playbook_core.is_validation_command(command)
 
 
 def _note_validation_start(state: dict, tool_use_id: str) -> None:

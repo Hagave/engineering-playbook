@@ -17,6 +17,7 @@ not need to be manually re-ported to a second implementation.
 import ast
 import contextlib
 import glob
+import hashlib
 import json
 import os
 import re
@@ -1471,6 +1472,12 @@ VALIDATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def is_validation_command(command: str) -> bool:
+    """A Bash command that validates, read with heredoc bodies and interpreter
+    payloads stripped: a doc that merely mentions `npm test` validates nothing."""
+    return bool(VALIDATION_RE.search(strip_inline_payloads(strip_heredoc_bodies(command))))
+
 # Static analysis engines the playbook delegates to when one is installed. Never
 # bundled: the engine is LGPL and the community rules may not be redistributed,
 # so the playbook only tells the model how to run what the user already has.
@@ -2755,6 +2762,12 @@ def check_push_secrets(command: str, cwd: str = '') -> dict | None:
         if verdict:
             return verdict
     return None
+
+
+def project_key(cwd: str) -> str:
+    """Stable name for a project's state files: the same directory, reached by
+    any path or symlink, gets the same key."""
+    return hashlib.sha256(os.path.realpath(cwd).encode()).hexdigest()[:16]
 
 
 def state_path(state_dir: str, session_id: str = '', cwd: str | None = None,
