@@ -280,7 +280,6 @@ STRINGS: dict[str, dict[str, str]] = {
         'es': ('Filtro de salida: {count} salidas filtradas, {before} -> {after} caracteres '
                '(-{percent} %, unos {tokens} tokens)'),
     },
-    # The once-per-project code-intelligence hint (hooks/session_start.py).
     'lsp_hint': {
         'en': ('[playbook] {stack} project without a code-intelligence plugin: with '
                '`{plugin}`, Claude sees type and name errors right after each edit, before '
