@@ -561,6 +561,23 @@ class TestGitCalls(unittest.TestCase):
                 self.assertTrue(playbook_core.is_git_push(command))
                 self.assertEqual(playbook_core.push_targets(command, '/w/repo')[0].repo, '/w/repo')
 
+    def test_a_dry_run_is_read_per_push_in_every_form(self):
+        """Replaces the whole-command `--dry-run` exemption of the review gate:
+        a dry run publishes nothing only for its own push."""
+        for command, revs in (('echo main | xargs git push --dry-run origin', [[]]),
+                              ("sh -c 'git push --dry-run origin main && git push origin main'",
+                               [[], ['main']]),
+                              ('eval "git push origin main; git push -n origin main"',
+                               [['main'], []]),
+                              ('git push --porcelain origin main', [['main']])):
+            with self.subTest(command=command):
+                self.assertEqual([t.revs for t in playbook_core.push_targets(command, '/w/repo')],
+                                 revs)
+        for command in (r'find . -exec git push --dry-run origin main \;',
+                        'watch git push -n origin main', 'flock /tmp/l git push --dry-run origin main'):
+            with self.subTest(command=command):
+                self.assertIsNone(playbook_core.push_targets(command, '/w/repo')[0].repo)
+
     def test_git_run_by_another_program_still_writes_history(self):
         calls = playbook_core.git_calls(r'find . -exec git commit -m x \;', '/w/repo')
         self.assertEqual([(c.sub, c.repo) for c in calls], [('commit', None)])
