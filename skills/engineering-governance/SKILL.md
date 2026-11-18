@@ -43,7 +43,7 @@ Before any Write or Edit of a source file — any language the project is writte
 
 **Token scope — per task, per turn:** the hook accepts the token only if it appears in assistant text emitted after the latest user message. Emit it, then write code in the same turn. A token emitted before an intervening user message no longer satisfies the gate — re-emit it when the user grants continuation of the same task.
 
-**Why the final message too:** text written between tool calls is not always recorded in the transcript the Stop hook reads (measured: 7 of 15 such tokens missing in one session), so a token that only appeared there is invisible and the turn is blocked. The turn's final message is always recorded before Stop runs. Put the token there as well, with what was implemented.
+**Why the final message too:** text written between tool calls is not always recorded in the transcript the Stop hook reads (measured: 7 of 15 such tokens missing in one session), so a token that only appeared there is invisible and the turn is blocked. The turn's final message reaches the hook with the Stop event itself. Put the token there as well, with what was implemented.
 
 ---
 

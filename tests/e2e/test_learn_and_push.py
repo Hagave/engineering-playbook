@@ -116,14 +116,17 @@ class _Base(unittest.TestCase):
             **payload,
         })
 
-    def _stop(self, active: bool = False) -> subprocess.CompletedProcess:
-        return _run(_GUARD, {
+    def _stop(self, active: bool = False, final: str | None = None) -> subprocess.CompletedProcess:
+        payload = {
             'session_id': self.session_id,
             'transcript_path': self.transcript,
             'hook_event_name': 'Stop',
             'cwd': self.dir,
             'stop_hook_active': active,
-        })
+        }
+        if final is not None:
+            payload['last_assistant_message'] = final
+        return _run(_GUARD, payload)
 
 
 # ── Failure capture ───────────────────────────────────────────────────────────
@@ -195,6 +198,36 @@ class TestCorrectionDetection(_Base):
         self._learn('UserPromptSubmit', prompt="that's wrong, not what I asked for")
         self.assertTrue(self._state().get('learn_pending'))
 
+    def test_text_the_user_did_not_type_is_not_a_correction(self):
+        """A subagent report, a notification and local command output reach the
+        hook as prompts. One per form: each quotes a correction phrase."""
+        for prompt in (
+            '<agent-message from="a1b2c3">\n[Subagent hand-back] the earlier claim is wrong; that\'s incorrect',
+            '<task-notification>\n<summary>build still failing</summary>\n</task-notification>',
+            '<system-reminder>\nreverte isso\n</system-reminder>',
+            '<local-command-stdout>undo that</local-command-stdout>',
+            '[SYSTEM NOTIFICATION - NOT USER INPUT]\nyou assumed the wrong file',
+        ):
+            with self.subTest(prompt=prompt[:24]):
+                result = self._learn('UserPromptSubmit', prompt=prompt)
+                self.assertEqual(result.stdout.strip(), '')
+                self.assertFalse(self._state().get('learn_pending'))
+
+    def test_a_pasted_block_is_not_the_users_words(self):
+        pasted = '<pasted_content id="ab12">\nstep 3: reverte o deploy; não é isso\n</pasted_content id="ab12">'
+        result = self._learn('UserPromptSubmit', prompt=f'segue o runbook\n\n{pasted}')
+        self.assertEqual(result.stdout.strip(), '')
+        self.assertFalse(self._state().get('learn_pending'))
+
+    def test_an_unclosed_pasted_block_runs_to_the_end(self):
+        self._learn('UserPromptSubmit', prompt='veja o log\n<pasted_content id="ab12">\nstill failing')
+        self.assertFalse(self._state().get('learn_pending'))
+
+    def test_a_correction_typed_around_a_pasted_block_still_counts(self):
+        pasted = '<pasted_content id="ab12">\nTraceback ...\n</pasted_content id="ab12">'
+        self._learn('UserPromptSubmit', prompt=f'não é isso, olha o erro:\n{pasted}')
+        self.assertTrue(self._state().get('learn_pending'))
+
     def test_state_claims_the_transcript_so_the_guard_does_not_reset_it(self):
         # context_guard resets state whenever session_file does not match the
         # live transcript. A flag written before the first tool call must survive.
@@ -205,6 +238,13 @@ class TestCorrectionDetection(_Base):
 # ── Learn gate (Stop) ─────────────────────────────────────────────────────────
 
 class TestLearnGate(_Base):
+
+    def test_the_token_only_in_the_message_that_ended_the_turn_clears_the_gate(self):
+        self._write(_ul('não é isso'))
+        self._set_state(learn_pending=True)
+        result = self._stop(final=f'{playbook_core.LEARNED_TOKEN} the rule is in CLAUDE.md')
+        self.assertNotEqual(_out(result).get('decision') if result.stdout.strip() else None, 'block')
+        self.assertFalse(self._state().get('learn_pending'))
 
     def test_stop_blocks_until_the_lesson_is_distilled(self):
         self._write(_ul('isso está errado') + _al('fixed it'))
@@ -303,6 +343,11 @@ class TestCarryover(_Base):
                     + _al('Done with the parser.\n[HANDOFF]\nNext: wire retries in '
                           'src/webhook.ts\n[/HANDOFF]\nRun /clear.'))
         self._stop()
+        self.assertIn('wire retries in src/webhook.ts', open(self.handoff).read())
+
+    def test_a_handoff_only_in_the_message_that_ended_the_turn_is_saved(self):
+        self._write(_ul('build the payment webhook'))
+        self._stop(final='Parser done.\n[HANDOFF]\nNext: wire retries in src/webhook.ts\n[/HANDOFF]\nRun /clear.')
         self.assertIn('wire retries in src/webhook.ts', open(self.handoff).read())
 
     def test_an_inline_mention_of_the_markers_is_not_saved(self):
@@ -726,6 +771,17 @@ class TestReviewFeedsLearning(_Base):
         result = self._stop()
         self.assertEqual(_out(result).get('decision'), 'block')
         self.assertIn('playbook:learn', _out(result).get('reason', ''))
+
+    def test_findings_only_in_the_message_that_ended_the_turn_arm_the_gate(self):
+        self._write(_ul('review and push'))
+        self._set_state(review_turn=True, reviewed_head='abc1234')
+        result = self._stop(final=self.REVIEW_OUTPUT)
+        self.assertIn('playbook:learn', _out(result).get('reason', ''))
+
+    def test_findings_on_disk_and_in_the_event_are_counted_once(self):
+        self._write(_ul('review and push') + _al(self.REVIEW_OUTPUT))
+        self._set_state(review_turn=True, reviewed_head='abc1234')
+        self.assertIn('reported 2 ', _out(self._stop(final=self.REVIEW_OUTPUT)).get('reason', ''))
 
     def test_findings_are_journaled_for_engineering_learn(self):
         self._write(_ul('review and push') + _al(self.REVIEW_OUTPUT))

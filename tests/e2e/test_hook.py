@@ -192,6 +192,21 @@ class TestSpecGate(_HookTest):
         self._assert_allowed(r)
         self._assert_stop_blocked('spec-gate')
 
+    def test_token_only_in_the_message_that_ended_the_turn_confirms(self):
+        self._write(_skill('engineering-governance') + _al('let me implement this'))
+        self._assert_allowed(self._pre('Write', {'file_path': 'src/user.ts', 'content': 'class User {}'}))
+        self._pre('Bash', {'command': 'npm test'})
+        r = _call(self.session_id, self.transcript, '', {}, event='Stop', extra={
+            'stop_hook_active': False, 'last_assistant_message': '[SPEC CONFIRMED] — added the User class.'})
+        self.assertNotEqual(_out(r).get('decision') if r.stdout.strip() else None, 'block', r.stdout)
+
+    def test_a_final_message_without_the_token_still_blocks(self):
+        self._write(_skill('engineering-governance') + _al('let me implement this'))
+        self._pre('Write', {'file_path': 'src/user.ts', 'content': 'class User {}'})
+        r = _call(self.session_id, self.transcript, '', {}, event='Stop', extra={
+            'stop_hook_active': False, 'last_assistant_message': 'Added the User class.'})
+        self.assertIn('spec-gate', _out(r).get('reason', ''))
+
     def test_write_allowed_when_token_in_current_turn(self):
         self._write(_READY)
         r = self._pre('Write', {'file_path': 'src/user.ts', 'content': 'class User {}'})
@@ -604,6 +619,35 @@ class TestSubagentIsolation(_HookTest):
         r = self._stop()
         self.assertEqual(r.returncode, 0)
         self.assertNotEqual(_out(r).get('decision'), 'block', f'parent Stop blocked: {r.stdout!r}')
+
+    # ── A subagent loads governance for itself ────────────────────────────────
+
+    def _agent_skill(self, name: str, response: dict) -> None:
+        _call(self.session_id, self.transcript, 'Skill', {'skill': name}, event='PostToolUse',
+              extra={'agent_id': self.agent_id, 'agent_type': 'general-purpose', 'tool_response': response})
+
+    def test_subagent_that_loaded_governance_may_write(self):
+        """The parent never loaded it, and the subagent's Skill call is not in
+        the transcript its events carry. Regression: three subagents could not
+        save a script after loading the skill and retrying."""
+        self._write(_ul('measure the sessions') + _al('delegating'))
+        self._write_agent(_ul('write the script'))
+        write = ('Write', {'file_path': 'scripts/measure.py', 'content': 'x = 1'})
+        self._assert_denied(self._agent_pre(*write), 'skill-gate')
+        self._agent_skill('engineering-playbook:engineering-governance', {'success': True})
+        self._assert_allowed(self._agent_pre(*write))
+
+    def test_subagent_load_does_not_open_the_gate_for_the_parent(self):
+        self._write(_ul('measure the sessions') + _al('delegating'))
+        self._agent_skill('engineering-governance', {'success': True})
+        self._assert_denied(self._pre('Write', {'file_path': 'src/a.py', 'content': 'x = 1'}), 'skill-gate')
+
+    def test_another_skill_or_a_failed_load_does_not_open_the_gate(self):
+        self._write(_ul('measure the sessions') + _al('delegating'))
+        self._agent_skill('engineering-testing', {'success': True})
+        self._agent_skill('engineering-governance', {'is_error': True, 'error': 'unknown skill'})
+        self._assert_denied(
+            self._agent_pre('Write', {'file_path': 'scripts/measure.py', 'content': 'x = 1'}), 'skill-gate')
 
     # ── Parent is not charged for subagent work ───────────────────────────────
 
