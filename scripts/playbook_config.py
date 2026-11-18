@@ -94,12 +94,15 @@ CHOICES: dict[str, list[tuple[str, str]]] = {
     'prose': [(level, level) for level in playbook_core.PROSE_LEVELS],
     'watch': [('on', 'on'), ('off', 'off')],
     'claude_md_budget': [('0', 'off'), ('20000', '20k'), ('40000', '40k'), ('80000', '80k')],
-    'context_budget': [('0', 'off'), ('250000', '250k'), ('400000', '400k'),
-                       ('550000', '550k'), ('800000', '800k')],
+    'context_budget': [('0', 'off'), ('550000', '550k'), ('650000', '650k'), ('850000', '850k')],
     'language': list(playbook_i18n.LANGUAGE_LABELS.items()),
 }
 
 _TRANSLATED_CHOICES = ('on', 'off')
+
+# Settings the panel also offers a typed value for: its "custom" entry hands
+# the request to the model, which asks for the number and runs `set`.
+CUSTOM_VALUE_KEYS = ('context_budget',)
 
 
 def _as_choice(value: object) -> str:
@@ -132,6 +135,7 @@ def snapshot(prefs: dict, harness: str = 'claude', environ: dict | None = None) 
                 'default': _as_choice(playbook_core.PREFS_DEFAULTS[key]),
                 'choices': [{'value': value, 'label': _choice_label(label, language)}
                             for value, label in CHOICES[key]],
+                'custom': key in CUSTOM_VALUE_KEYS,
             }
             for key, description in DESCRIPTIONS.items() if key in HARNESS_SETTINGS[harness]
         ],
