@@ -13,6 +13,8 @@ export type ConfigSetting = {
   value: string
   default: string
   choices: ConfigChoice[]
+  // Whether the setting screen also offers a typed value, which the model asks for.
+  custom: boolean
 }
 
 // The panel's own strings, already in the person's language
@@ -32,6 +34,7 @@ export type PanelText = {
   diff: string
   back: string
   exit: string
+  custom: string
   lab_title: string
   lab_help: string
   lab_setup: string

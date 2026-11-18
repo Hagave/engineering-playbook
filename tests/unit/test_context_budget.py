@@ -32,9 +32,15 @@ class TestCheckBudget(unittest.TestCase):
         cg._AGENT_ID = ''
         self.addCleanup(setattr, cg, '_AGENT_ID', '')
 
-    def test_off_by_default(self):
-        self.assertEqual(playbook_core.PREFS_DEFAULTS['context_budget'], 0)
-        self.assertIsNone(cg._check_budget(900_000, {}, dict(playbook_core.PREFS_DEFAULTS)))
+    def test_550k_by_default(self):
+        defaults = dict(playbook_core.PREFS_DEFAULTS)
+        self.assertEqual(defaults['context_budget'], 550_000)
+        self.assertIsNone(cg._check_budget(549_999, {}, defaults))
+        self.assertIsNotNone(cg._check_budget(550_000, {}, defaults))
+
+    def test_zero_turns_it_off(self):
+        prefs = {**playbook_core.PREFS_DEFAULTS, 'context_budget': 0}
+        self.assertIsNone(cg._check_budget(900_000, {}, prefs))
 
     def test_below_budget_is_silent(self):
         self.assertIsNone(cg._check_budget(99_999, {}, PREFS))
