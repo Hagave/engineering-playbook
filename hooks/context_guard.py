@@ -133,6 +133,10 @@ COMMAND_NAME_RE = re.compile(r'<command-name>/?([\w:.-]+)</command-name>')
 _SESSION_ID = ''  # set by main() from hook stdin
 _AGENT_ID = ''    # set by main(); non-empty only for a subagent's own events
 _CWD = ''         # set by main(); the repo the hook is guarding
+# Set by main() on Stop and SubagentStop: the message that ended the turn, as
+# the event carries it. The transcript does not hold it yet when the hook runs
+# (captured on Claude Code 2.1.327: zero assistant records on disk at Stop).
+_FINAL_TEXT = ''
 
 
 def _state_path() -> str:
@@ -640,6 +644,8 @@ def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
     Absence of evidence is only fail-open when the window actually truncated the
     history. When the whole transcript fits inside it, a missing token really is
     a missing token, and the gate must still fire."""
+    if token in _FINAL_TEXT:
+        return True
     if not transcript or not os.path.exists(transcript):
         return True
     try:
@@ -706,7 +712,7 @@ def _review_findings(transcript: str | None) -> int:
     heading and produces no bullets, so a clean review never arms anything."""
     if not transcript or not os.path.exists(transcript):
         return 0
-    text_blocks: list[str] = []
+    text_blocks: list[str] = [] if not _FINAL_TEXT else [_FINAL_TEXT]
     for line in reversed(_read_tail_lines(transcript)):
         try:
             obj = json.loads(line)
@@ -715,7 +721,7 @@ def _review_findings(transcript: str | None) -> int:
         if _is_user_prompt(obj):
             break
         text = _assistant_text(obj)
-        if text:
+        if text and text != _FINAL_TEXT:
             text_blocks.append(text)
     findings = 0
     for text in text_blocks:
@@ -1042,8 +1048,8 @@ def _emit_pretooluse(result: dict) -> None:
 def _turn_assistant_text(transcript: str | None) -> str:
     """Assistant text emitted after the most recent real user message."""
     if not transcript or not os.path.exists(transcript):
-        return ''
-    parts: list[str] = []
+        return _FINAL_TEXT
+    parts: list[str] = [] if not _FINAL_TEXT else [_FINAL_TEXT]
     for line in reversed(_read_tail_lines(transcript)):
         try:
             obj = json.loads(line)
@@ -1052,7 +1058,7 @@ def _turn_assistant_text(transcript: str | None) -> str:
         if _is_user_prompt(obj):
             break
         text = _assistant_text(obj)
-        if text:
+        if text and text != _FINAL_TEXT:
             parts.append(text)
     return '\n'.join(reversed(parts))
 
@@ -1396,7 +1402,7 @@ def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global _SESSION_ID, _AGENT_ID, _CWD
+    global _SESSION_ID, _AGENT_ID, _CWD, _FINAL_TEXT
     try:
         input_data = json.load(sys.stdin)
     except Exception:
@@ -1417,6 +1423,7 @@ def main() -> None:
         state = {'session_file': transcript, 'locked': False}
 
     if event in ('Stop', 'SubagentStop'):
+        _FINAL_TEXT = str(input_data.get('last_assistant_message') or '')
         spec_transcript = input_data.get('agent_transcript_path') if _AGENT_ID else transcript
         _handle_stop(input_data, state, transcript, spec_transcript)
     elif event == 'PostToolUse':
