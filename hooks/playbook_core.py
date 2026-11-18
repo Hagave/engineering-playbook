@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 import time
 import warnings
+from enum import Enum, auto
 from typing import NamedTuple
 
 import playbook_i18n
@@ -2134,46 +2135,77 @@ def pushed_tag_attribution(cwd: str, revs: list[str]) -> list[str] | None:
             if every_tag or name in named or target in commits][:_ATTRIBUTION_LISTED]
 
 
-# Options of `git push` that consume the next argument; every other option is
-# a flag or takes its value after `=`.
-_PUSH_VALUE_OPTS = frozenset({'-o', '--push-option', '--receive-pack', '--exec', '--repo'})
+class _PushOpt(Enum):
+    """What a `git push` option does to what the push publishes."""
+    NOTHING = auto()         # publishes what the refspecs name, no more
+    OPTIONAL_VALUE = auto()  # as NOTHING; a value only after `=`
+    VALUE = auto()           # as NOTHING; its value is the next word, or after `=`
+    DRY_RUN = auto()
+    DELETE = auto()
+    BRANCHES = auto()
+    TAGS = auto()
+    MIRROR = auto()
+
+
+# Every option the push gates read, spelled exactly as `git push -h` lists it.
+# Any other word starting with `-` makes the push unknown: no prefix
+# abbreviation (`--dr`), no short-flag bundle (`-fn`), no `--no-` negation
+# (`--no-verify` is an option of its own), so a dry run or a delete seen once
+# stays in effect. The cost is a denied push that a retry in plain spelling
+# passes. `--recurse-submodules` is left out: it pushes other repositories.
+# `--follow-tags` publishes no commit the refspecs do not; its tags are read by
+# `pushed_tag_attribution`, which misses one on an already-published commit,
+# as it does for `push.followTags`, which a plain push obeys anyway.
+_PUSH_OPTIONS: dict[str, _PushOpt] = {
+    **dict.fromkeys(('-v', '--verbose', '-q', '--quiet', '--porcelain', '--progress',
+                     '-u', '--set-upstream', '-f', '--force', '--force-if-includes',
+                     '--atomic', '--no-verify', '--verify', '--prune', '--thin',
+                     '--follow-tags', '-4', '--ipv4', '-6', '--ipv6'), _PushOpt.NOTHING),
+    **dict.fromkeys(('--force-with-lease', '--signed'), _PushOpt.OPTIONAL_VALUE),
+    **dict.fromkeys(('-o', '--push-option', '--receive-pack', '--exec', '--repo'),
+                    _PushOpt.VALUE),
+    '-n': _PushOpt.DRY_RUN, '--dry-run': _PushOpt.DRY_RUN,
+    '-d': _PushOpt.DELETE, '--delete': _PushOpt.DELETE,
+    '--all': _PushOpt.BRANCHES, '--branches': _PushOpt.BRANCHES,
+    '--tags': _PushOpt.TAGS,
+    '--mirror': _PushOpt.MIRROR,
+}
+_PUSH_RUN_TIME = 'a refspec is built at run time'
 # A shell redirection among the words (`2>/dev/null`, `> log`, `2>`). Not a
 # refspec: read as one, `git log` fails on it and the push fails closed.
 _REDIRECT_RE = re.compile(r'^\d*(?:>>?|<)')
 _REDIRECT_ONLY_RE = re.compile(r'^\d*(?:>>?|<)$')
 
 
-def _push_dry_run_flag(arg: str) -> bool | None:
-    """Whether a `git push` word turns the dry run on (True) or off (False);
-    None for any other word. git takes `-n` bundled with other short flags
-    (`-fn`; after `-o` the rest of the bundle is its value) and a long option
-    cut to any unambiguous prefix (`--dr`, `--no-dry`)."""
-    if arg.startswith('--'):
-        if len(arg) >= len('--dr') and '--dry-run'.startswith(arg):
-            return True
-        if len(arg) >= len('--no-dr') and '--no-dry-run'.startswith(arg):
-            return False
-        return None
-    if arg.startswith('-') and 'n' in arg[1:].split('o', 1)[0]:
-        return True
-    return None
+def _unknown_push_option(word: str) -> str:
+    return (f'it does not read the option `{word}`: spell each option in full and on its '
+            'own, as `git push -h` lists it (`-f -n`, not `-fn`; `--dry-run`, not `--dr`); '
+            'a `--no-` negation and `--recurse-submodules` are never read, so drop them or '
+            'ask the user to run the push')
 
 
 def push_revisions(args: list[str]) -> list[str] | None:
     """Revisions a `git push` with these arguments (the words after `push`)
-    would publish, as `git log` revision arguments.
+    would publish, as `git log` revision arguments; None when they cannot be
+    known before the shell runs it (`read_push` says why)."""
+    return read_push(args)[0]
+
+
+def read_push(args: list[str]) -> tuple[list[str] | None, str]:
+    """The revisions a push with these arguments publishes, or None with the
+    reason.
 
     No refspec means the current branch, which is what `push.default` simple,
     current and upstream all push. `src:dst` publishes `src`, `:dst` and
     `--delete` publish nothing, a bare `:` publishes every matching branch
     (`--branches`), a glob goes through `--glob`, and a dry run publishes
-    nothing unless a later `--no-dry-run` turns it off. None when an argument
-    is built at run time (a variable or a command substitution) and so cannot
-    be known before the shell runs it, even in a dry run: the word may be the
-    `--no-dry-run`."""
+    nothing. None for a word built at run time (a variable or a command
+    substitution), an option outside `_PUSH_OPTIONS`, and a refspec whose
+    source starts with `-` (after `--`, or behind `+`), which `git log` would
+    take as an option."""
     revs: list[str] = []
     positional: list[str] = []
-    dry_run = deleting = skip_next = False
+    dry_run = deleting = skip_next = options_ended = False
     for arg in args:
         if skip_next:
             skip_next = False
@@ -2182,27 +2214,35 @@ def push_revisions(args: list[str]) -> list[str] | None:
             skip_next = bool(_REDIRECT_ONLY_RE.match(arg))  # `> file`: the file too
             continue
         if '$' in arg or '`' in arg:
-            return None
-        dry = _push_dry_run_flag(arg)
-        if dry is not None:
-            dry_run = dry
-        elif arg in _PUSH_VALUE_OPTS:
-            skip_next = True
-        elif arg in ('--all', '--branches'):
-            revs.append('--branches')
-        elif arg == '--mirror':
-            revs += ['--branches', '--tags']
-        elif arg == '--tags':
-            revs.append('--tags')
-        elif arg in ('-d', '--delete'):
-            deleting = True
-        elif not arg.startswith('-'):
+            return None, _PUSH_RUN_TIME
+        if options_ended or not arg.startswith('-'):
             positional.append(arg)
+            continue
+        if arg == '--':
+            options_ended = True
+            continue
+        name, equals, _ = arg.partition('=') if arg.startswith('--') else (arg, '', '')
+        meaning = _PUSH_OPTIONS.get(name)
+        if meaning is None or (equals and meaning not in (_PushOpt.VALUE,
+                                                          _PushOpt.OPTIONAL_VALUE)):
+            return None, _unknown_push_option(arg)
+        if meaning is _PushOpt.VALUE:
+            skip_next = not equals
+        elif meaning is _PushOpt.DRY_RUN:
+            dry_run = True
+        elif meaning is _PushOpt.DELETE:
+            deleting = True
+        elif meaning is _PushOpt.BRANCHES:
+            revs.append('--branches')
+        elif meaning is _PushOpt.TAGS:
+            revs.append('--tags')
+        elif meaning is _PushOpt.MIRROR:
+            revs += ['--branches', '--tags']
     if dry_run:
-        return []
+        return [], ''
     refspecs = positional[1:]  # positional[0] is the remote
     if deleting:
-        return revs
+        return revs, ''
     # `git push <remote> tag <name>` is git's spelling of refs/tags/<name>.
     specs: list[str] = []
     for at, spec in enumerate(refspecs):
@@ -2216,11 +2256,13 @@ def push_revisions(args: list[str]) -> list[str] | None:
             revs.append('--branches')
             continue
         src = bare.split(':', 1)[0]
+        if src.startswith('-'):
+            return None, f'the refspec `{spec}` starts with `-`'
         if src:
             revs.append(f'--glob={src}' if '*' in src else src)
     if revs or refspecs:  # refspecs that were all `:dst` deletions publish nothing
-        return revs
-    return ['HEAD']
+        return revs, ''
+    return ['HEAD'], ''
 
 
 def _attribution_listing(found: list[str]) -> str:
@@ -2260,9 +2302,8 @@ def push_targets(command: str, cwd: str) -> list[PushTarget]:
         if call.repo is None:
             targets.append(PushTarget(None, None, call.reason))
             continue
-        revs = push_revisions(call.args)
-        targets.append(PushTarget(call.repo, revs, '' if revs is not None
-                                  else 'a refspec is built at run time'))
+        revs, reason = read_push(call.args)
+        targets.append(PushTarget(call.repo, revs, reason))
     return targets
 
 
