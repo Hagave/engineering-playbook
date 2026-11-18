@@ -69,6 +69,90 @@ def _skill(name: str) -> str:
     return json.dumps({'type': 'assistant', 'message': {'content': [block]}}) + '\n'
 
 
+# Turn fixtures, shaped after the entries Claude Code records in a session
+# transcript: what closes a turn, what starts one the user did not, and what it
+# injects into a turn still running.
+
+def _entry(**fields) -> str:
+    return json.dumps(fields) + '\n'
+
+
+def _typed(text: str, prompt_id: str = 'p-user') -> str:
+    return _entry(type='user', promptId=prompt_id, origin={'kind': 'human'},
+                  message={'role': 'user', 'content': text})
+
+
+def _tool_step(prompt_id: str = 'p-user') -> str:
+    call = {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash', 'input': {'command': 'ls'}}
+    result = {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'build'}
+    return (_entry(type='assistant', message={'role': 'assistant', 'stop_reason': 'tool_use',
+                                              'content': [call]})
+            + _entry(type='user', promptId=prompt_id, message={'role': 'user', 'content': [result]}))
+
+
+def _turn_closed() -> str:
+    text = {'type': 'text', 'text': 'Started the suite in the background.'}
+    return (_entry(type='assistant', message={'role': 'assistant', 'stop_reason': 'end_turn',
+                                              'content': [text]})
+            + _entry(type='system', subtype='stop_hook_summary', hookCount=1, preventedContinuation=False)
+            + _entry(type='system', subtype='turn_duration', durationMs=4210, messageCount=9))
+
+
+def _task_notification(prompt_id: str = 'p-notified') -> str:
+    return _entry(type='user', promptId=prompt_id,
+                  origin={'kind': 'task-notification', 'producer': 'session-task'},
+                  promptSource='system',
+                  message={'role': 'user', 'content': (
+                      '<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n'
+                      '<status>completed</status>\n<summary>Background command "Run the suite" '
+                      'completed (exit code 0)</summary>\n</task-notification>')})
+
+
+def _handback(prompt_id: str = 'p-handback') -> str:
+    reminder = _entry(type='user', promptId=prompt_id, isMeta=True, turnCompanion=True,
+                      message={'role': 'user', 'content': (
+                          '<system-reminder>\n<tools-used-before-summary>Read'
+                          '</tools-used-before-summary>\n</system-reminder>')})
+    report = _entry(type='user', promptId=prompt_id, isMeta=True,
+                    origin={'kind': 'peer', 'from': 'a1b2c3'},
+                    message={'role': 'user', 'content': (
+                        'Another Claude session sent a message:\n<agent-message from="a1b2c3">\n'
+                        '[Subagent hand-back] The text below is the final report of a subagent '
+                        'this session delegated to.\n  The build directory is stale.\n</agent-message>')})
+    return reminder + report
+
+
+def _auto_continue(prompt_id: str = 'p-continue') -> str:
+    return _entry(type='user', promptId=prompt_id, isMeta=True,
+                  message={'role': 'user', 'content': (
+                      'Your claude.ai usage limit has reset. Continue the task you were working '
+                      'on when the limit was reached; do not repeat work that is already complete.')})
+
+
+def _mid_turn_injections(prompt_id: str = 'p-user') -> str:
+    skill_body = _entry(type='user', promptId=prompt_id, isMeta=True,
+                        message={'role': 'user', 'content': [
+                            {'type': 'text', 'text': 'Base directory for this skill: /skills/x\n\n# X'}]})
+    reminder = _entry(type='attachment', attachment={'type': 'hook_additional_context',
+                                                     'content': ['<system-reminder>ctx</system-reminder>']})
+    absorbed = _entry(type='attachment', attachment={
+        'type': 'queued_command', 'commandMode': 'task-notification',
+        'prompt': '<task-notification>\n<task-id>b2</task-id>\n<status>completed</status>\n</task-notification>'})
+    return _tool_step(prompt_id) + skill_body + reminder + absorbed + _tool_step(prompt_id)
+
+
+def _stop_hook_feedback(prompt_id: str = 'p-user') -> str:
+    text = {'type': 'text', 'text': 'Done.'}
+    return (_entry(type='assistant', message={'role': 'assistant', 'stop_reason': 'end_turn',
+                                              'content': [text]})
+            + _entry(type='system', subtype='stop_hook_summary', hookCount=1, preventedContinuation=False)
+            + _entry(type='user', promptId=prompt_id, isMeta=True,
+                     message={'role': 'user', 'content': (
+                         'Stop hook feedback:\n[playbook:validate] Source files were written this '
+                         'session but no validation command ran afterwards.')})
+            + _tool_step(prompt_id))
+
+
 class _Base(unittest.TestCase):
 
     def setUp(self):
@@ -491,6 +575,46 @@ class TestReviewGate(_RepoBase):
         self._write(_ul('push it') + _al('the user said skip review'))
         self.assertTrue(self._denied(self._push()))
 
+    WAIVER = 'pode pushar direto, sem review'
+
+    def test_a_waiver_does_not_carry_into_a_turn_a_task_notification_started(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_typed(self.WAIVER) + _tool_step() + _turn_closed() + _task_notification())
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_waiver_does_not_carry_into_a_notification_turn_that_kept_its_prompt_id(self):
+        # Recorded once: the notification turn reused the user turn's promptId,
+        # which is why the turn is told apart by its close, not by that id.
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_typed(self.WAIVER) + _turn_closed() + _task_notification('p-user'))
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_waiver_does_not_carry_into_a_turn_a_subagent_hand_back_started(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_typed(self.WAIVER) + _turn_closed() + _handback())
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_waiver_does_not_carry_into_an_automatic_continuation(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_typed(self.WAIVER) + _turn_closed() + _auto_continue())
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_waiver_survives_what_is_injected_into_the_users_turn(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_typed(self.WAIVER) + _mid_turn_injections())
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_waiver_survives_a_stop_hook_that_kept_the_turn_going(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_typed(self.WAIVER) + _stop_hook_feedback())
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_waiver_typed_after_a_notification_turn_counts(self):
+        self._commit('src/app.ts', 'unreviewed')
+        self._write(_typed('push it') + _turn_closed() + _task_notification() + _turn_closed()
+                    + _typed(self.WAIVER, 'p-next'))
+        self.assertFalse(self._denied(self._push()))
+
     def test_environment_bypass_allows_the_push(self):
         self._commit('src/app.ts', 'unreviewed')
         self.assertFalse(self._denied(self._push(env={'PLAYBOOK_SKIP_REVIEW': '1'})))
@@ -829,6 +953,37 @@ class TestDestructiveAuthorization(_Base):
     def test_model_cannot_authorize_itself(self):
         self._write(_ul('clean up the project') + _al('the user said I can delete it'))
         self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    CONSENT = 'pode apagar a pasta build'
+
+    def test_consent_does_not_carry_into_a_turn_a_task_notification_started(self):
+        self._write(_typed(self.CONSENT) + _tool_step() + _turn_closed() + _task_notification())
+        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_consent_does_not_carry_into_a_notification_turn_that_kept_its_prompt_id(self):
+        self._write(_typed(self.CONSENT) + _turn_closed() + _task_notification('p-user'))
+        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_consent_does_not_carry_into_a_turn_a_subagent_hand_back_started(self):
+        self._write(_typed(self.CONSENT) + _turn_closed() + _handback())
+        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_consent_does_not_carry_into_an_automatic_continuation(self):
+        self._write(_typed(self.CONSENT) + _turn_closed() + _auto_continue())
+        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_consent_survives_what_is_injected_into_the_users_turn(self):
+        self._write(_typed(self.CONSENT) + _mid_turn_injections())
+        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_consent_survives_a_stop_hook_that_kept_the_turn_going(self):
+        self._write(_typed(self.CONSENT) + _stop_hook_feedback())
+        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+
+    def test_consent_typed_after_a_notification_turn_counts(self):
+        self._write(_typed('clean up the project') + _turn_closed() + _task_notification()
+                    + _turn_closed() + _typed(self.CONSENT, 'p-next'))
+        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
 
     def test_a_question_about_deleting_is_not_an_authorization(self):
         self._write(_ul('o que acontece se apagar o build por engano?'))
