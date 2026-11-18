@@ -1503,6 +1503,12 @@ VALIDATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def is_validation_command(command: str) -> bool:
+    """A Bash command that validates, read with heredoc bodies and interpreter
+    payloads stripped: a doc that merely mentions `npm test` validates nothing."""
+    return bool(VALIDATION_RE.search(strip_inline_payloads(strip_heredoc_bodies(command))))
+
 # Static analysis engines the playbook delegates to when one is installed. Never
 # bundled: the engine is LGPL and the community rules may not be redistributed,
 # so the playbook only tells the model how to run what the user already has.
