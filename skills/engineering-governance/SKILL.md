@@ -93,7 +93,9 @@ After receiving answers: summarize your understanding before starting implementa
 
 ## Before implementing
 
-If a simpler approach exists, surface it explicitly before starting. Push back when the requested approach is more complex than the problem warrants. Do not silently implement the complex path.
+If a simpler approach exists, surface it explicitly before starting. Push back when the requested approach is more complex than the problem warrants. Do not silently implement the complex path. The same holds when the requested or the obvious path works but a structurally better one exists: say so before taking it, unasked. The user may not be a programmer and cannot be expected to spot it.
+
+**The second case of a kind is a stop.** Before writing the second fix of the same kind — another spelling, another edge value, another branch for another variant — stop, name the class the cases belong to, and propose the design that removes the class. For a check over input, that design is the closed set in `engineering-security` (*Input validation*). A brief written for a subagent that says "also handle form Y" is the same signal.
 
 If multiple valid interpretations of the task exist, present them — do not pick one silently.
 

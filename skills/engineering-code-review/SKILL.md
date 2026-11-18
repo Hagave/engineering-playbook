@@ -203,6 +203,7 @@ The rule is in `engineering-governance` (*Writing code*): a comment states an ac
 - Hardcoded secret, API key, or credential anywhere in code.
 - The diff touches a sink listed in the `engineering-security` fiche table: read that fiche and check its **Review signal** list against the diff.
 - A security control was added or changed without the negative tests from its fiche (see `engineering-testing`).
+- A check over input with many spellings that rejects or special-cases the forms it lists while forms it does not recognise pass through, or a fix that adds one more form to such a check instead of closing the set (see *Input validation* in `engineering-security`). Confirm it by naming one form outside the recognised set that gets through. In a security control or a gate it is a Blocker; elsewhere it is Major, and a Blocker once a form it lets through is shown to give a wrong result.
 
 **Security scope of a diff.** Besides the lines it adds, a diff is in scope for security when it does any of these:
 - makes a pre-existing sink newly reachable from input (a new route to an old raw query, a new caller of an unchecked path builder);
@@ -235,8 +236,8 @@ Pre-existing issues the diff neither touches nor reaches stay out of scope.
 
 | Severity | Definition | Examples |
 |---|---|---|
-| **Blocker** | Must be fixed before merge | Security vulnerability, broken contract, data loss risk, incorrect behavior, missing auth, race condition on shared state |
-| **Major** | Should be fixed before merge | N+1 query, layer boundary violation, missing test coverage for critical path, unhandled error path, mutable singleton state, business rule implemented in more than one place, comment outside the two allowed reasons |
+| **Blocker** | Must be fixed before merge | Security vulnerability, broken contract, data loss risk, incorrect behavior, missing auth, race condition on shared state, security control or gate that lets unrecognised forms through |
+| **Major** | Should be fixed before merge | N+1 query, layer boundary violation, missing test coverage for critical path, unhandled error path, mutable singleton state, business rule implemented in more than one place, comment outside the two allowed reasons, check over input that is not a closed set (outside a security control or gate) |
 | **Minor** | Can be addressed in follow-up | Style issue, naming improvement, non-critical optimization, optional test improvement, repeated mechanical helper with no business rule in it |
 
 ---
