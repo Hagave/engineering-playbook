@@ -24,7 +24,7 @@ On request, and automatically before every push — the PreToolUse hook denies `
 
 Scope for a pre-push review is `git diff <upstream>...HEAD` — everything the push would publish, not just the last commit.
 
-**Bypass.** Only the user can waive it, in their own words ("pode pushar sem review", "skip review", "no review needed"; a phrase that does not name the review, such as "pode pushar", is not a waiver), or with `PLAYBOOK_SKIP_REVIEW=1` in the environment. Never waive it on your own judgment, never suggest the bypass as a way past your own findings, and never write the bypass phrase yourself — the gate reads the user's message, not yours.
+**Bypass.** Only the user can skip it: by running the push themselves, or by starting Claude Code with `PLAYBOOK_SKIP_REVIEW=1` in the environment. Nothing typed in the chat lifts the gate. Never skip it on your own judgment and never suggest the bypass as a way past your own findings.
 
 **Blockers block the push.** Report them and fix them. Do not push with an open Blocker unless the user, after seeing it, says to.
 

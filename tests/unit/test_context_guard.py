@@ -926,16 +926,6 @@ class TestDestructiveFalsePositives(unittest.TestCase):
                 mock.patch.object(cg, '_SESSION_ID', ''):
             self.assertEqual(cg._session_scratchpad(), '')
 
-    def test_review_waiver_names_the_review(self):
-        for text in ('pode pushar sem review', 'skip review', 'pula o review',
-                     'no review needed'):
-            with self.subTest(text=text):
-                self.assertTrue(playbook_core.REVIEW_BYPASS_RE.search(text))
-        for text in ('no review comments so far', 'pode pushar', 'pode dar push',
-                     'push direto', 'deixa assim', 'deixa passar'):
-            with self.subTest(text=text):
-                self.assertFalse(playbook_core.REVIEW_BYPASS_RE.search(text))
-
 
 class TestInlinePayloadFalsePositives(unittest.TestCase):
     """An inline interpreter payload is another language's source, not shell
