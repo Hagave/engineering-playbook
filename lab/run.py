@@ -37,7 +37,9 @@ How the scope is enforced, outermost first:
 Nothing is kept. The report is written to a temporary directory, printed,
 and deleted; the lab's containers, network, volumes and locally built images
 are removed when the run ends, also on error or Ctrl-C; a removal that fails
-is reported with the command that finishes it. Only the scanner images (ZAP,
+is reported with the command that finishes it; what a killed run could not
+remove is removed by the next run of the same project, before it starts
+(one run per project at a time, under a lock). Only the scanner images (ZAP,
 pulled; sqlmap, built from pinned source) stay in Docker's cache, so the next
 run does not fetch them again; `--uninstall` removes them.
 
@@ -54,6 +56,7 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -310,10 +313,11 @@ def bind_mounts(config: dict) -> list[str]:
             if not isinstance(volume, dict):
                 continue
             source, target = volume.get('source'), volume.get('target')
+            mode = ' (read-only)' if volume.get('read_only') else ''
             if volume.get('type') == 'bind':
-                found.append(f'{name}: {source} -> {target}')
+                found.append(f'{name}: {source} -> {target}{mode}')
             elif volume.get('type') == 'volume' and source in host_volumes:
-                found.append(f'{name}: {host_volumes[source]} (volume {source!r}) -> {target}')
+                found.append(f'{name}: {host_volumes[source]} (volume {source!r}) -> {target}{mode}')
     return found
 
 
@@ -542,7 +546,8 @@ def validate_lab_config(config: dict, target_service: str, report_dir: str,
         if found:
             problems.append(
                 'the project mounts folders of this computer into its containers, so the '
-                'lab would read and write the same files as your development setup:\n    '
+                'lab would use the same files as your development setup (reading them, '
+                'and writing those not marked read-only):\n    '
                 + '\n    '.join(found)
                 + '\n  Re-run with --allow-bind-mounts if that is acceptable for this scan.')
     return problems
@@ -671,8 +676,12 @@ def scan(args: argparse.Namespace) -> int:
                        + (f' ({ZAP_DOWNLOAD_HINT}).' if tool == 'zap' else '.'))
     base = resolved_config(args.project_dir, args.compose_file)
     project = _project_name(args.project_dir)
+    lock = acquire_lab_lock(project)
+    remove_stale_workdirs(project)
 
-    workdir = tempfile.mkdtemp(prefix='redlab-')  # 0700: only this user can enter
+    # 0700: only this user can enter. The '.' ends the prefix that
+    # remove_stale_workdirs matches; it is not in a project name.
+    workdir = tempfile.mkdtemp(prefix=f'{project}.')
     report_dir = os.path.join(workdir, 'report')
     os.mkdir(report_dir)
     # The scanner runs as its own user in the container; it reaches this
@@ -702,6 +711,12 @@ def scan(args: argparse.Namespace) -> int:
             raise LabError('Refused — the lab would not be isolated:\n  - '
                            + '\n  - '.join(problems))
 
+        # Holding the lock, anything under this project name is a leftover: a
+        # run killed before its teardown (SIGKILL, power loss). Removed here so
+        # it neither accumulates nor leaks state into this run.
+        if not teardown(project, config_file):
+            raise LabError('A previous lab run of this project left containers that could '
+                           'not be removed (see above); nothing was started.', EXIT_ERROR)
         print(f'Starting an isolated copy of the stack (compose project {project!r})...',
               flush=True)
         started = True
@@ -759,6 +774,7 @@ def scan(args: argparse.Namespace) -> int:
                 print('[lab] the lab was removed.', file=sys.stderr)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+            os.close(lock)
 
 
 def teardown(project: str, config_file: str) -> bool:
@@ -783,6 +799,65 @@ def teardown(project: str, config_file: str) -> bool:
               file=sys.stderr)
         return False
     return True
+
+
+def acquire_lab_lock(project: str) -> int:
+    """Hold the lab of `project` for this run; the returned descriptor is the
+    lock, released by closing it, and by the kernel when the process dies
+    (SIGKILL included), so a crashed run never leaves the project locked.
+    Two sessions scanning the same project share its compose project name: the
+    second is refused here instead of tearing down the first one's lab as a
+    leftover. The file is never deleted: removing a lock file while another
+    process waits on it would let two runs hold the same name.
+    Its name is predictable in the shared temporary directory, so a link
+    planted there is not followed and a file another user created first is
+    refused, both reported instead of used."""
+    try:
+        import fcntl  # POSIX only, imported here so Windows gets the message below
+    except ImportError:
+        raise LabError('The lab needs Linux or macOS: on Windows, run it from WSL 2.',
+                       EXIT_ERROR) from None
+    path = os.path.join(tempfile.gettempdir(), f'{project}-{os.getuid()}.lock')
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise LabError(f'Could not open the lab lock {path}: {exc}', EXIT_ERROR) from exc
+    if os.fstat(fd).st_uid != os.getuid():
+        os.close(fd)
+        raise LabError(f'The lab lock {path} belongs to another user; nothing was started.',
+                       EXIT_ERROR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise LabError(f'Another lab run of this project is in progress (compose project '
+                       f'{project!r}); wait for it to finish.') from None
+    return fd
+
+
+def remove_stale_workdirs(project: str) -> None:
+    """Remove the work dirs earlier runs of `project` left: a run killed before
+    its `finally` (SIGKILL, power loss) keeps compose.json, which holds the
+    resolved environment values. Called holding the project's lock, so none
+    of them is in use. Only directories this user owns are removed, never a
+    link; the '.' ending the prefix keeps `redlab-api.*` from matching
+    `redlab-api-v2.*`."""
+    base = tempfile.gettempdir()
+    prefix = f'{project}.'
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(base, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def _terminate(signum: int, _frame: object) -> None:
