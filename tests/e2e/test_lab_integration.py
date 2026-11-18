@@ -146,5 +146,73 @@ class TestLabRun(unittest.TestCase):
         self.assertEqual(self._leftovers(), [])
 
 
+@unittest.skipUnless(os.environ.get('PLAYBOOK_LAB_IT') == '1',
+                     'opt-in: PLAYBOOK_LAB_IT=1 (needs Docker, git and the scanner image)')
+class TestGateRun(unittest.TestCase):
+    """--gate builds and scans the committed tree, not the working tree, and
+    records the result against the commit. A unit test mocks git and Docker, so
+    the real behaviour — building from a worktree of the commit — is proven here:
+    the working tree is left with a Dockerfile that cannot build, so a scan of it
+    would fail; a clean run proves the committed tree was used."""
+
+    DOCKERFILE = (
+        'FROM python:3.12-alpine\n'
+        'WORKDIR /srv\n'
+        'RUN printf \'<html><body><a href="/a.html">a</a></body></html>\' > index.html '
+        '&& printf \'<html>a</html>\' > a.html\n'
+        'CMD ["python", "-m", "http.server", "8000"]\n'
+    )
+    GATE_COMPOSE = 'services:\n  app:\n    build: ./app\n    ports: ["18000:8000"]\n'
+
+    def setUp(self):
+        self.project = os.path.realpath(tempfile.mkdtemp(prefix='labgate'))
+        self.addCleanup(shutil.rmtree, self.project, True)
+        self.state = tempfile.mkdtemp(prefix='labstate')
+        self.addCleanup(shutil.rmtree, self.state, True)
+        os.makedirs(os.path.join(self.project, 'app'))
+        self._write('compose.yaml', self.GATE_COMPOSE)
+        self._write('app/Dockerfile', self.DOCKERFILE)
+        self._git('init', '-q')
+        self._git('config', 'user.email', 'lab@example.com')
+        self._git('config', 'user.name', 'lab')
+        self._git('add', '-A')
+        self._git('commit', '-q', '-m', 'committed')
+        self.head = self._git('rev-parse', 'HEAD').strip()
+        self._write('app/Dockerfile', 'FROM redlab-nonexistent-base:zzz\n')  # dirty, unbuildable
+        self.lab_project = 'redlab-' + os.path.basename(self.project).lower()
+
+    def _write(self, rel: str, text: str) -> None:
+        with open(os.path.join(self.project, rel), 'w') as fh:
+            fh.write(text)
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(('git', '-C', self.project) + args,
+                              capture_output=True, text=True, check=True).stdout
+
+    def _run(self, *extra: str) -> subprocess.CompletedProcess:
+        env = {**os.environ, 'REDLAB_STATE_DIR': self.state}
+        return subprocess.run(
+            [sys.executable, _RUN, '--project-dir', self.project,
+             '--minutes', '1', '--startup-seconds', '3', *extra],
+            capture_output=True, text=True, timeout=1200, env=env)
+
+    def test_gate_builds_the_commit_records_the_result_and_cleans_up(self):
+        import json
+        result = self._run('--gate')
+        self.assertIn(result.returncode, (0, 1), result.stdout + result.stderr)
+        files = os.listdir(self.state)
+        self.assertEqual(len(files), 1, files)
+        with open(os.path.join(self.state, files[0])) as fh:
+            record = json.load(fh)
+        self.assertEqual(record['commit'], self.head)
+        self.assertIn(record['verdict'], (0, 1))
+        self.assertEqual([t['service'] for t in record['targets']], ['app'])
+        # No git worktree and no container, network or volume left behind.
+        worktrees = [line for line in self._git('worktree', 'list').splitlines() if line.strip()]
+        self.assertEqual(len(worktrees), 1, worktrees)
+        label = f'label=com.docker.compose.project={self.lab_project}'
+        self.assertEqual(_docker('ps', '-aq', '--filter', label), '')
+
+
 if __name__ == '__main__':
     unittest.main()
