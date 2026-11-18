@@ -761,6 +761,39 @@ class TestReviewGate(_ConsentShapes, _RepoBase):
     def test_dry_run_is_not_gated(self):
         self._commit('src/app.ts', 'unreviewed')
         self.assertFalse(self._denied(self._push('git push --dry-run origin main')))
+        self.assertFalse(self._denied(self._push('git push -q -n origin main')))
+
+    def test_a_publishing_push_chained_with_a_dry_run_is_denied(self):
+        """The dry run is read per push: the other push of the command still publishes."""
+        self._commit('src/app.ts', 'unreviewed')
+        for command in ('git push --dry-run origin main && git push origin main',
+                        'git push origin main; git push --dry-run origin main'):
+            with self.subTest(command=command):
+                result = self._push(command)
+                self.assertTrue(self._denied(result))
+                self.assertIn('review-gate', _out(result).get('systemMessage', ''))
+
+    def test_porcelain_push_is_gated(self):
+        """`--porcelain` changes the output; the push still happens."""
+        self._commit('src/app.ts', 'unreviewed')
+        self.assertTrue(self._denied(self._push('git push --porcelain origin main')))
+
+    def test_a_dry_run_inside_another_program_is_read_per_push(self):
+        """The forms the whole-command `--dry-run` match exempted by accident."""
+        self._commit('src/app.ts', 'unreviewed')
+        for command in ('echo main | xargs git push --dry-run origin',
+                        "sh -c 'git push --dry-run origin main'",
+                        'eval git push --dry-run origin main'):
+            with self.subTest(command=command):
+                self.assertFalse(self._denied(self._push(command)))
+        for command in ('echo main | xargs git push --dry-run origin && git push origin main',
+                        "sh -c 'git push --dry-run origin main && git push origin main'",
+                        'eval "git push --dry-run origin main; git push origin main"',
+                        r'find . -maxdepth 0 -exec git push --dry-run origin main \;',
+                        'watch git push --dry-run origin main',
+                        'flock /tmp/l git push --dry-run origin main'):
+            with self.subTest(command=command):
+                self.assertTrue(self._denied(self._push(command)))
 
     def test_push_that_only_deletes_is_not_gated(self):
         self._commit('src/app.ts', 'unreviewed')
@@ -863,6 +896,56 @@ class TestReviewGateAcrossWorktrees(_RepoBase):
         self.assertFalse(self._denied(self._push_from_worktree()))
         self._commit_in(self.worktree, 'src/extra.ts', 'after the waiver')
         self.assertTrue(self._denied(self._push_from_worktree()))
+
+
+class TestUnknownPushOption(_RepoBase):
+    """A push option outside the closed set the gates read is denied by each
+    of the three push gates, naming the word; the plain spelling passes."""
+
+    UNKNOWN = ('git push -fn origin main', 'git push --dr origin main',
+               'git push -n --no-dry-run origin main', 'git push -d --no-delete origin main',
+               'git push --mir origin', 'git push --future-flag origin main')
+
+    def _msg(self, result) -> str:
+        return _out(result).get('systemMessage', '')
+
+    def test_the_attribution_gate_denies_it(self):
+        self._commit('src/app.ts', 'clean')
+        self._write(_skill('engineering-code-review'))
+        for command in self.UNKNOWN:
+            with self.subTest(command=command):
+                result = self._push(command)
+                self.assertTrue(self._denied(result))
+                self.assertIn('[playbook:commit]', self._msg(result))
+                self.assertIn('does not read the option', self._msg(result))
+        self.assertFalse(self._denied(self._push('git push -q -n origin main')))
+
+    def test_the_secrets_gate_denies_it(self):
+        self._commit('src/app.ts', 'clean')
+        self._write(_skill('engineering-code-review'))
+        allow = {playbook_core.ATTRIBUTION_ALLOW_ENV: '1'}
+        result = self._push('git push --dr origin main', env=allow)
+        self.assertTrue(self._denied(result))
+        self.assertIn('[playbook:secrets]', self._msg(result))
+        self.assertIn('`--dr`', self._msg(result))
+        self.assertFalse(self._denied(self._push('git push --dry-run origin main', env=allow)))
+
+    def test_the_review_gate_denies_it(self):
+        # The attribution and secret gates deny first through the hook, so the
+        # review gate is called on its own.
+        self._commit('src/app.ts', 'unreviewed')
+        spec = importlib.util.spec_from_file_location('context_guard_review', _GUARD)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        guard._CWD = self.repo
+        for command in self.UNKNOWN:
+            with self.subTest(command=command):
+                verdict = guard._check_push_gate(self._state(), self.transcript, command)
+                self.assertTrue(verdict and verdict['block'])
+                self.assertIn('[playbook:review-gate]', verdict['msg'])
+                self.assertIn('does not read the option', verdict['msg'])
+        self.assertIsNone(guard._check_push_gate(self._state(), self.transcript,
+                                                 'git push --dry-run origin main'))
 
 
 class TestAttributionInHistory(_RepoBase):

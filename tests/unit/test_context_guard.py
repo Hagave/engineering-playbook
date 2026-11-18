@@ -358,6 +358,77 @@ class TestPushRevisions(unittest.TestCase):
     def test_dry_run_publishes_nothing(self):
         self.assertEqual(playbook_core.push_revisions(['--dry-run', 'origin', 'main']), [])
         self.assertEqual(playbook_core.push_revisions(['-n', 'origin', 'main']), [])
+        self.assertEqual(playbook_core.push_revisions(['origin', 'main', '-f', '-n']), [])
+
+    def test_porcelain_is_not_a_dry_run(self):
+        self.assertEqual(playbook_core.push_revisions(['--porcelain', 'origin', 'main']), ['main'])
+
+    def test_a_run_time_word_in_a_dry_run_is_unresolvable(self):
+        """The word may expand to `--no-dry-run`, which git honours."""
+        self.assertIsNone(playbook_core.push_revisions(['-n', 'origin', '$FLAGS']))
+
+    def test_flags_that_publish_nothing_extra(self):
+        for flag in ('-v', '--verbose', '-q', '--quiet', '--porcelain', '--progress', '-u',
+                     '--set-upstream', '-f', '--force', '--force-if-includes', '--atomic',
+                     '--no-verify', '--verify', '--prune', '--thin', '--follow-tags', '-4',
+                     '--ipv4', '-6',
+                     '--ipv6', '--force-with-lease', '--signed'):
+            with self.subTest(flag=flag):
+                self.assertEqual(playbook_core.push_revisions([flag, 'origin', 'main']), ['main'])
+
+    def test_an_optional_value_is_only_after_the_equals_sign(self):
+        """`--force-with-lease main` leases nothing: `main` is the refspec."""
+        for flag in ('--force-with-lease=main:abc123', '--force-with-lease=main', '--signed=if-asked'):
+            with self.subTest(flag=flag):
+                self.assertEqual(playbook_core.push_revisions([flag, 'origin', 'feat']), ['feat'])
+        self.assertEqual(playbook_core.push_revisions(['origin', '--force-with-lease', 'feat']),
+                         ['feat'])
+
+    def test_a_value_option_takes_the_next_word_or_its_value_after_equals(self):
+        for opt in ('-o', '--push-option', '--receive-pack', '--exec', '--repo'):
+            with self.subTest(opt=opt):
+                self.assertEqual(playbook_core.push_revisions([opt, 'x', 'origin', 'main']), ['main'])
+                if opt.startswith('--'):
+                    self.assertEqual(playbook_core.push_revisions([f'{opt}=x', 'origin', 'main']),
+                                     ['main'])
+
+    def test_every_spelling_of_delete_and_all(self):
+        self.assertEqual(playbook_core.push_revisions(['-d', 'origin', 'old']), [])
+        self.assertEqual(playbook_core.push_revisions(['--branches', 'origin']), ['--branches'])
+
+    def test_an_option_outside_the_closed_set_is_unknown(self):
+        """No abbreviation, no short-flag bundle, no negation, no value where git takes
+        none: each would need git's own option parser to read, so the push is denied
+        and a retry spelled as `git push -h` lists it passes."""
+        for args in (['--dr', 'origin', 'main'], ['-fn', 'origin', 'main'],
+                     ['-nf', 'origin', 'main'], ['--no-dry-run', 'origin', 'main'],
+                     ['-n', '--no-dry-run', 'origin', 'main'],
+                     ['-d', '--no-delete', 'origin', 'main'], ['--mir', 'origin'],
+                     ['--al', 'origin'], ['-fo', 'x', 'origin', 'main'],
+                     ['--future-flag', 'origin', 'main'], ['--no-follow-tags', 'origin', 'main'],
+                     ['--recurse-submodules=on-demand', 'origin', 'main'],
+                     ['--dry-run=yes', 'origin', 'main'], ['-o=x', 'origin', 'main']):
+            with self.subTest(args=args):
+                revs, reason = playbook_core.read_push(args)
+                self.assertIsNone(revs)
+                word = next(a for a in args if a.startswith('-') and a not in ('-n', '-d'))
+                self.assertIn(f'`{word}`', reason)
+                self.assertIn('git push -h', reason)
+
+    def test_end_of_options(self):
+        """After `--` every word is the remote or a refspec, as git reads it."""
+        self.assertEqual(playbook_core.push_revisions(['--', 'origin', 'main']), ['main'])
+        self.assertEqual(playbook_core.push_revisions(['origin', '--', 'main']), ['main'])
+        self.assertEqual(playbook_core.push_revisions(['-n', '--', 'origin', 'main']), [])
+
+    def test_a_refspec_source_shaped_like_an_option_is_unknown(self):
+        """Handed to `git log`, `--output=<file>` would write that file."""
+        for args in (['origin', '--', '--output=/tmp/x'], ['origin', '+--output=/tmp/x'],
+                     ['origin', '--', '-x:refs/heads/x']):
+            with self.subTest(args=args):
+                revs, reason = playbook_core.read_push(args)
+                self.assertIsNone(revs)
+                self.assertIn('starts with `-`', reason)
 
     def test_glab_mr_create_with_co_author_blocks(self):
         cmd = 'glab mr create --description "fix\n\nco-authored-by: claude"'

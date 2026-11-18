@@ -108,7 +108,6 @@ RESUME_SKILLS = playbook_core.RESUME_SKILLS
 LEARNED_TOKEN = playbook_core.LEARNED_TOKEN
 DESTRUCTIVE_AUTHORIZED_RE = playbook_core.DESTRUCTIVE_AUTHORIZED_RE
 REVIEW_SKILLS = playbook_core.REVIEW_SKILLS
-PUSH_NOOP_RE = playbook_core.PUSH_NOOP_RE
 REVIEW_BYPASS_RE = playbook_core.REVIEW_BYPASS_RE
 
 IMPL_TOOLS = {'Write', 'Edit', 'MultiEdit'}
@@ -1007,8 +1006,6 @@ def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict 
 
     Fails closed when a push's directory or revisions cannot be resolved or git
     cannot list its commits; outside a repository nothing is published."""
-    if PUSH_NOOP_RE.search(command):
-        return None
     if os.environ.get('PLAYBOOK_SKIP_REVIEW'):
         return None
     credited = _credited_commits(state)
