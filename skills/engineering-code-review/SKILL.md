@@ -1,7 +1,7 @@
 ---
 name: engineering-code-review
 description: "Code review workflow and severity classification. Use when asked to review a diff, PR, or code change, and when asked to review, survey or audit existing code (a module, a route prefix, a folder): the audit mode lists the scope with a script, then runs one pass per dimension and backs every finding with evidence. Runs before every push. Loads relevant skills based on what the code touches and outputs findings classified as Blocker, Major, or Minor."
-version: 4.1.0
+version: 5.0.0
 user-invocable: false
 ---
 
@@ -20,7 +20,7 @@ Code review applies all relevant skills to the diff and actively checks for viol
 
 ## When this runs
 
-On request, and automatically before every push — the PreToolUse hook denies `git push` until the current `HEAD` has been reviewed. The review is pinned to the commit: committing again after a review re-arms the gate, because the new commit is code no review has read.
+On request, and automatically before every push — the PreToolUse hook denies `git push` until the current `HEAD` has been reviewed. The review is pinned to what it read: a commit of exactly what the review read in the working tree (`git diff`, `git diff HEAD`) is covered, so the change can be reviewed before it is committed. A file changed after the read is code no review has read: the gate names it, and only it is reviewed again.
 
 Scope for a pre-push review is `git diff <upstream>...HEAD` — everything the push would publish, not just the last commit — and everything that diff reaches: the pre-push review runs in **audit mode** (below), seeded with that diff.
 

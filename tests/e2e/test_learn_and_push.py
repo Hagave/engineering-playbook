@@ -744,6 +744,155 @@ class TestReviewCreditAcrossRepositories(_Base):
         self._read('git -C "$REPO" diff origin/main...HEAD')
         self.assertTrue(self._denied(self.core))
 
+    def test_the_working_tree_each_review_read_is_credited_in_its_own_repository(self):
+        # The session runs in the folder above both, the review reads the
+        # uncommitted change of each, then both are committed.
+        for repo in (self.core, self.front):
+            with open(os.path.join(repo, 'change.ts'), 'w') as f:
+                f.write('reviewed before the commit')
+        self._review()
+        self._read(f'git -C {self.core} diff && git -C {self.front} diff HEAD')
+        for repo in (self.core, self.front):
+            self._git(repo, 'add', '-A')
+            self._git(repo, 'commit', '-q', '-m', 'reviewed change')
+        self.assertFalse(self._denied(self.core))
+        self.assertFalse(self._denied(self.front))
+
+
+class TestReviewCreditByContent(_RepoBase):
+    """The review reads the change before it is committed: the commit that
+    holds exactly what it read is covered, and what changed after the read is
+    not."""
+
+    def _post(self, tool_name: str, tool_input: dict) -> None:
+        _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PostToolUse', 'cwd': self.repo,
+            'tool_name': tool_name, 'tool_input': tool_input, 'tool_response': {},
+        })
+
+    def _review(self, read: str = 'git diff HEAD') -> None:
+        self._post('Skill', {'skill': 'engineering-playbook:engineering-code-review'})
+        self._post('Bash', {'command': read})
+
+    def _put(self, name: str, text: str) -> None:
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+
+    def _commit_staged(self, *paths: str) -> None:
+        self._git('add', '-A', '--', *paths)
+        self._git('commit', '-q', '-m', 'commit after the review')
+
+    def _message(self) -> str:
+        return _out(self._push()).get('systemMessage', '')
+
+    def test_a_commit_of_what_the_review_read_is_allowed(self):
+        self._put('README.md', 'changed')
+        self._put('src/new.ts', 'a new file the diff does not list')
+        self._review()
+        self._commit_staged('.')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_plain_diff_of_the_working_tree_is_a_read_of_it(self):
+        self._put('src/app.ts', 'new')
+        self._review('git diff --stat -- src')
+        self._commit_staged('.')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_committing_part_of_what_was_read_is_allowed(self):
+        self._put('src/app.ts', 'reviewed')
+        self._put('local.yml', 'a local setting that stays out of the commit')
+        self._review()
+        self._commit_staged('src')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_what_was_read_split_into_two_commits_is_allowed(self):
+        self._put('src/a.ts', 'first part')
+        self._put('src/b.ts', 'second part')
+        self._review()
+        self._commit_staged('src/a.ts')
+        self._commit_staged('src/b.ts')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_deletion_the_review_read_is_allowed(self):
+        os.remove(os.path.join(self.repo, 'README.md'))
+        self._review()
+        self._commit_staged('.')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_an_edit_after_the_read_is_denied_and_named(self):
+        self._put('src/app.ts', 'reviewed')
+        self._put('src/dto.ts', 'reviewed')
+        self._review()
+        self._put('src/dto.ts', 'changed after the review read it')
+        self._commit_staged('.')
+        message = self._message()
+        self.assertIn('review-gate', message)
+        self.assertIn('src/dto.ts', message)
+        self.assertNotIn('src/app.ts', message)
+        self.assertIn('-- src/dto.ts', message)
+
+    def test_a_review_of_only_the_files_changed_after_the_read_allows_the_push(self):
+        self._put('src/app.ts', 'reviewed')
+        self._review()
+        self._put('src/app.ts', 'changed after the review read it')
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+        self._stop()
+        time.sleep(0.01)
+        self._review('git diff origin/main...HEAD -- src/app.ts')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_file_added_after_the_read_is_denied(self):
+        self._put('src/app.ts', 'reviewed')
+        self._review()
+        self._put('src/extra.ts', 'not there when the review read the tree')
+        self._commit_staged('.')
+        self.assertIn('src/extra.ts', self._message())
+
+    def test_a_read_of_commits_only_does_not_cover_the_working_tree(self):
+        self._commit('src/app.ts', 'committed before the review')
+        self._put('src/later.ts', 'uncommitted, not printed by the read')
+        self._review('git diff origin/main...HEAD')
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_read_of_the_index_does_not_cover_the_working_tree(self):
+        self._put('src/app.ts', 'unstaged')
+        self._review('git diff --cached')
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_read_before_the_review_does_not_cover_the_working_tree(self):
+        self._put('src/app.ts', 'read too early')
+        self._post('Bash', {'command': 'git diff HEAD'})
+        time.sleep(0.01)
+        self._post('Skill', {'skill': 'engineering-code-review'})
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_read_in_a_later_turn_does_not_cover_the_working_tree(self):
+        self._put('src/app.ts', 'read after the review turn ended')
+        self._post('Skill', {'skill': 'engineering-code-review'})
+        time.sleep(0.01)
+        self._stop()
+        time.sleep(0.01)
+        self._post('Bash', {'command': 'git diff HEAD'})
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_merge_is_not_covered_by_content(self):
+        self._git('checkout', '-q', '-b', 'side')
+        self._commit('src/side.ts', 'never reviewed')
+        self._git('checkout', '-q', 'main')
+        self._put('src/app.ts', 'reviewed')
+        self._review()
+        self._commit_staged('.')
+        self._git('merge', '-q', '--no-ff', '--no-edit', 'side')
+        self.assertTrue(self._denied(self._push()))
+
 
 class TestReviewSeenAtTheSkillCall(_RepoBase):
     """The assistant record carrying the Skill call is not on disk when the next
