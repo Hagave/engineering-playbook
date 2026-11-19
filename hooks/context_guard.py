@@ -45,6 +45,7 @@ import sys
 import tempfile
 import glob
 import time
+from datetime import datetime
 
 # Ensure hooks/ is importable regardless of how this file is loaded — as a
 # script (python3 hooks/context_guard.py, where sys.path already includes
@@ -110,6 +111,14 @@ SUSPEND_SKILL = playbook_core.SUSPEND_SKILL
 RESUME_SKILLS = playbook_core.RESUME_SKILLS
 LEARNED_TOKEN = playbook_core.LEARNED_TOKEN
 REVIEW_SKILLS = playbook_core.REVIEW_SKILLS
+
+# A review reads a repository through these: `git diff`, `git show`, and a
+# `git log` that prints patches. A plain `git log` lists commits without their
+# code, so it reads nothing a review could vouch for.
+REVIEW_READ_SUBS = frozenset({'diff', 'show'})
+PATCH_LOG_FLAGS = frozenset({'-p', '-u', '--patch'})
+DIFF_READS_KEPT = 50
+REVIEW_TIMES_KEPT = 20
 
 IMPL_TOOLS = {'Write', 'Edit', 'MultiEdit'}
 
@@ -395,6 +404,80 @@ def _worktree_heads() -> list[str]:
     return [line[5:] for line in listing.splitlines() if line.startswith('HEAD ')]
 
 
+def _note_review(state: dict, at: float) -> None:
+    # A review does not say which worktree it read, so it credits the HEAD of
+    # every worktree of the session's repository: a commit made after it, in any
+    # of them, is not credited. The cost is a sibling worktree's commits that
+    # already existed and that this review never looked at. Repositories outside
+    # the session's own are credited only through what the review read
+    # (_reviewed_reads).
+    head = _git_head()
+    if head:
+        state['reviewed_head'] = head
+    heads = _worktree_heads()
+    if heads:
+        state['reviewed_heads'] = heads
+    times = [t for t in state.get('review_times') or [] if isinstance(t, (int, float))]
+    state['review_times'] = [*times, at][-REVIEW_TIMES_KEPT:]
+    # Findings are only in the text this turn flushes, so the check itself has
+    # to wait for Stop.
+    state['review_turn'] = True
+
+
+def _read_repositories(command: str) -> list[str]:
+    """Top-level directories of the repositories whose code `command` prints."""
+    roots: list[str] = []
+    for call in playbook_core.git_calls(playbook_core.strip_heredoc_bodies(command), _CWD) or ():
+        if call.repo is None:
+            continue
+        if call.sub not in REVIEW_READ_SUBS and not (call.sub == 'log' and PATCH_LOG_FLAGS & set(call.args)):
+            continue
+        top = _git('rev-parse', '--show-toplevel', cwd=call.repo)
+        if top and top not in roots:
+            roots.append(top)
+    return roots
+
+
+def _note_diff_reads(state: dict, command: str) -> None:
+    reads = [r for r in state.get('diff_reads') or [] if isinstance(r, dict)]
+    for top in _read_repositories(command):
+        head = _git('rev-parse', 'HEAD', cwd=top)
+        if head:
+            reads.append({'repo': top, 'head': head, 'at': time.time()})
+    state['diff_reads'] = reads[-DIFF_READS_KEPT:]
+
+
+def _reviewed_reads(state: dict) -> list[str]:
+    """HEADs of the repositories a review read, as they were when it read them.
+
+    A read counts when a review was loaded before it in the same turn: a turn
+    that ended in between (an allowed Stop) closes the review, so a diff read
+    later, while writing code, is not mistaken for one. The HEAD is taken at the
+    read, so a commit made afterwards stays unreviewed."""
+    reviews = [t for t in state.get('review_times') or [] if isinstance(t, (int, float))]
+    ends = [t for t in state.get('turn_ends') or [] if isinstance(t, (int, float))]
+    heads: list[str] = []
+    for read in state.get('diff_reads') or []:
+        if not isinstance(read, dict):
+            continue
+        at, head = read.get('at'), read.get('head')
+        if not isinstance(at, (int, float)) or not isinstance(head, str):
+            continue
+        if any(start <= at and not any(start < end < at for end in ends) for start in reviews):
+            heads.append(head)
+    return heads
+
+
+def _line_time(obj: dict) -> float:
+    stamp = obj.get('timestamp')
+    if isinstance(stamp, str):
+        try:
+            return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+        except ValueError:
+            pass
+    return time.time()
+
+
 def _push_range(repo: str) -> str:
     """The diff range a push would publish: everything HEAD has that its
     upstream does not, falling back to the default branch for a branch that has
@@ -590,20 +673,7 @@ def _scan_skills(transcript: str | None, state: dict) -> bool:
                     elif base == GOVERNANCE_SKILL:
                         state['gov_loaded'] = True
                     if base in REVIEW_SKILLS:
-                        # A review does not say which worktree it read, so it
-                        # credits the HEAD of every worktree of the repository:
-                        # a commit made after it, in any of them, is not
-                        # credited. The cost is a sibling worktree's commits that
-                        # already existed and that this review never looked at.
-                        head = _git_head()
-                        if head:
-                            state['reviewed_head'] = head
-                        heads = _worktree_heads()
-                        if heads:
-                            state['reviewed_heads'] = heads
-                        # Findings are only in the text this turn flushes, so the
-                        # check itself has to wait for Stop.
-                        state['review_turn'] = True
+                        _note_review(state, _line_time(obj))
                     if base.startswith('engineering-'):
                         loaded = state.get('skills')
                         if not isinstance(loaded, list):
@@ -939,7 +1009,7 @@ def _credited_commits(state: dict) -> list[str]:
         credited += [str(sha) for sha in heads]
     if isinstance(state.get('reviewed_head'), str):
         credited.append(state['reviewed_head'])
-    return credited
+    return credited + _reviewed_reads(state)
 
 
 def _review_command(repo: str) -> str:
@@ -1257,6 +1327,8 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
     if memory:
         _block_turn(state, memory['msg'], 'memory')
 
+    ends = [t for t in state.get('turn_ends') or [] if isinstance(t, (int, float))]
+    state['turn_ends'] = [*ends, time.time()][-REVIEW_TIMES_KEPT:]
     _save_state(state)
     sys.exit(0)
 
@@ -1444,10 +1516,19 @@ def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -
     # event carries: the scan above reads the parent's, so a subagent that
     # loaded governance itself stayed denied for good. Its completed call is
     # the one place that load is visible.
+    # The same event is also the first place the main session's review load is
+    # visible: the assistant record that carries the Skill call is not on disk
+    # yet when the next tool's hook reads the transcript, so a push right after
+    # a review was denied once and allowed on the retry.
     if tool_name == 'Skill':
-        loaded = str(tool_input.get('skill') or tool_input.get('command') or '')
-        if loaded.rsplit(':', 1)[-1] == GOVERNANCE_SKILL:
+        loaded = str(tool_input.get('skill') or tool_input.get('command') or '').rsplit(':', 1)[-1]
+        if loaded == GOVERNANCE_SKILL:
             state['gov_loaded'] = True
+        if loaded in REVIEW_SKILLS:
+            _note_review(state, time.time())
+
+    if tool_name == 'Bash':
+        _note_diff_reads(state, command)
 
     if playbook_core.is_code_write(
             tool_name, tool_input,
