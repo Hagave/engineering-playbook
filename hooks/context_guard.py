@@ -1259,12 +1259,14 @@ def _refresh_carryover(state: dict, transcript: str | None) -> None:
     PreCompact already writes it, but that only covers a compaction. A user who
     escapes a saturated session with /clear never fires PreCompact, and that is
     exactly the path the context guard recommends -- so the note is refreshed at
-    every turn end above the warn threshold."""
+    every turn end above the warn threshold, or once the user's budget was crossed:
+    on a 1M window the budget asks for the /clear well before the warn does."""
     if _AGENT_ID:
         return  # a subagent's context is discarded at its stop; nothing to carry
     try:
         measure = _measure_context(transcript)
-        if not measure or measure[0] < WARN_PCT:
+        over_warn = bool(measure) and measure[0] >= WARN_PCT
+        if not over_warn and not state.get('budget_level'):
             return
         import compact_guard
         compact_guard.write_note(_SESSION_ID, _AGENT_ID, transcript, state,

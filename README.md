@@ -705,10 +705,13 @@ note** — the original request, files written, commands already run, skills
 loaded, gates still armed, repo state — to disk before the transcript is
 summarized away. `session_start.py` re-injects it on the `SessionStart` that
 follows. The Stop hook refreshes the same note at every turn end above
-`WARN_PCT`, so it also exists for the `/clear` the context guard recommends.
-A `/clear` starts a new `session_id`, so for that path the note is stored under a
-project key next to the model's own `[HANDOFF]` block, and the `SessionStart:clear`
-that follows injects both once and deletes them.
+`WARN_PCT` or past the user's context budget, so it also exists for the `/clear`
+the context guard recommends. A `/clear` starts a new `session_id`, so for that
+path the note is stored under a project key next to the model's own `[HANDOFF]`
+block, and the `SessionStart:clear` that follows injects both once and deletes
+them. The key is the directory Claude Code was launched in (`CLAUDE_PROJECT_DIR`),
+not the hook's `cwd`: the `cwd` follows the model's `cd` into a subfolder, and the
+`SessionStart` after the `/clear` arrives with the launch directory.
 
 The `PreToolUse` guard's **destructive-command block** (`rm -r`, `git reset
 --hard`, force push, `git clean`, mass delete, destructive SQL) answers
