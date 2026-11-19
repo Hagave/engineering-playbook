@@ -633,6 +633,143 @@ class TestReviewGateAcrossWorktrees(_RepoBase):
             self._state(), f'cd {self.worktree} && git push origin feat'))
 
 
+class TestReviewCreditAcrossRepositories(_Base):
+    """The session runs in a folder that holds two repositories and is not one
+    itself, as a workspace with a back end and a front end side by side: the
+    review is credited to the repository whose code it read."""
+
+    def setUp(self):
+        super().setUp()
+        self.ws = os.path.join(self.dir, 'ws')
+        self.core = self._repo('core')
+        self.front = self._repo('front')
+        self._commit(self.core, 'unpushed core')
+        self._commit(self.front, 'unpushed front')
+
+    def _git(self, repo: str, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(('git', '-C', repo) + args, capture_output=True, text=True, check=False)
+
+    def _repo(self, name: str) -> str:
+        repo = os.path.join(self.ws, name)
+        remote = os.path.join(self.dir, f'{name}.git')
+        subprocess.run(('git', 'init', '-q', '--bare', remote), capture_output=True, check=True)
+        subprocess.run(('git', 'init', '-q', '-b', 'main', repo), capture_output=True, check=True)
+        self._git(repo, 'config', 'user.email', 'test@example.com')
+        self._git(repo, 'config', 'user.name', 'test')
+        self._commit(repo, 'first')
+        self._git(repo, 'remote', 'add', 'origin', remote)
+        self._git(repo, 'push', '-q', '-u', 'origin', 'main')
+        return repo
+
+    def _commit(self, repo: str, text: str) -> None:
+        with open(os.path.join(repo, f'{uuid.uuid4().hex[:6]}.ts'), 'w') as f:
+            f.write(text)
+        self._git(repo, 'add', '-A')
+        self._git(repo, 'commit', '-q', '-m', text)
+
+    def _post(self, tool_name: str, tool_input: dict, response: dict | None = None) -> None:
+        _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PostToolUse', 'cwd': self.ws,
+            'tool_name': tool_name, 'tool_input': tool_input, 'tool_response': response or {},
+        })
+
+    def _review(self) -> None:
+        self._post('Skill', {'skill': 'engineering-playbook:engineering-code-review'})
+
+    def _read(self, command: str, response: dict | None = None) -> None:
+        self._post('Bash', {'command': command}, response)
+
+    def _denied(self, repo: str) -> bool:
+        result = _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PreToolUse', 'cwd': self.ws,
+            'tool_name': 'Bash', 'tool_input': {'command': f'cd {repo} && git push origin main'},
+        })
+        return _out(result).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny'
+
+    def test_the_repository_whose_diff_the_review_read_is_credited(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        self.assertFalse(self._denied(self.core))
+
+    def test_a_sibling_repository_the_review_did_not_read_stays_denied(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        self.assertTrue(self._denied(self.front))
+
+    def test_both_repositories_read_are_both_credited(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD && cd {self.front} && git --no-pager diff HEAD~1')
+        self.assertFalse(self._denied(self.core))
+        self.assertFalse(self._denied(self.front))
+
+    def test_a_diff_read_before_the_review_is_not_credited(self):
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        time.sleep(0.01)
+        self._review()
+        self.assertTrue(self._denied(self.core))
+
+    def test_a_diff_read_in_a_later_turn_is_not_credited(self):
+        self._review()
+        time.sleep(0.01)
+        self._stop()
+        time.sleep(0.01)
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        self.assertTrue(self._denied(self.core))
+
+    def test_a_commit_after_the_read_is_not_credited(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        self._commit(self.core, 'sneaked in')
+        self.assertTrue(self._denied(self.core))
+
+    def test_git_log_with_patches_is_a_read(self):
+        self._review()
+        self._read(f'git -C {self.core} log -p origin/main..HEAD')
+        self.assertFalse(self._denied(self.core))
+
+    def test_git_log_without_patches_is_not_a_read(self):
+        self._review()
+        self._read(f'git -C {self.core} log --oneline origin/main..HEAD')
+        self.assertTrue(self._denied(self.core))
+
+    def test_a_failed_diff_is_not_a_read(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD', {'is_error': True})
+        self.assertTrue(self._denied(self.core))
+
+    def test_a_diff_whose_directory_is_computed_is_not_a_read(self):
+        self._review()
+        self._read('git -C "$REPO" diff origin/main...HEAD')
+        self.assertTrue(self._denied(self.core))
+
+
+class TestReviewSeenAtTheSkillCall(_RepoBase):
+    """The assistant record carrying the Skill call is not on disk when the next
+    tool's hook reads the transcript, so the review is taken from the Skill
+    call's own PostToolUse."""
+
+    def test_a_push_right_after_the_review_is_allowed_on_the_first_try(self):
+        self._commit('src/app.ts', 'reviewed')
+        _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PostToolUse', 'cwd': self.repo,
+            'tool_name': 'Skill', 'tool_input': {'skill': 'engineering-code-review'}, 'tool_response': {},
+        })
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_commit_after_that_review_re_arms_the_gate(self):
+        self._commit('src/app.ts', 'reviewed')
+        _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PostToolUse', 'cwd': self.repo,
+            'tool_name': 'Skill', 'tool_input': {'skill': 'engineering-code-review'}, 'tool_response': {},
+        })
+        self._commit('src/extra.ts', 'after the review')
+        self.assertTrue(self._denied(self._push()))
+
+
 class TestUnknownPushOption(_RepoBase):
     """A push option outside the closed set the gates read is denied by each
     of the three push gates, naming the word; the plain spelling passes."""
