@@ -41,6 +41,17 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 | Repeated errors | `engineering-learn` mines real session logs and writes specific corrections back into the project |
 | Token waste | Skills loaded on demand — only what the current task requires |
 
+### Measured on a real project
+
+A bug survey of one module of a pilot project was run once per configuration,
+each with only "pick up where we left off". Opus 5.5 high set the reference:
+12 findings, 7 reproduced, $7.13. Sonnet 5.5 high covered 38 % of that for
+$1.69 and found a reproduced 500 the reference missed. Sonnet 5.5 medium and
+the Haiku 5.5 runs stopped early or reported from code only. With the playbook
+on and off at Sonnet 5.5 medium, cost and time were about the same; coverage was 2.5
+against 1, from one run each. Method, per-run data and limits:
+[docs/evidence/pilot-model-comparison.md](docs/evidence/pilot-model-comparison.md).
+
 ---
 
 ## Supported harnesses
