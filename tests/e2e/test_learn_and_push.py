@@ -46,7 +46,8 @@ def _run(script: str, payload: dict, env: dict | None = None) -> subprocess.Comp
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        env={**os.environ, 'PLAYBOOK_CONTEXT_LIMIT': '200000', **(env or {})},
+        env={**os.environ, 'PLAYBOOK_CONTEXT_LIMIT': '200000', 'CLAUDE_PROJECT_DIR': '',
+             **(env or {})},
     )
 
 
@@ -137,17 +138,18 @@ class _Base(unittest.TestCase):
             **payload,
         })
 
-    def _stop(self, active: bool = False, final: str | None = None) -> subprocess.CompletedProcess:
+    def _stop(self, active: bool = False, final: str | None = None, cwd: str | None = None,
+              env: dict | None = None) -> subprocess.CompletedProcess:
         payload = {
             'session_id': self.session_id,
             'transcript_path': self.transcript,
             'hook_event_name': 'Stop',
-            'cwd': self.dir,
+            'cwd': cwd or self.dir,
             'stop_hook_active': active,
         }
         if final is not None:
             payload['last_assistant_message'] = final
-        return _run(_GUARD, payload)
+        return _run(_GUARD, payload, env=env)
 
 
 # ── Failure capture ───────────────────────────────────────────────────────────
@@ -323,17 +325,51 @@ class TestCarryover(_Base):
             'cwd': self.dir,
         })
 
-    def _session_start(self, source: str, session_id: str | None = None) -> str:
+    def _session_start(self, source: str, session_id: str | None = None,
+                       env: dict | None = None) -> str:
         result = _run(_SESSION_START, {
             'session_id': session_id or self.session_id,
             'source': source,
             'cwd': self.dir,
-        })
+        }, env=env)
         return _out(result)['hookSpecificOutput']['additionalContext']
 
-    def _after_clear(self) -> str:
+    def _after_clear(self, env: dict | None = None) -> str:
         """A /clear starts a NEW session_id -- measured on real transcripts."""
-        return self._session_start('clear', f'pbtest-{uuid.uuid4().hex[:12]}')
+        return self._session_start('clear', f'pbtest-{uuid.uuid4().hex[:12]}', env=env)
+
+    def _subdir(self) -> str:
+        sub = os.path.join(self.dir, 'app', 'src')
+        os.makedirs(sub)
+        return sub
+
+    def test_a_handoff_written_after_a_cd_reaches_the_clear(self):
+        """Measured on a real run: after `cd sub` the Stop payload carries
+        cwd=sub while CLAUDE_PROJECT_DIR stays the launch directory, and the
+        /clear's SessionStart arrives with cwd=launch directory."""
+        launch = {'CLAUDE_PROJECT_DIR': self.dir}
+        self._write(_ul('build it') + _al('[HANDOFF]\nnext: the retries\n[/HANDOFF]'))
+        self._stop(cwd=self._subdir(), env=launch)
+        self.assertIn('next: the retries', self._after_clear(env=launch))
+
+    def test_a_carryover_written_after_a_cd_reaches_the_clear(self):
+        launch = {'CLAUDE_PROJECT_DIR': self.dir}
+        self._write(_ul('build the payment webhook') + _al('ok'))
+        self._set_state(budget_level=1)
+        self._stop(cwd=self._subdir(), env=launch)
+        self.assertIn('build the payment webhook', self._after_clear(env=launch))
+
+    def test_a_crossed_budget_refreshes_the_carryover_below_the_warn(self):
+        """The budget asks for the /clear at 55% of a 1M window, before the warn."""
+        self._write(_ul('build the payment webhook') + _al('ok'))
+        self._set_state(budget_level=1)
+        self._stop()
+        self.assertIn('build the payment webhook', open(self.project_note).read())
+
+    def test_no_carryover_below_the_warn_and_the_budget(self):
+        self._write(_ul('build the payment webhook') + _al('ok'))
+        self._stop()
+        self.assertFalse(os.path.exists(self.project_note))
 
     def test_note_keeps_the_original_request(self):
         self._write(_ul('build the payment webhook') + _al('ok') * 3
