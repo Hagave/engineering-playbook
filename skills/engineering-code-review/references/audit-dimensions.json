@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "dimensions": [
+    {
+      "id": "authorization",
+      "title": "Authorization per role",
+      "walks": ["routes", "files"],
+      "checklist": ["Security", "Information disclosure"],
+      "question": "For every route: who may call it — each role and permission the project defines, an unauthenticated caller, and a caller from another tenant, account or owner — and does the code enforce exactly that on every path from the route to the data it reads or writes? Check the guard on the route and the ownership or tenant check where the object is loaded by id; a check on the route that the code below can bypass (another route, a batch path, a job) does not count."
+    },
+    {
+      "id": "validation",
+      "title": "Input validation",
+      "walks": ["routes", "files"],
+      "checklist": ["Presentation layer", "Security"],
+      "question": "For every input of every route (path, query, body, headers, uploaded files): what happens with an empty value, an unknown value, one over the size the storage or the UI accepts, a malformed one, one of another type, and an id that does not exist? Name what the code does and what the caller receives for each."
+    },
+    {
+      "id": "concurrency",
+      "title": "Concurrency, transactions and locks",
+      "walks": ["sites", "files"],
+      "checklist": ["Concurrency and atomicity", "Application layer"],
+      "question": "For every write site: two requests at the same time on the same row — is there a lost update, a duplicate, or a broken invariant? Is the write inside a transaction, does a transaction stay open across a network call, and is there a lock, version column or unique constraint? Find every other writer of the same table or entity in the repository, not only the ones in this surface, and check them against each other."
+    },
+    {
+      "id": "callers",
+      "title": "Callers and screens",
+      "walks": ["callers", "consumers"],
+      "checklist": [],
+      "question": "For every caller and every screen that uses one: does it send what the route expects, handle each error the route can return with a message the user can act on, offer the action only to who may perform it, and show the new state afterwards — after a refresh, in another open tab or session, and through any realtime channel the project has? A caller the surface tagged `loose` or `file` is confirmed or ruled out by reading it."
+    },
+    {
+      "id": "project-rules",
+      "title": "Project rules",
+      "walks": ["files", "callers", "consumers"],
+      "checklist": [],
+      "question": "Take the project's CLAUDE.md (and the CLAUDE.md of each repository in the surface) one rule at a time, and check every file of the surface against that rule. A rule that does not apply to a file is skipped silently; a violation is a finding that quotes the rule."
+    },
+    {
+      "id": "recent-changes",
+      "title": "Recent changes",
+      "walks": ["commits"],
+      "checklist": [],
+      "question": "For every recent commit on the surface: read its diff line by line. What did it change, and what did it break or leave half done — a caller not updated, an old path still reachable, a rename applied in one place only, a migration without its backfill, a test removed or weakened?"
+    },
+    {
+      "id": "errors-contract",
+      "title": "Errors and contract",
+      "walks": ["routes", "files", "sites"],
+      "checklist": ["Information disclosure", "Infrastructure layer"],
+      "question": "For every route: what does each failure return — not found, forbidden, conflict, invalid state, an external service down or slow — as status, body shape and message, and is that the project's standard? Is every external call bounded by a timeout, and is every caught failure logged with enough context to diagnose it, without leaking internals to the caller?"
+    },
+    {
+      "id": "code-checklist",
+      "title": "Code checklist",
+      "walks": ["files"],
+      "checklist": [
+        "Layer boundary violations",
+        "Domain layer",
+        "Infrastructure layer",
+        "NestJS-specific",
+        "Performance and N+1",
+        "Reuse before creation",
+        "Repeated logic",
+        "Dead code",
+        "Algorithmic cost",
+        "Language and naming"
+      ],
+      "question": "Run the listed sections of the active review checklist against every file of the surface, file by file, then the repeated-logic sweep across them."
+    }
+  ],
+  "finding_schema": {
+    "type": "object",
+    "required": ["findings", "coverage"],
+    "properties": {
+      "findings": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["title", "severity", "location", "evidence", "why", "recommendation", "scope"],
+          "properties": {
+            "title": {"type": "string"},
+            "severity": {"enum": ["Blocker", "Major", "Minor"]},
+            "location": {"type": "string", "description": "file:line of the defect"},
+            "evidence": {
+              "type": "object",
+              "required": ["kind", "detail"],
+              "properties": {
+                "kind": {"enum": ["reproduced", "code-trace"]},
+                "detail": {
+                  "type": "string",
+                  "description": "reproduced: the request or the screen steps, with expected and actual result; code-trace: the file:line steps from the entry point to the effect"
+                }
+              }
+            },
+            "why": {"type": "string", "description": "one sentence: the consequence for the user or the data"},
+            "recommendation": {"type": "string"},
+            "scope": {"enum": ["in-scope", "out-of-scope", "business-decision"]}
+          }
+        }
+      },
+      "coverage": {
+        "type": "object",
+        "required": ["examined", "not_examined"],
+        "properties": {
+          "examined": {"type": "integer", "description": "how many items of the walked surface fields this pass examined"},
+          "not_examined": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["item", "reason"],
+              "properties": {"item": {"type": "string"}, "reason": {"type": "string"}}
+            }
+          }
+        }
+      }
+    }
+  }
+}

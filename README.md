@@ -244,8 +244,19 @@ current `HEAD` has been reviewed; a new commit needs a new review. Blockers
 are fixed before the push. Blocker and Major findings in code the agent wrote
 arm the learn gate (see *Learning from mistakes*).
 
-**How to use it.** Ask "review this diff" or "review PR 42", or just ask for a
-push and the review runs first. Only you can skip it: run the push yourself, or
+**Audit mode.** For existing code, and before every push, the review first
+lists its scope with `audit/surface.py`: the routes, the files that serve
+them, where they write, every caller (a front end in a sibling repository
+included), the screens that use those callers, and the recent commits. Then it
+runs one pass per dimension (`references/audit-dimensions.json`: authorization,
+validation, concurrency, callers and screens, project rules, recent changes,
+errors and contract, code checklist). Every finding carries evidence, a
+reproduction or a `file:line` trace, and the report ends with what each
+dimension examined and what the surface could not read.
+
+**How to use it.** Ask "review this diff" or "review PR 42", ask for an audit
+of a module, a route prefix or a folder, or just ask for a push and the review
+runs first. Only you can skip it: run the push yourself, or
 start Claude Code with `PLAYBOOK_SKIP_REVIEW=1`. Nothing typed in the chat lifts
 it.
 
@@ -1243,7 +1254,7 @@ the language opt-in) along when an implementation starts.
 | Shared state, distributed ops, idempotency | `engineering-concurrency` |
 | Exception paths, retry, external calls | `engineering-error-handling` |
 | Tests | `engineering-testing` |
-| Code review | `engineering-code-review` |
+| Code review, audit of existing code | `engineering-code-review` |
 | New implementation task | `engineering-implement` |
 | Refactoring or bug investigation | `engineering-refactor` |
 | New project scaffolding | `engineering-scaffold` |
