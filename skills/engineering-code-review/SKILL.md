@@ -1,7 +1,7 @@
 ---
 name: engineering-code-review
-description: "Code review workflow and severity classification. Use when asked to review a diff, PR, or code change. Loads relevant skills based on what the diff touches and outputs findings classified as Blocker, Major, or Minor."
-version: 4.0.1
+description: "Code review workflow and severity classification. Use when asked to review a diff, PR, or code change, and when asked to review, survey or audit existing code (a module, a route prefix, a folder): the audit mode lists the scope with a script, then runs one pass per dimension and backs every finding with evidence. Runs before every push. Loads relevant skills based on what the code touches and outputs findings classified as Blocker, Major, or Minor."
+version: 4.1.0
 user-invocable: false
 ---
 
@@ -22,7 +22,9 @@ Code review applies all relevant skills to the diff and actively checks for viol
 
 On request, and automatically before every push — the PreToolUse hook denies `git push` until the current `HEAD` has been reviewed. The review is pinned to the commit: committing again after a review re-arms the gate, because the new commit is code no review has read.
 
-Scope for a pre-push review is `git diff <upstream>...HEAD` — everything the push would publish, not just the last commit.
+Scope for a pre-push review is `git diff <upstream>...HEAD` — everything the push would publish, not just the last commit — and everything that diff reaches: the pre-push review runs in **audit mode** (below), seeded with that diff.
+
+A review the user asks for runs the **Process** below when its target is a diff or a PR, and **audit mode** when its target is existing code: a module, a route prefix, a folder.
 
 **Bypass.** Only the user can skip it: by running the push themselves, or by starting Claude Code with `PLAYBOOK_SKIP_REVIEW=1` in the environment. Nothing typed in the chat lifts the gate. Never skip it on your own judgment and never suggest the bypass as a way past your own findings.
 
@@ -58,6 +60,31 @@ Scope for a pre-push review is `git diff <upstream>...HEAD` — everything the p
 5. Run the **repeated-logic sweep** (checklist section *Repeated logic*) over the diff as a whole and against the codebase. Step 4 goes file by file and cannot see two files doing the same thing.
 6. For each finding: record file, line, violated rule (with skill reference), what is wrong, what to do instead. A security finding also carries its CWE and, when confirmed, the source-to-sink trace (see *Closing a security candidate*).
 7. Check registries: were new artifacts added without registry entries? Were removed artifacts unregistered? Were Public Contracts modified without compatibility analysis?
+
+---
+
+## Audit mode
+
+An audit reviews existing code and everything it reaches. Its goal is every defect in that scope, each one with evidence. A short list that reads as complete is the failure this mode exists to prevent: the scope is listed by a script and walked one question at a time, so nothing depends on remembering to look.
+
+1. **Surface.** List the scope before judging anything:
+
+   ```bash
+   python3 <playbook>/audit/surface.py --root <dir> --diff <base>             # before a push
+   python3 <playbook>/audit/surface.py --root <dir> --route-prefix /orders    # on request: a route prefix
+   python3 <playbook>/audit/surface.py --root <dir> --path src/orders         # on request: a folder or file
+   ```
+
+   `<playbook>` is the root of the playbook, two levels above this skill's base directory. `<base>` is the left side of the range the push publishes: the branch's upstream, or the default branch (`origin/HEAD`) for a branch pushed for the first time — the same range the push gate names. `<dir>` is the folder that holds every repository in scope, a front end in a sibling repository included. The output lists the routes, the files that serve them, the write/transaction/lock sites, every caller of the routes, the screens that use those callers, and the recent commits.
+   - Exit `3`: the seed matched nothing. Before a push, review the diff with the **Process** above instead; on request, tell the user and ask for another seed.
+   - Exit `2`: the seed is invalid; fix it.
+   - Every `unknown` entry and every `limits` line goes into the report as written: it is scope this audit did not cover.
+2. **Dimensions.** `references/audit-dimensions.json` (next to this file) lists the dimensions. Run them in that order, each as its own pass: its one `question`, asked of every item of the surface fields it `walks`, with the checklist sections it names. Do not fold one dimension into another, and do not end a pass at its first finding: a pass ends when every item it walks was examined or is listed as not examined, with the reason.
+3. **Evidence.** Every finding has the shape of `finding_schema` in the same file: the defect's `file:line`, and evidence that is either `reproduced` (the request or the screen steps, expected against actual) or a `code-trace` (the `file:line` steps from the entry point to the effect). A suspicion with neither is not a finding: it goes under the pass's not-examined items, with what would settle it.
+4. **Verification.** Try to reproduce every `code-trace` finding the way the project's CLAUDE.md says to exercise the application (a request per role to its local instance, a screen); when it says nothing, the reproduction is a test in the project's own suite. A finding the attempt refutes is dropped. One that cannot be reproduced stays, marked as seen in code, with its trace. Hostile payloads from the `engineering-security` fiches stay under that skill's rules: negative tests, and the lab for dynamic proof.
+5. **Report.** The findings by severity in the **Output format** below, then the **Coverage** block. Findings outside the scope and findings that depend on a business rule are listed apart and not fixed.
+
+Before a push, the audit is the review: its `code-checklist` dimension covers the files of the diff, and step 7 of the **Process** (registries) still applies.
 
 ---
 
@@ -258,9 +285,15 @@ Pre-existing issues the diff neither touches nor reaches stay out of scope.
 ## Registry (only if the project has a `registries/` directory)
 - [ ] registries/services.md — add entry for NewService
 - [ ] registries/contracts.md — update PayloadDto (field added)
+
+## Coverage (audit mode only)
+- authorization — examined 7 routes; not examined: `GET /orders/export` (needs a role the seed data lacks)
+- ... one line per dimension
+- surface unknown: `api/legacy.go:12` — route declarations in a stack the surface reader does not parse (go)
+- surface limits: mount and global prefixes are not applied ...
 ```
 
-If a section has no findings: write "none".
+If a section has no findings: write "none". In audit mode, a finding marked seen in code says so after its location: `path/to/file:42` (seen in code).
 
 ---
 
@@ -268,7 +301,7 @@ If a section has no findings: write "none".
 
 - Do not approve with open blockers.
 - Do not classify style issues as blockers.
-- Do not comment on code outside the diff scope. A repeated-logic finding is anchored on the diff line and may cite an occurrence outside the diff as evidence; duplication between two places the diff does not touch is out of scope.
+- Do not comment on code outside the review scope: the diff, or in audit mode the surface. A repeated-logic finding is anchored on the diff line and may cite an occurrence outside the diff as evidence; duplication between two places the diff does not touch is out of scope.
 - Do not suggest refactoring unrelated to the change under review.
 
 <!-- OUTPUT-DISCIPLINE -->

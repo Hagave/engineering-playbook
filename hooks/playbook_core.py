@@ -822,7 +822,7 @@ def _tracked_by_git(path: str) -> bool:
 # file under the root: a script written into the plugin directory and run from
 # there is still read.
 PLAYBOOK_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-PLAYBOOK_ENTRY_SCRIPTS = ('lab/run.py', 'scripts/playbook_config.py', 'hooks/output_filter.py')
+PLAYBOOK_ENTRY_SCRIPTS = ('lab/run.py', 'scripts/playbook_config.py', 'hooks/output_filter.py', 'audit/surface.py')
 
 
 def _is_playbook_entry_script(path: str) -> bool:

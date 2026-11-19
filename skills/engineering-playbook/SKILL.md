@@ -1,7 +1,7 @@
 ---
 name: engineering-playbook
 description: "Language-agnostic core engineering governance across TypeScript, Java, Go, Rust, C#, Kotlin, Ruby — invoke automatically at the start of any conversation involving software development, code writing, code review, architecture, or technical implementation. Also activates when the user says activate playbook. Loads non-negotiable rules (no duplication, no hallucination, scope discipline) and the skill routing table. Framework- and language-specific opt-in skills are loaded only when the stack dictates. Active by default unless /playbook-off was invoked this session."
-version: 4.0.0
+version: 4.0.1
 user-invocable: false
 ---
 
@@ -121,7 +121,7 @@ The playbook core is language-agnostic. Framework, language, and driver opt-in s
 | Hexagonal architecture | `engineering-arch-hexagonal` |
 | Modular monolith architecture | `engineering-arch-modular` |
 | MVC architecture | `engineering-arch-mvc` |
-| Code review | `engineering-code-review` |
+| Code review, or a review, survey or audit of existing code (module, route prefix, folder) | `engineering-code-review` |
 | User asks for session status, settings or config / `/playbook-config` | `playbook-config` |
 | User suspends rules | `playbook-off` |
 | User re-activates rules | `playbook-on` |
