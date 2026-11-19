@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -118,6 +119,7 @@ REVIEW_SKILLS = playbook_core.REVIEW_SKILLS
 REVIEW_READ_SUBS = frozenset({'diff', 'show'})
 PATCH_LOG_FLAGS = frozenset({'-p', '-u', '--patch'})
 DIFF_READS_KEPT = 50
+REVIEW_DELTA_LISTED = 20
 REVIEW_TIMES_KEPT = 20
 
 IMPL_TOOLS = {'Write', 'Edit', 'MultiEdit'}
@@ -424,48 +426,74 @@ def _note_review(state: dict, at: float) -> None:
     state['review_turn'] = True
 
 
-def _read_repositories(command: str) -> list[str]:
-    """Top-level directories of the repositories whose code `command` prints."""
-    roots: list[str] = []
+def _read_repositories(command: str) -> dict[str, bool]:
+    """Top-level directories of the repositories whose code `command` prints,
+    each with whether a read of it printed the working tree."""
+    roots: dict[str, bool] = {}
     for call in playbook_core.git_calls(playbook_core.strip_heredoc_bodies(command), _CWD) or ():
         if call.repo is None:
             continue
         if call.sub not in REVIEW_READ_SUBS and not (call.sub == 'log' and PATCH_LOG_FLAGS & set(call.args)):
             continue
         top = _git('rev-parse', '--show-toplevel', cwd=call.repo)
-        if top and top not in roots:
-            roots.append(top)
+        if top:
+            worktree = call.sub == 'diff' and playbook_core.reads_working_tree(call.args)
+            roots[top] = roots.get(top, False) or worktree
     return roots
+
+
+def _in_review(state: dict, at: float) -> bool:
+    """Whether a review was loaded before `at` in the same turn: a turn that
+    ended in between (an allowed Stop) closes the review, so a diff read later,
+    while writing code, is not mistaken for one."""
+    reviews = [t for t in state.get('review_times') or [] if isinstance(t, (int, float))]
+    ends = [t for t in state.get('turn_ends') or [] if isinstance(t, (int, float))]
+    return any(start <= at and not any(start < end < at for end in ends) for start in reviews)
 
 
 def _note_diff_reads(state: dict, command: str) -> None:
     reads = [r for r in state.get('diff_reads') or [] if isinstance(r, dict)]
-    for top in _read_repositories(command):
+    now = time.time()
+    for top, worktree in _read_repositories(command).items():
         head = _git('rev-parse', 'HEAD', cwd=top)
-        if head:
-            reads.append({'repo': top, 'head': head, 'at': time.time()})
+        if not head:
+            continue
+        read: dict = {'repo': top, 'head': head, 'at': now}
+        blobs = playbook_core.working_tree_blobs(top) if worktree and _in_review(state, now) else None
+        if blobs is not None:
+            # One tree per repository is kept, so the state stays small: the
+            # latest read is the one a commit that follows it was made from.
+            for earlier in reads:
+                if earlier.get('repo') == top:
+                    earlier.pop('blobs', None)
+            read['blobs'] = blobs
+        reads.append(read)
     state['diff_reads'] = reads[-DIFF_READS_KEPT:]
 
 
-def _reviewed_reads(state: dict) -> list[str]:
-    """HEADs of the repositories a review read, as they were when it read them.
-
-    A read counts when a review was loaded before it in the same turn: a turn
-    that ended in between (an allowed Stop) closes the review, so a diff read
-    later, while writing code, is not mistaken for one. The HEAD is taken at the
-    read, so a commit made afterwards stays unreviewed."""
-    reviews = [t for t in state.get('review_times') or [] if isinstance(t, (int, float))]
-    ends = [t for t in state.get('turn_ends') or [] if isinstance(t, (int, float))]
-    heads: list[str] = []
+def _reviewed_reads(state: dict) -> list[dict]:
+    """The reads a review made, with the HEAD (and, for a read of the working
+    tree, the files) as they were when it read them, so a commit or an edit
+    made afterwards stays unreviewed."""
+    reviewed: list[dict] = []
     for read in state.get('diff_reads') or []:
         if not isinstance(read, dict):
             continue
         at, head = read.get('at'), read.get('head')
-        if not isinstance(at, (int, float)) or not isinstance(head, str):
-            continue
-        if any(start <= at and not any(start < end < at for end in ends) for start in reviews):
-            heads.append(head)
-    return heads
+        if isinstance(at, (int, float)) and isinstance(head, str) and _in_review(state, at):
+            reviewed.append(read)
+    return reviewed
+
+
+def _reviewed_trees(state: dict, repo: str) -> list[playbook_core.ReviewedTree]:
+    top = _git('rev-parse', '--show-toplevel', cwd=repo)
+    trees = []
+    for read in _reviewed_reads(state):
+        blobs = read.get('blobs')
+        if read.get('repo') == top and isinstance(blobs, dict):
+            trees.append(playbook_core.ReviewedTree(
+                read['head'], {str(path): str(blob) for path, blob in blobs.items()}))
+    return trees
 
 
 def _line_time(obj: dict) -> float:
@@ -1009,12 +1037,13 @@ def _credited_commits(state: dict) -> list[str]:
         credited += [str(sha) for sha in heads]
     if isinstance(state.get('reviewed_head'), str):
         credited.append(state['reviewed_head'])
-    return credited + _reviewed_reads(state)
+    return credited + [read['head'] for read in _reviewed_reads(state)]
 
 
-def _review_command(repo: str) -> str:
+def _review_command(repo: str, paths: list[str] | None = None) -> str:
     same = os.path.realpath(repo) == os.path.realpath(_CWD or os.getcwd())
-    return f'git {"" if same else f"-C {repo} "}diff {_push_range(repo)}'
+    limited = f' -- {" ".join(shlex.quote(path) for path in paths)}' if paths else ''
+    return f'git {"" if same else f"-C {repo} "}diff {_push_range(repo)}{limited}'
 
 
 def _check_shell_edit(state: dict) -> dict | None:
@@ -1036,9 +1065,10 @@ def _check_push_gate(state: dict, command: str) -> dict | None:
     Read from the repository each push runs in and the revisions it publishes,
     not from the session's directory: a push from another worktree is about
     that worktree's commits. A commit is covered when a remote-tracking ref has
-    it or a reviewed HEAD contains it. The only waiver is PLAYBOOK_SKIP_REVIEW
-    in the environment Claude Code was started with, or the user running the
-    push: nothing written in the chat lifts it.
+    it, a reviewed HEAD contains it, or it commits what a review read in the
+    working tree. The only waiver is PLAYBOOK_SKIP_REVIEW in the environment
+    Claude Code was started with, or the user running the push: nothing
+    written in the chat lifts it.
 
     Fails closed when a push's directory or revisions cannot be resolved or git
     cannot list its commits; outside a repository nothing is published."""
@@ -1046,16 +1076,17 @@ def _check_push_gate(state: dict, command: str) -> dict | None:
         return None
     credited = _credited_commits(state)
     unknown = ''
-    pending: list[tuple[str, list[str], int]] = []
+    pending: list[tuple[str, int, list[str]]] = []
     for target in playbook_core.push_targets(command, _CWD):
         if target.repo is None or target.revs is None:
             unknown = unknown or target.reason
             continue
-        count = playbook_core.unreviewed_commits(target.repo, target.revs, credited)
-        if count is None:
+        found = playbook_core.unreviewed_commits(target.repo, target.revs, credited,
+                                                 _reviewed_trees(state, target.repo))
+        if found is None:
             unknown = unknown or 'git could not list the commits it publishes'
-        elif count:
-            pending.append((target.repo, target.revs, count))
+        elif found.count:
+            pending.append((target.repo, found.count, found.changed_after_review))
     if not unknown and not pending:
         return None
 
@@ -1072,14 +1103,25 @@ def _check_push_gate(state: dict, command: str) -> dict | None:
                 '`cd <worktree> && git push origin <branch>`).\n' + waiver
             ),
         }
-    repo, _, count = pending[0]
+    repo, count, changed_after = pending[0]
+    if changed_after:
+        listed = changed_after[:REVIEW_DELTA_LISTED]
+        more = len(changed_after) - len(listed)
+        scope = (
+            'The review read the rest of this change; these files changed after it read them'
+            f'{f" ({more} more not listed)" if more else ""}: {", ".join(listed)}.\n'
+            f'Load the Skill `engineering-code-review` and review only them: '
+            f'`{_review_command(repo, listed if not more else None)}`. '
+        )
+    else:
+        scope = (f'Load the Skill `engineering-code-review` and review `{_review_command(repo)}` '
+                 'before pushing. ')
     return {
         'block': True,
         'msg': (
             f'[playbook:review-gate] Push denied — {count} commit(s) it publishes from {repo} '
-            'have not been reviewed.\n'
-            f'Load the Skill `engineering-code-review` and review `{_review_command(repo)}` '
-            'before pushing. Report findings as Blocker / Major / Minor and fix every Blocker.\n'
+            'have not been reviewed.\n' + scope +
+            'Report findings as Blocker / Major / Minor and fix every Blocker.\n'
             'Minimum coverage: information leakage (logs, responses, error payloads), N+1, '
             'idempotency, pagination done in memory, atomicity and transaction boundaries, '
             'dead code, algorithmic complexity, functionality that already exists and was not '

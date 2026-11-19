@@ -2367,24 +2367,178 @@ def _existing_objects(repo: str, names: list[str]) -> list[str] | None:
             if kind in ('commit', 'tag')]
 
 
-def unreviewed_commits(repo: str, revs: list[str], reviewed: list[str]) -> int | None:
-    """How many commits a push of `revs` from `repo` publishes that no
-    remote-tracking ref has and no commit in `reviewed` contains.
+SNAPSHOT_MAX_PATHS = 2000
+# Commits checked one by one against what a review read; a longer push is
+# credited by HEAD only, so the check stays inside the hook's git budget.
+_CONTENT_CHECK_MAX_COMMITS = 50
+_NULL_OBJECT_RE = re.compile(r'0{40}(?:0{24})?')
+_UNHASHABLE = '?'
 
-    0 for an empty `revs` (a deletion or a dry run) and outside a repository,
-    where nothing is published. None when that cannot be established: `repo`
-    does not exist yet, git failed or timed out, or the hook has no time left."""
+
+class ReviewedTree(NamedTuple):
+    """The working tree of a repository as a review read it: the HEAD it sat
+    on and the blob of every path it changed against that HEAD ('' for a path
+    it deleted, '?' for one hashed differently from how git stores it)."""
+    head: str
+    blobs: dict[str, str]
+
+
+class Unreviewed(NamedTuple):
+    count: int
+    changed_after_review: list[str]
+
+
+def reads_working_tree(diff_args: list[str]) -> bool:
+    """Whether `git diff <diff_args>` prints the working tree: no `--cached`,
+    and at most one revision, so the other side is the files on disk. A word
+    before `--` that may be a path counts as a revision, so an ambiguous read
+    is taken as one of commits only."""
+    words = diff_args[:diff_args.index('--')] if '--' in diff_args else diff_args
+    if any(word in ('--cached', '--staged', '--no-index') for word in words):
+        return False
+    revisions = [word for word in words if not word.startswith('-')]
+    return len(revisions) <= 1 and not any('..' in word for word in revisions)
+
+
+def working_tree_blobs(repo: str) -> dict[str, str] | None:
+    """Blob of every path the working tree of `repo` (its top-level directory)
+    changes against HEAD, untracked files included, hashed without writing to
+    the object store. None when git fails or runs out of time, or when more
+    than SNAPSHOT_MAX_PATHS paths changed."""
+    changed = _git_out(repo, 'diff', '--name-only', '--no-renames', '-z', 'HEAD', timeout=2)
+    # Trade-off: `git diff` never prints an untracked file, yet one is credited
+    # as read. Leaving them out made every new file of a change reviewed before
+    # its first commit a second review; the gate already credits a whole HEAD
+    # for a read limited to some paths, and this keeps the same granularity.
+    untracked = _git_out(repo, 'ls-files', '--others', '--exclude-standard', '-z', timeout=2)
+    if changed is None or untracked is None:
+        return None
+    paths = list(dict.fromkeys(path for path in (changed + untracked).split('\0') if path))
+    if len(paths) > SNAPSHOT_MAX_PATHS:
+        return None
+    blobs: dict[str, str] = {}
+    to_hash: list[str] = []
+    for path in paths:
+        full = os.path.join(repo, path)
+        if not os.path.lexists(full):
+            blobs[path] = ''
+        elif '\n' in path or os.path.islink(full) or not os.path.isfile(full):
+            blobs[path] = _UNHASHABLE
+        else:
+            to_hash.append(path)
+    if to_hash:
+        out = _git_out(repo, 'hash-object', '--stdin-paths',
+                       stdin='\n'.join(to_hash) + '\n', timeout=3)
+        ids = out.split() if out is not None else []
+        if len(ids) != len(to_hash):
+            return None
+        blobs.update(zip(to_hash, ids))
+    return blobs
+
+
+def _commit_changes(repo: str, parent: str, commit: str) -> dict[str, str] | None:
+    """Path -> blob the commit leaves there ('' when it deletes the path, '?'
+    for a submodule or a symlink)."""
+    out = _git_out(repo, 'diff-tree', '-r', '--no-renames', '-z', parent, commit, timeout=2)
+    if out is None:
+        return None
+    fields = out.split('\0')
+    changes: dict[str, str] = {}
+    for meta, path in zip(fields[0::2], fields[1::2]):
+        parts = meta.lstrip(':').split()
+        if len(parts) < 5:
+            return None
+        mode, blob = parts[1], parts[3]
+        if _NULL_OBJECT_RE.fullmatch(blob):
+            changes[path] = ''
+        elif mode in ('160000', '120000'):
+            changes[path] = _UNHASHABLE
+        else:
+            changes[path] = blob
+    return changes
+
+
+def _blobs_at(repo: str, head: str, paths: list[str]) -> dict[str, str] | None:
+    """Blob of each path in `head` ('' when `head` does not have it)."""
+    asked = [path for path in paths if '\n' not in path]
+    out = _git_out(repo, 'cat-file', '--batch-check=%(objectname)',
+                   stdin=''.join(f'{head}:{path}\n' for path in asked), timeout=2)
+    if out is None:
+        return None
+    lines = out.splitlines()
+    if len(lines) != len(asked):
+        return None
+    found = {path: ('' if line.endswith(' missing') else line.strip())
+             for path, line in zip(asked, lines)}
+    return {path: found.get(path, _UNHASHABLE) for path in paths}
+
+
+def _differs_from_tree(repo: str, changes: dict[str, str], tree: ReviewedTree) -> list[str] | None:
+    """Paths the commit leaves with content other than the reviewed tree had.
+    A path the tree did not change held what its HEAD holds."""
+    unlisted = [path for path in changes if path not in tree.blobs]
+    at_head = _blobs_at(repo, tree.head, unlisted) if unlisted else {}
+    if at_head is None:
+        return None
+    differing = []
+    for path, blob in changes.items():
+        seen = tree.blobs[path] if path in tree.blobs else at_head[path]
+        if blob == _UNHASHABLE or seen == _UNHASHABLE or blob != seen:
+            differing.append(path)
+    return differing
+
+
+def unreviewed_commits(repo: str, revs: list[str], reviewed: list[str],
+                       trees: list[ReviewedTree] | None = None) -> Unreviewed | None:
+    """The commits a push of `revs` from `repo` publishes that no
+    remote-tracking ref has and no review covers, and the paths whose content
+    changed after a review read them.
+
+    A review covers a commit a reviewed HEAD contains, and a commit with one
+    parent that is covered and whose every changed path holds what a reviewed
+    working tree held: the review read the change before it was committed. A
+    merge is covered by a reviewed HEAD only. 0 commits for an empty `revs` (a
+    deletion or a dry run) and outside a repository, where nothing is
+    published. None when that cannot be established: `repo` does not exist
+    yet, git failed or timed out, or the hook has no time left."""
     if not revs:
-        return 0
+        return Unreviewed(0, [])
     inside = _in_repository(repo)
     if not inside:
-        return None if inside is None else 0
+        return None if inside is None else Unreviewed(0, [])
     known = _existing_objects(repo, reviewed)
     if known is None:
         return None
-    out = _git_out(repo, 'rev-list', '--count', *revs, '--not', '--remotes', *known, '--',
-                   timeout=_REVIEW_LOG_TIMEOUT)
-    return int(out) if out is not None and out.strip().isdigit() else None
+    out = _git_out(repo, 'rev-list', '--reverse', '--parents', *revs, '--not', '--remotes',
+                   *known, '--', timeout=_REVIEW_LOG_TIMEOUT)
+    if out is None:
+        return None
+    commits = [line.split() for line in out.splitlines() if line.strip()]
+    if not trees or len(commits) > _CONTENT_CHECK_MAX_COMMITS:
+        return Unreviewed(len(commits), [])
+    pending = {commit[0] for commit in commits}
+    covered: set[str] = set()
+    changed_after: list[str] = []
+    for sha, *parents in commits:
+        if len(parents) != 1 or (parents[0] in pending and parents[0] not in covered):
+            continue
+        changes = _commit_changes(repo, parents[0], sha)
+        if changes is None:
+            return None
+        closest: list[str] | None = None
+        for tree in trees:
+            differing = _differs_from_tree(repo, changes, tree)
+            if differing is None:
+                return None
+            if closest is None or len(differing) < len(closest):
+                closest = differing
+            if not differing:
+                break
+        if closest:
+            changed_after += [path for path in closest if path not in changed_after]
+        else:
+            covered.add(sha)
+    return Unreviewed(len(commits) - len(covered), changed_after)
 
 
 def check_new_commit_attribution(command: str, cwd: str) -> str | None:

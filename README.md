@@ -731,8 +731,12 @@ it.
 
 The `PreToolUse` guard also enforces the **review gate**: `git push` is denied
 until the current `HEAD` has been reviewed through `engineering-code-review`.
-The review is pinned to the commit, so committing after a review re-arms the
-gate. Only the user can skip it — by running the push themselves or by starting
+The review is pinned to what it read: a commit is covered when a reviewed
+`HEAD` contains it, or when it commits exactly what the review read in the
+working tree (`git diff`, `git diff HEAD`), so reviewing before committing does
+not cost a second review. A file changed after the read is not covered, and the
+denial names those files so only they are reviewed again. A merge commit is
+covered by a reviewed `HEAD` only. Only the user can skip it — by running the push themselves or by starting
 Claude Code with `PLAYBOOK_SKIP_REVIEW=1`, which the hook reads from its own
 environment, not from the command the model runs. Nothing typed in the chat
 lifts it, so the model cannot waive it for itself. The gate

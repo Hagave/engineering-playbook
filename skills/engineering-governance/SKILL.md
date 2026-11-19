@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines when to stop and ask, prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 3.2.1
+version: 4.0.0
 user-invocable: false
 ---
 
@@ -53,7 +53,7 @@ Four additional gates are enforced mechanically by the plugin hook — they cann
 
 - **Skill gate:** writing any source file, in any language, is denied until this skill (`engineering-governance`) has been loaded via the Skill tool in the current session.
 - **Validation gate (Stop):** ending the turn is blocked if source files were written and no validation command (tsc, lint, tests) ran afterwards. Run the validation checklist below, or report explicitly what is blocking it.
-- **Review gate (pre-push):** `git push` is denied until the current `HEAD` has been reviewed via the `engineering-code-review` skill. Reviewing and then committing again re-arms it — the new commit is code no review has read. Only the user can skip it, by running the push themselves or by starting Claude Code with `PLAYBOOK_SKIP_REVIEW=1`; nothing typed in the chat lifts it, you can never waive it for yourself, and never suggest skipping it as a way past your own findings.
+- **Review gate (pre-push):** `git push` is denied until what it publishes has been reviewed via the `engineering-code-review` skill. A commit of exactly what the review read in the working tree is covered; a file changed after the read is code no review has read, and the gate names it so only it is reviewed again. Only the user can skip it, by running the push themselves or by starting Claude Code with `PLAYBOOK_SKIP_REVIEW=1`; nothing typed in the chat lifts it, you can never waive it for yourself, and never suggest skipping it as a way past your own findings.
 - **Destructive-command gate:** `rm -r`, `git reset --hard`, force push, `git clean`, mass delete and destructive SQL go to the user through Claude Code's permission dialog, which states what the command destroys: when the task needs one, call the tool and the harness asks the user; it runs only if they approve that dialog. Never ask the user for a confirmation phrase — nothing typed in the chat approves it, and you cannot approve it yourself. Where no dialog can reach the user (permission modes other than Manual and auto, a subagent, a cloud session), the gate denies the command: show the user the exact command and what it destroys, and ask them to run it themselves. An `rm` of literal absolute paths inside this session's scratchpad is exempt.
 - **Learn gate (Stop):** when the user's message says the previous turn was wrong, when the same call has failed repeatedly, or when a review reported Blocker/Major findings in code you wrote, ending the turn is blocked until you emit `[LEARNED]`. To clear it: name the premise you got wrong in one line, say what is actually true and what proves it, and persist the rule in the project `CLAUDE.md` inside the `<!-- engineering-learn:live -->` block (ask before creating `CLAUDE.md` itself). If the signal was a false positive, emit `[LEARNED] none — <reason>`. Do not emit the token without the rule; the gate exists to produce the rule, not the token.
 
