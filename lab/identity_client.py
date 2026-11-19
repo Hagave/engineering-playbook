@@ -12,7 +12,7 @@ Reads `input.json` from the mounted run directory, then:
 
 Writes `result.json` next to it. No credential and no session token is ever
 written: only status codes, counts and which routes are covered. No request
-other than the login and those GETs is sent.
+other than the OpenAPI lookups, the logins and those GETs is sent.
 """
 import json
 import os
@@ -36,9 +36,10 @@ _OPENER = urllib.request.build_opener(_NoRedirect())
 
 
 def request(base_url: str, method: str, path: str, headers: dict[str, str] | None = None,
-            body: object = None) -> tuple[int, dict[str, str], bytes]:
-    """Status, response headers and body; status 0 when the target did not
-    answer. Redirects are returned, never followed."""
+            body: object = None) -> tuple[int, list[tuple[str, str]], bytes]:
+    """Status, every response header as (name, value) -- a repeated one such as
+    Set-Cookie keeps each occurrence -- and body; status 0 when the target did
+    not answer. Redirects are returned, never followed."""
     data = None
     sent = dict(headers or {})
     if body is not None:
@@ -47,11 +48,11 @@ def request(base_url: str, method: str, path: str, headers: dict[str, str] | Non
     req = urllib.request.Request(base_url + path, data=data, method=method, headers=sent)
     try:
         with _OPENER.open(req, timeout=TIMEOUT_SECONDS) as resp:
-            return resp.status, dict(resp.headers.items()), resp.read(MAX_BODY_BYTES)
+            return resp.status, list(resp.headers.items()), resp.read(MAX_BODY_BYTES)
     except urllib.error.HTTPError as exc:
-        return exc.code, dict(exc.headers.items()), exc.read(MAX_BODY_BYTES)
+        return exc.code, list(exc.headers.items()), exc.read(MAX_BODY_BYTES)
     except (urllib.error.URLError, OSError, ValueError):
-        return 0, {}, b''
+        return 0, [], b''
 
 
 def json_pointer(document: object, pointer: str) -> object:
@@ -70,8 +71,8 @@ def json_pointer(document: object, pointer: str) -> object:
     return current
 
 
-def _cookie(headers: dict[str, str], name: str) -> str | None:
-    for key, value in headers.items():
+def _cookie(headers: list[tuple[str, str]], name: str) -> str | None:
+    for key, value in headers:
         if key.lower() != 'set-cookie':
             continue
         first = value.split(';', 1)[0]

@@ -203,11 +203,11 @@ class _App(http.server.BaseHTTPRequestHandler):
     """A small API: an OpenAPI document, a JSON login, a cookie login, a list
     route that needs the session, and a redirect the client must not follow."""
 
-    def _send(self, status: int, body: object, headers: dict | None = None) -> None:
+    def _send(self, status: int, body: object, headers: tuple = ()) -> None:
         data = json.dumps(body).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
-        for key, value in (headers or {}).items():
+        for key, value in headers:
             self.send_header(key, value)
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
@@ -233,7 +233,7 @@ class _App(http.server.BaseHTTPRequestHandler):
             else:
                 self._send(200, {'data': {'items': [{'id': f'{who}-1'}, {'id': f'{who}-2'}]}})
         elif self.path == '/api/v1/moved':
-            self._send(302, {}, {'Location': 'http://elsewhere.invalid/'})
+            self._send(302, {}, (('Location', 'http://elsewhere.invalid/'),))
         else:
             self._send(404, {'error': 'not found'})
 
@@ -245,7 +245,9 @@ class _App(http.server.BaseHTTPRequestHandler):
         if self.path == '/api/v1/auth/login' and ok:
             self._send(200, {'data': {'accessToken': f'{TOKEN_PREFIX}{who}'}})
         elif self.path == '/api/v1/auth/session' and ok:
-            self._send(200, {}, {'Set-Cookie': f'session={TOKEN_PREFIX}{who}; HttpOnly'})
+            # The session cookie is not the last Set-Cookie: each one must be read.
+            self._send(200, {}, (('Set-Cookie', f'session={TOKEN_PREFIX}{who}; HttpOnly'),
+                                 ('Set-Cookie', 'theme=dark; Path=/')))
         else:
             self._send(401, {'error': 'invalid credentials'})
 
@@ -301,7 +303,7 @@ class TestIdentityClient(unittest.TestCase):
     def test_a_redirect_is_returned_not_followed(self):
         status, headers, _ = identity_client.request(self.base, 'GET', '/api/v1/moved')
         self.assertEqual(status, 302)
-        self.assertEqual(headers.get('Location'), 'http://elsewhere.invalid/')
+        self.assertEqual(dict(headers).get('Location'), 'http://elsewhere.invalid/')
 
     def test_an_unreachable_target_is_status_zero(self):
         self.assertEqual(identity_client.request('http://127.0.0.1:1', 'GET', '/')[0], 0)
@@ -327,6 +329,17 @@ class TestReport(unittest.TestCase):
         self.assertIn('not covered: GET /api/v1/cards/{id}', text)
         self.assertIn('dyn.ts:4', text)
         self.assertNotIn(PASSWORD, text)
+
+
+class TestRedaction(unittest.TestCase):
+
+    def test_short_login_values_are_left_so_the_report_stays_readable(self):
+        persona = _persona('alice', '001')
+        persona['login']['body']['kind'] = 'pf'
+        found = identities.secrets_of([persona])
+        self.assertIn(f'{PASSWORD}alice', found)
+        self.assertNotIn('pf', found)
+        self.assertEqual(identities.redact('3 customers, kind pf', found), '3 customers, kind pf')
 
 
 class TestLabWiring(unittest.TestCase):

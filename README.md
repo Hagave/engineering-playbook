@@ -1058,7 +1058,8 @@ session, and a scan without one only sees 401s. In identity mode a small client
 (`lab/identity_client.py`, standard library, on the digest-pinned Python image
 `--setup` pulls) runs on the lab's internal network, signs in through the
 application's own login route as each ordinary customer in `FILE`, and lists
-what each one owns. It sends only the logins and `GET`s of the list routes.
+what each one owns. It sends only the OpenAPI lookups, the logins and `GET`s of
+the list routes.
 
 - **The routes come from the code.** `audit/surface.py` reads the route
   declarations (NestJS, Spring, Express/Fastify): a route is the method and

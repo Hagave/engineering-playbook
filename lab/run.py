@@ -70,6 +70,8 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import identities
+from scope import PATH_RE as _PATH_RE
+from scope import within as _within
 
 # OWASP ZAP, official image, pinned by digest (multi-arch index: amd64 and
 # arm64). Moving to a newer ZAP is a change to this line, reviewed like code.
@@ -142,7 +144,6 @@ MIN_COMPOSE = (2, 20, 0)
 
 EXIT_CLEAN, EXIT_FINDINGS, EXIT_REFUSED, EXIT_ERROR = 0, 1, 2, 3
 
-_PATH_RE = re.compile(r'^/(?!/)[A-Za-z0-9._~!$&\'()*+,;=:%/-]*$')
 # A query string (sqlmap needs one, e.g. `id=1`): the path charset plus `?` and
 # `&`, still with no way to name another host.
 _QUERY_RE = re.compile(r'^[A-Za-z0-9._~!$&\'()*+,;=:%/?&=-]*$')
@@ -329,18 +330,6 @@ class HostMount:
     target: str              # where it lands in the container
     read_only: bool
     volume_name: str | None  # set when it is a named volume bound to a host path
-
-
-def _within(path: str, root: str) -> bool:
-    """Whether `path`, links resolved, is `root` or sits under it. A mount of
-    `/work/shop-data` is not inside `/work/shop`: the separator guards that."""
-    if not path or not root:
-        return False
-    try:
-        real_root, real = os.path.realpath(root), os.path.realpath(path)
-    except (OSError, ValueError):
-        return False
-    return real == real_root or real.startswith(real_root + os.sep)
 
 
 def _within_any(path: str, roots: list[str]) -> bool:
@@ -1555,8 +1544,8 @@ def main(argv: list[str] | None = None) -> int:
                         help=f'sqlmap time-based delay seconds (default: {SQLMAP_TIME_SEC})')
     parser.add_argument('--identities', metavar='FILE',
                         help='sign in as the ordinary customers in FILE (kept outside the project) '
-                             'and list the routes and what each one owns; sends only the logins '
-                             'and GETs of the list routes')
+                             'and list the routes and what each one owns; sends only the OpenAPI '
+                             'lookups, the logins and GETs of the list routes')
     parser.add_argument('--openapi-path',
                         help='for --identities: where the application serves its OpenAPI JSON '
                              '(default: a few usual paths are tried)')

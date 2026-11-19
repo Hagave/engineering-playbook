@@ -19,10 +19,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(_LAB), 'audit'))
 sys.path.insert(0, _LAB)
 import surface
 from identity_client import path_shape
+from scope import PATH_RE as _PATH_RE
+from scope import within as _within
 
 ALLOWED_ROLES = frozenset({'customer'})
 LOGIN_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'GET'})
-_PATH_RE = re.compile(r'^/(?!/)[A-Za-z0-9._~!$&\'()*+,;=:%/-]*$')
+# Shorter login-body values (a tenant code, a flag) are not redacted: replacing
+# them everywhere would mangle the report, and no password is that short.
+MIN_SECRET_LENGTH = 4
 _HEADER_RE = re.compile(r'^[A-Za-z0-9-]+$')
 _NAME_RE = re.compile(r'^[A-Za-z0-9_.-]{1,40}$')
 # Headers a persona may not set: they would redirect the request or change how
@@ -35,11 +39,6 @@ REDACTED = '***'
 
 class IdentityError(ValueError):
     """The personas file cannot be used."""
-
-
-def _within(path: str, root: str) -> bool:
-    real_root, real = os.path.realpath(root), os.path.realpath(path)
-    return real == real_root or real.startswith(real_root + os.sep)
 
 
 def _check_persona(index: int, persona: object) -> list[str]:
@@ -139,7 +138,7 @@ def secrets_of(personas: list[dict]) -> list[str]:
         elif isinstance(node, list):
             for value in node:
                 walk(value)
-        elif isinstance(node, str) and node:
+        elif isinstance(node, str) and len(node) >= MIN_SECRET_LENGTH:
             found.append(node)
 
     for persona in personas:
@@ -212,8 +211,8 @@ def coverage(catalog: list[dict], lists: dict[str, dict[str, dict]],
 def format_report(target_url: str, catalog: list[dict], unknown: list[dict], result: dict,
                   personas: list[dict]) -> str:
     prefix = result.get('prefix') or ''
-    lines = [(f'Identity catalog of {target_url} (signed in as {len(personas)} customers; no '
-              'request other than the logins and the list routes was sent)'), '']
+    lines = [(f'Identity catalog of {target_url} (signed in as {len(personas)} customers; only '
+              'the logins, the OpenAPI lookups and the list routes were requested)'), '']
     lines.append('Sessions:')
     for session in result.get('sessions') or []:
         state = 'signed in' if session.get('signed_in') else 'NOT signed in'
