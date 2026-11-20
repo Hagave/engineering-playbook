@@ -50,6 +50,9 @@ Write/Edit of a task, and repeat it in the turn's final message (text between \
 tool calls may not reach the transcript). The Stop hook enforces it.
 - Validation gate: after writing source, run the project's type check / lint / \
 test command before ending the turn. The Stop hook enforces it.
+- Deviation: a skill rule you do not follow, or follow while believing it \
+wrong, is reported in a [PLAYBOOK-DEVIATION] block (format in \
+`engineering-governance`). The Stop hook records it and shows the user.
 - Suspend for this session with /playbook-off, resume with \
 /playbook-on.
 

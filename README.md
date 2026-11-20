@@ -982,6 +982,31 @@ loop after a single block.
 Every gate, the safety blocks included, is suspended while `/playbook-off`
 is active: off is a full pass-through until `/playbook-on`.
 
+#### Deviation journal (Stop)
+
+A model that does not follow a skill rule, or follows one it believes is
+wrong, reports it in a block of its response text (format in
+`engineering-governance`):
+
+```
+[PLAYBOOK-DEVIATION]
+skill: engineering-concurrency
+rule: the rule as the skill states it
+action: deviated | followed
+instead: what it did in its place
+why: the reason
+[/PLAYBOOK-DEVIATION]
+```
+
+At Stop and SubagentStop the hook records each block in
+`~/.claude/hooks/.deviations.jsonl`: one file for every project, kept across
+sessions, trimmed to the last 500 records. A record holds the fields, the
+session, subagent and directory, the version of the installed skill and whether
+that skill was loaded in the session. The user sees one line per block, and
+the line is also shown on a turn a gate blocks. `PLAYBOOK_DEVIATION_JOURNAL`
+moves the file. It is a record, not a gate. It holds only what the model chose
+to report: a rule broken in silence is not in it.
+
 #### Destructive operations
 
 The hook denies `Bash` commands matching these patterns and requires explicit

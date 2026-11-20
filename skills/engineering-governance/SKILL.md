@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines when to stop and ask, prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 5.0.0
+version: 5.1.0
 user-invocable: false
 ---
 
@@ -90,6 +90,27 @@ Stop and ask before implementing when any of the following is true:
 Send all questions in a single message. Never send multiple rounds of one question each.
 
 After receiving answers: summarize your understanding before starting implementation. Confirm before proceeding.
+
+---
+
+## Reporting a deviation from a rule
+
+A skill rule you do not follow, or follow while you believe it is wrong, is evidence the playbook needs. Report it every time, whatever the reason: the rule is wrong for the case, two rules conflict, or the task rules it out. Write one block per rule in your response text, each marker alone on its line:
+
+```
+[PLAYBOOK-DEVIATION]
+skill: engineering-concurrency
+rule: the rule as the skill states it, with its section
+action: deviated
+instead: what you did in its place
+why: the reason, and the evidence for it
+[/PLAYBOOK-DEVIATION]
+```
+
+- `action: deviated` — you did not follow the rule. `instead` is required.
+- `action: followed` — you followed the rule but believe it is wrong or conflicts with another one. `instead` says what you think the rule should say.
+- The Stop hook records every block in a journal outside the project, with the version of the skill you read, and shows the user one line per block. Say it in your final message too, in plain words: the block is the record, and the user still has to read what you did differently.
+- A deviation does not lift a hook gate.
 
 ---
 
