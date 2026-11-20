@@ -135,6 +135,17 @@ class TestTopicByPath(_ProjectTest):
             'Bash', {'command': command}, playbook_core.strip_heredoc_bodies(command), self.dir)
         self.assertEqual([r.skill for r in reqs], ['engineering-docker'])
 
+    def test_a_dockerfile_written_through_tee_needs_the_docker_skill(self) -> None:
+        command = "printf 'FROM node:22\\n' | tee Dockerfile"
+        reqs = playbook_core.required_skills('Bash', {'command': command}, command, self.dir)
+        self.assertEqual([r.skill for r in reqs], ['engineering-docker'])
+
+    def test_a_source_file_copied_by_the_shell_needs_its_skills(self) -> None:
+        self._file('templates/user.ts', 'export class User {}\n')
+        command = 'cp templates/user.ts src/user.ts'
+        reqs = playbook_core.required_skills('Bash', {'command': command}, command, self.dir)
+        self.assertEqual([r.skill for r in reqs], _COMPANIONS + ['engineering-typescript'])
+
     def test_a_shell_redirect_to_a_log_needs_nothing(self) -> None:
         reqs = playbook_core.required_skills(
             'Bash', {'command': 'npm test > out.log 2>&1'}, 'npm test > out.log 2>&1', self.dir)
@@ -206,8 +217,6 @@ class TestTopicByImport(_ProjectTest):
             'src/a.ts': "// TODO: move to amqplib later\nconst lib = 'amqplib';\n",
             'b.py': 'BROKER = "pika"\n# import pika later\n',
             'c.go': 'package main\n\nvar name = "kafka"\n',
-            # Prose in a docstring once matched `import\s*\(` and read the
-            # backquoted names after it as modules.
             'd.py': '"""\n    `./kafka` or `kafkajs` is not `kafka`; an unquoted import (Java, `pika`)\n"""\n',
         }
         for rel, code in cases.items():

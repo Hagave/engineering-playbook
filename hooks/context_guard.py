@@ -1505,11 +1505,8 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
     )
 
     if not result:
-        # Governance must be loaded before any code write, and so must every skill
-        # the written file calls for — companions, its language, its framework,
-        # its topic (a Dockerfile needs engineering-docker though it is no source).
-        # These signals are resolved Skill tool calls, flushed before the write,
-        # so it is safe to enforce here (hard pre-write deny).
+        # The skill loads are resolved Skill tool calls, flushed before the write,
+        # so a hard pre-write deny here cannot fire on a load still in flight.
         required = playbook_core.required_skills(
             tool_name, tool_input,
             playbook_core.strip_heredoc_bodies(command) if tool_name == 'Bash' else '',

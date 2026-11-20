@@ -197,7 +197,6 @@ class TestGovernanceChanges(unittest.TestCase):
             'engineering-performance',
         ]:
             self.assertIn(skill, section, f'Companion skill missing: {skill}')
-        # The language companion is the opt-in of the code written, any language.
         self.assertIn('the language opt-in for the code you write', section)
         for lang_skill in ('engineering-typescript', 'engineering-go', 'engineering-java'):
             self.assertIn(lang_skill, section)

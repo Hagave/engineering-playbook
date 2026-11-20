@@ -1584,12 +1584,10 @@ _MANIFEST_WALK_LIMIT = 16
 _PACKAGE_JSON_SECTIONS = ('dependencies', 'devDependencies', 'peerDependencies',
                           'optionalDependencies')
 
-# A line that names a module: it starts with import, use, using, require or
-# include, or closes a multi-line import (`} from 'x'`), or is a line of a Go
-# import block (a lone quoted path, optionally aliased). A dynamic
-# `require('x')` / `import('x')` anywhere on a line names the quoted argument
-# only. Prose is not read: a comment or docstring that says "an import (Java"
-# starts with none of these, which a looser `import\s*\(` once matched.
+# Only lines shaped as an import are read (and a dynamic import only with a
+# literal quoted argument), so a comment or docstring that mentions a package
+# does not put the file on its topic. Accepted cost: a module name built at run
+# time is not seen.
 _IMPORT_LINE_RE = re.compile(
     r'^\s*(?:import|from|use|using|require|require_relative|extern\s+crate)\b'
     r'|^\s*(?:\}|export\b.*)\s*\bfrom\b'
