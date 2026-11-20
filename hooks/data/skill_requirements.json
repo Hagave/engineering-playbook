@@ -1,0 +1,99 @@
+{
+  "_comment": "Skills the write gate requires before a write, read by playbook_core.required_skills. companions: every source write. languages: the opt-in matching the written file's extension. frameworks: a dependency named in the nearest manifest above the file, for files of the listed languages. topics: what the written file itself touches, by file name (paths, matched against the base name or, with a '/', the path relative to the project) or by an import line naming a package (imports) or a code pattern (patterns). A topic applies to source files only, unless non_code is true; when_framework limits it to files a framework row already applies to.",
+  "companions": [
+    "engineering-security",
+    "engineering-concurrency",
+    "engineering-error-handling",
+    "engineering-performance"
+  ],
+  "languages": {
+    "typescript": {"extensions": [".ts", ".tsx"], "skill": "engineering-typescript"},
+    "go": {"extensions": [".go"], "skill": "engineering-go"},
+    "rust": {"extensions": [".rs"], "skill": "engineering-rust"},
+    "java": {"extensions": [".java"], "skill": "engineering-java"},
+    "kotlin": {"extensions": [".kt", ".kts"], "skill": "engineering-kotlin"},
+    "csharp": {"extensions": [".cs"], "skill": "engineering-csharp"},
+    "ruby": {"extensions": [".rb"], "skill": "engineering-ruby"}
+  },
+  "frameworks": [
+    {
+      "skill": "engineering-nestjs",
+      "languages": ["typescript"],
+      "manifests": {"package.json": ["@nestjs/core"]}
+    },
+    {
+      "skill": "engineering-prisma",
+      "languages": ["typescript"],
+      "manifests": {"package.json": ["@prisma/client", "prisma"]}
+    }
+  ],
+  "topics": [
+    {
+      "skill": "engineering-docker",
+      "non_code": true,
+      "paths": [
+        "Dockerfile", "Dockerfile.*", "*.Dockerfile", "*.dockerfile", "Containerfile",
+        "docker-compose.yml", "docker-compose.yaml", "docker-compose.*.yml", "docker-compose.*.yaml",
+        "compose.yml", "compose.yaml", "compose.*.yml", "compose.*.yaml", ".dockerignore"
+      ]
+    },
+    {
+      "skill": "engineering-prisma",
+      "non_code": true,
+      "paths": ["*.prisma"],
+      "imports": ["@prisma/client"]
+    },
+    {
+      "skill": "engineering-rabbitmq",
+      "imports": [
+        "amqplib", "amqp-connection-manager", "@golevelup/nestjs-rabbitmq",
+        "github.com/rabbitmq/amqp091-go", "github.com/streadway/amqp",
+        "com.rabbitmq", "org.springframework.amqp", "RabbitMQ.Client", "MassTransit.RabbitMqTransport",
+        "pika", "aio_pika", "lapin", "bunny"
+      ]
+    },
+    {
+      "skill": "engineering-kafka",
+      "imports": [
+        "kafkajs", "node-rdkafka", "@confluentinc/kafka-javascript",
+        "github.com/segmentio/kafka-go", "github.com/confluentinc/confluent-kafka-go",
+        "github.com/IBM/sarama", "github.com/Shopify/sarama",
+        "org.apache.kafka", "org.springframework.kafka", "Confluent.Kafka",
+        "confluent_kafka", "kafka", "aiokafka", "rdkafka", "karafka"
+      ]
+    },
+    {
+      "skill": "engineering-testing",
+      "paths": [
+        "*.spec.*", "*.test.*", "*.e2e-spec.*", "*_test.go", "test_*.py", "*_test.py",
+        "*Test.java", "*Tests.java", "*IT.java", "*Test.kt", "*Tests.kt",
+        "*Test.cs", "*Tests.cs", "*_spec.rb", "*_test.rb",
+        "test/*", "tests/*", "spec/*", "*/test/*", "*/tests/*", "*/__tests__/*", "*/spec/*"
+      ]
+    },
+    {
+      "skill": "engineering-nestjs-security",
+      "when_framework": "engineering-nestjs",
+      "imports": ["helmet", "@fastify/helmet", "@nestjs/throttler", "@fastify/csrf-protection", "csrf-csrf", "@fastify/cors"],
+      "patterns": ["\\bNestFactory\\.create\\b"]
+    },
+    {
+      "skill": "engineering-nestjs-logger",
+      "when_framework": "engineering-nestjs",
+      "imports": ["nestjs-pino", "pino", "pino-http"],
+      "patterns": [
+        "\\bnew\\s+Logger\\s*\\(",
+        "import\\s*(?:type\\s*)?\\{[^}]*\\bLogger\\b[^}]*\\}\\s*from\\s*['\"]@nestjs/common['\"]"
+      ]
+    },
+    {
+      "skill": "engineering-nestjs-interceptors",
+      "when_framework": "engineering-nestjs",
+      "patterns": [
+        "\\bimplements\\s+(?:\\w+(?:<[^<>]*>)?\\s*,\\s*)*(?:NestInterceptor|ExceptionFilter)\\b",
+        "@Catch\\s*\\(",
+        "\\bAPP_(?:INTERCEPTOR|FILTER)\\b"
+      ]
+    }
+  ]
+}

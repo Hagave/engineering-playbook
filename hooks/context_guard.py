@@ -702,30 +702,57 @@ def _scan_skills(transcript: str | None, state: dict) -> bool:
                         state['gov_loaded'] = True
                     if base in REVIEW_SKILLS:
                         _note_review(state, _line_time(obj))
-                    if base.startswith('engineering-'):
-                        loaded = state.get('skills')
-                        if not isinstance(loaded, list):
-                            loaded = []
-                        if base not in loaded:
-                            loaded.append(base)
-                        state['skills'] = loaded[-24:]
+                    _note_skill_loaded(state, base)
             state['scan_offset'] = f.tell()
     except Exception:
         pass
     return bool(state.get('suspended'))
 
 
-def _check_skill_gate(state: dict) -> dict | None:
-    if state.get('gov_loaded'):
+# Every engineering-* skill the playbook ships fits under this cap; the skill
+# gate reads the whole list, so a cap that evicted one would re-deny a write
+# whose skill was loaded.
+_LOADED_SKILLS_CAP = 96
+
+
+def _note_skill_loaded(state: dict, base: str) -> None:
+    if not base.startswith('engineering-'):
+        return
+    loaded = state.get('skills')
+    if not isinstance(loaded, list):
+        loaded = []
+    if base not in loaded:
+        loaded.append(base)
+    state['skills'] = loaded[-_LOADED_SKILLS_CAP:]
+
+
+def _check_skill_gate(state: dict,
+                      required: list[playbook_core.SkillRequirement] | None = None,
+                      code_write: bool = True) -> dict | None:
+    """Deny a write until governance (for source) and every skill the write
+    requires (playbook_core.required_skills) were loaded in this session. One
+    message names everything missing and why, so a single round of Skill calls
+    clears it."""
+    loaded = state.get('skills') if isinstance(state.get('skills'), list) else []
+    missing_governance = code_write and not state.get('gov_loaded')
+    missing = [r for r in (required or []) if r.skill not in loaded]
+    if not missing_governance and not missing:
         return None
-    return {
-        'block': True,
-        'msg': (
-            '[playbook:skill-gate] engineering-governance has not been loaded this session. '
-            'Invoke the Skill tool with "engineering-governance" (which mandates its companion '
-            'skills) before writing any code. See the routing table in engineering-playbook.'
-        ),
-    }
+    parts = ['[playbook:skill-gate]']
+    if missing_governance:
+        parts.append(
+            'engineering-governance has not been loaded this session. Invoke the Skill tool '
+            'with "engineering-governance" before writing any code. See the routing table in '
+            'engineering-playbook.')
+    if missing:
+        listed = '; '.join(f'{r.skill} ({r.reason})' for r in missing)
+        parts.append(
+            f'This write also needs skills not loaded this session: {listed}. Invoke the Skill '
+            'tool for each, then retry the write. The rules come from what the file is '
+            '(language, framework in its manifest, the topic it touches), listed in the '
+            "playbook's hooks/data/skill_requirements.json; a /clear starts a new session, "
+            'so they are loaded again after it.')
+    return {'block': True, 'msg': ' '.join(parts)}
 
 
 def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
@@ -1477,11 +1504,18 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
         _CWD or os.getcwd(),
     )
 
-    if not result and code_write:
-        # Governance must be loaded before any code write — this signal is a
-        # resolved Skill tool call, flushed before the write, so it is safe to
-        # enforce here (hard pre-write deny).
-        result = _check_skill_gate(state)
+    if not result:
+        # Governance must be loaded before any code write, and so must every skill
+        # the written file calls for — companions, its language, its framework,
+        # its topic (a Dockerfile needs engineering-docker though it is no source).
+        # These signals are resolved Skill tool calls, flushed before the write,
+        # so it is safe to enforce here (hard pre-write deny).
+        required = playbook_core.required_skills(
+            tool_name, tool_input,
+            playbook_core.strip_heredoc_bodies(command) if tool_name == 'Bash' else '',
+            _CWD or os.getcwd())
+        if code_write or required:
+            result = _check_skill_gate(state, required, code_write)
 
     shell_edit = _check_shell_edit(state) if not result and code_write and tool_name == 'Bash' else None
     result = result or shell_edit
@@ -1568,6 +1602,7 @@ def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -
         loaded = str(tool_input.get('skill') or tool_input.get('command') or '').rsplit(':', 1)[-1]
         if loaded == GOVERNANCE_SKILL:
             state['gov_loaded'] = True
+        _note_skill_loaded(state, loaded)
         if loaded in REVIEW_SKILLS:
             _note_review(state, time.time())
 

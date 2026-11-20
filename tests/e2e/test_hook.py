@@ -100,8 +100,19 @@ def _usage(tokens: int) -> str:
     }) + '\n'
 
 
+def _governed() -> str:
+    """Governance plus every skill the write gate can require of a fixture's
+    source file without a manifest or a topic: the companions and each language
+    opt-in. A test about another gate loads them all, so only that gate denies."""
+    with open(os.path.join(_ROOT, 'hooks', 'data', 'skill_requirements.json')) as f:
+        table = json.load(f)
+    names = ['engineering-governance', *table['companions'],
+             *(row['skill'] for row in table['languages'].values())]
+    return ''.join(_skill(n) for n in names)
+
+
 # Standard preamble: governance skill loaded + user confirmation + spec token.
-_READY = _skill('engineering-governance') + _ul('ok, proceed') + _al('[SPEC CONFIRMED] implementing')
+_READY = _governed() + _ul('ok, proceed') + _al('[SPEC CONFIRMED] implementing')
 
 
 class _HookTest(unittest.TestCase):
@@ -181,19 +192,19 @@ class TestSpecGate(_HookTest):
     def test_write_allowed_prewrite_but_stop_blocks_when_token_absent(self):
         # The spec token is same-turn text, invisible at PreToolUse — the write is
         # graced through and the gate fires at Stop, where the text is flushed.
-        self._write(_skill('engineering-governance') + _al('let me implement this'))
+        self._write(_governed() + _al('let me implement this'))
         r = self._pre('Write', {'file_path': 'src/user.ts', 'content': 'class User {}'})
         self._assert_allowed(r)
         self._assert_stop_blocked('spec-gate')
 
     def test_edit_allowed_prewrite_but_stop_blocks_when_token_absent(self):
-        self._write(_skill('engineering-governance') + _al('analyzing'))
+        self._write(_governed() + _al('analyzing'))
         r = self._pre('Edit', {'file_path': 'src/user.ts', 'old_string': 'x', 'new_string': 'y'})
         self._assert_allowed(r)
         self._assert_stop_blocked('spec-gate')
 
     def test_token_only_in_the_message_that_ended_the_turn_confirms(self):
-        self._write(_skill('engineering-governance') + _al('let me implement this'))
+        self._write(_governed() + _al('let me implement this'))
         self._assert_allowed(self._pre('Write', {'file_path': 'src/user.ts', 'content': 'class User {}'}))
         self._pre('Bash', {'command': 'npm test'})
         r = _call(self.session_id, self.transcript, '', {}, event='Stop', extra={
@@ -201,7 +212,7 @@ class TestSpecGate(_HookTest):
         self.assertNotEqual(_out(r).get('decision') if r.stdout.strip() else None, 'block', r.stdout)
 
     def test_a_final_message_without_the_token_still_blocks(self):
-        self._write(_skill('engineering-governance') + _al('let me implement this'))
+        self._write(_governed() + _al('let me implement this'))
         self._pre('Write', {'file_path': 'src/user.ts', 'content': 'class User {}'})
         r = _call(self.session_id, self.transcript, '', {}, event='Stop', extra={
             'stop_hook_active': False, 'last_assistant_message': 'Added the User class.'})
@@ -227,7 +238,7 @@ class TestSpecGate(_HookTest):
         # Token confirmed task A, but a newer user message opened task B with no
         # fresh confirmation → Stop blocks.
         self._write(
-            _skill('engineering-governance')
+            _governed()
             + _al('[SPEC CONFIRMED] — confirmed task A')
             + _ul('ok, now also do task B')
             + _al('implementing task B')
@@ -238,7 +249,7 @@ class TestSpecGate(_HookTest):
     def test_user_typed_token_blocks_at_stop(self):
         # A user-typed token does not satisfy the gate — only assistant text does.
         self._write(
-            _skill('engineering-governance')
+            _governed()
             + _al('let me implement this')
             + _ul('[SPEC CONFIRMED] I typed this')
         )
@@ -247,12 +258,12 @@ class TestSpecGate(_HookTest):
 
     def test_bash_sed_inplace_on_ts_blocks_at_stop_without_token(self):
         """The spec gate must not be bypassable via shell file writes."""
-        self._write(_skill('engineering-governance') + _al('no token'))
+        self._write(_governed() + _al('no token'))
         self._assert_allowed(self._pre('Bash', {'command': "sed -i 's/a/b/' src/user.ts"}))
         self._assert_stop_blocked('spec-gate')
 
     def test_bash_redirect_to_ts_blocks_at_stop_without_token(self):
-        self._write(_skill('engineering-governance') + _al('no token'))
+        self._write(_governed() + _al('no token'))
         self._assert_allowed(self._pre('Bash', {'command': 'echo "x" > src/user.ts'}))
         self._assert_stop_blocked('spec-gate')
 
@@ -288,7 +299,7 @@ class TestSpecGate(_HookTest):
         # After one spec block, the continuation Stop does not block for spec
         # again; the validation still pending gets its one block, and the next
         # continuation passes.
-        self._write(_skill('engineering-governance') + _al('no token'))
+        self._write(_governed() + _al('no token'))
         self._assert_allowed(self._pre('Write', {'file_path': 'src/user.ts', 'content': 'x'}))
         self._assert_stop_blocked('spec-gate')
         r = self._stop(active=True)
@@ -301,10 +312,10 @@ class TestSpecGate(_HookTest):
         # Graced write with no visible token, then the token flushes into the
         # transcript before Stop (the real deny→retry recovery). Stop must not
         # block for spec.
-        self._write(_skill('engineering-governance') + _al('let me implement'))
+        self._write(_governed() + _al('let me implement'))
         self._assert_allowed(self._pre('Write', {'file_path': 'src/user.ts', 'content': 'x'}))
         self._write(
-            _skill('engineering-governance')
+            _governed()
             + _ul('go')
             + _al('[SPEC CONFIRMED] implemented the class')
         )
@@ -314,16 +325,16 @@ class TestSpecGate(_HookTest):
         # Measured: text written between tool calls is not always recorded in the
         # transcript. The turn below holds only tool calls until the final message;
         # the token there is what the Stop hook sees, and it must be enough.
-        self._write(_skill('engineering-governance') + _ul('go ahead')
+        self._write(_governed() + _ul('go ahead')
                     + _tool_use('Write', {'file_path': 'src/user.ts', 'content': 'x'}))
         self._assert_allowed(self._pre('Write', {'file_path': 'src/user.ts', 'content': 'x'}))
-        self._write(_skill('engineering-governance') + _ul('go ahead')
+        self._write(_governed() + _ul('go ahead')
                     + _tool_use('Write', {'file_path': 'src/user.ts', 'content': 'x'})
                     + _al('[SPEC CONFIRMED] wrote the user class'))
         self._assert_stop_not_blocked_for('spec-gate')
 
     def test_spec_block_tells_the_model_to_use_the_final_message(self):
-        self._write(_skill('engineering-governance') + _ul('go ahead') + _al('no token'))
+        self._write(_governed() + _ul('go ahead') + _al('no token'))
         self._assert_allowed(self._pre('Write', {'file_path': 'src/user.ts', 'content': 'x'}))
         r = self._stop()
         self.assertIn('final message', _out(r).get('reason', ''))
@@ -364,6 +375,59 @@ class TestSkillGate(_HookTest):
         self._write(_al('no token, no governance skill'))
         r = self._pre('Write', {'file_path': 'scripts/install.sh', 'content': 'echo hi'})
         self._assert_denied(r, 'skill-gate')
+
+    # ── What the written file calls for (hooks/data/skill_requirements.json) ──
+
+    def _pre_in_project(self, tool_name: str, tool_input: dict) -> subprocess.CompletedProcess:
+        """A call whose project is the test's own directory, so the manifests and
+        topic files the test writes there are the ones the gate reads."""
+        return _call(self.session_id, self.transcript, tool_name, tool_input, extra={'cwd': self.dir})
+
+    def test_governance_alone_no_longer_opens_a_source_write(self):
+        self._write(_skill('engineering-governance') + _ul('go') + _al('[SPEC CONFIRMED] implementing'))
+        r = self._pre('Write', {'file_path': 'src/user.ts', 'content': 'class User {}'})
+        self._assert_denied(r, 'skill-gate')
+        for name in ('engineering-security (every source write)', 'engineering-performance',
+                     'engineering-typescript (typescript file src/user.ts)'):
+            self.assertIn(name, _msg(r))
+        self.assertNotIn('engineering-governance has not', _msg(r))
+
+    def test_a_dockerfile_needs_the_docker_skill_but_not_governance(self):
+        self._write(_ul('add a Dockerfile') + _al('writing it'))
+        write = ('Write', {'file_path': os.path.join(self.dir, 'Dockerfile'), 'content': 'FROM node:22'})
+        r = self._pre_in_project(*write)
+        self._assert_denied(r, 'engineering-docker (Dockerfile matches Dockerfile)')
+        self.assertNotIn('engineering-governance', _msg(r))
+        with open(self.transcript, 'a') as f:   # a transcript only grows
+            f.write(_skill('engineering-playbook:engineering-docker') + _al('loaded'))
+        self._assert_allowed(self._pre_in_project(*write))
+
+    def test_the_project_framework_is_required(self):
+        with open(os.path.join(self.dir, 'package.json'), 'w') as f:
+            json.dump({'dependencies': {'@nestjs/core': '^11.0.0'}}, f)
+        self._write(_READY)
+        write = ('Write', {'file_path': os.path.join(self.dir, 'src', 'app.service.ts'),
+                           'content': 'export class AppService {}'})
+        self._assert_denied(self._pre_in_project(*write), 'engineering-nestjs (@nestjs/core in package.json)')
+        with open(self.transcript, 'a') as f:   # a transcript only grows
+            f.write(_skill('engineering-nestjs'))
+        self._assert_allowed(self._pre_in_project(*write))
+
+    def test_a_topic_import_is_required_in_any_language(self):
+        self._write(_READY)
+        write = ('Write', {'file_path': os.path.join(self.dir, 'consumer.py'),
+                           'content': 'import pika\n'})
+        self._assert_denied(self._pre_in_project(*write), 'engineering-rabbitmq (consumer.py imports pika)')
+
+    def test_a_skill_loaded_this_turn_counts_before_its_record_is_on_disk(self):
+        """The assistant record carrying the Skill call is flushed after the next
+        tool's hook reads the transcript; the Skill's PostToolUse is the first
+        place the load is visible."""
+        self._write(_ul('add a Dockerfile') + _al('loading'))
+        _call(self.session_id, self.transcript, 'Skill', {'skill': 'engineering-docker'},
+              event='PostToolUse', extra={'tool_response': {'success': True}})
+        self._assert_allowed(self._pre_in_project(
+            'Write', {'file_path': os.path.join(self.dir, 'compose.yaml'), 'content': 'services: {}'}))
 
     def test_suspended_session_skips_gates(self):
         self._write(_skill('playbook-off') + _al('rules suspended, prototyping'))
@@ -635,6 +699,13 @@ class TestSubagentIsolation(_HookTest):
         write = ('Write', {'file_path': 'scripts/measure.py', 'content': 'x = 1'})
         self._assert_denied(self._agent_pre(*write), 'skill-gate')
         self._agent_skill('engineering-playbook:engineering-governance', {'success': True})
+        # Governance alone no longer opens it: the companions are required too,
+        # and a subagent's loads are only visible through its PostToolUse.
+        denied = self._agent_pre(*write)
+        self._assert_denied(denied, 'engineering-security')
+        for name in ('engineering-security', 'engineering-concurrency',
+                     'engineering-error-handling', 'engineering-performance'):
+            self._agent_skill(f'engineering-playbook:{name}', {'success': True})
         self._assert_allowed(self._agent_pre(*write))
 
     def test_subagent_load_does_not_open_the_gate_for_the_parent(self):
@@ -652,7 +723,7 @@ class TestSubagentIsolation(_HookTest):
     # ── Parent is not charged for subagent work ───────────────────────────────
 
     def test_subagent_write_does_not_arm_parent_spec_gate(self):
-        self._write(_skill('engineering-governance') + _ul('how much disk is left?') + _al('running du'))
+        self._write(_governed() + _ul('how much disk is left?') + _al('running du'))
         self._write_agent(_ul('implement the parser') + _al('writing it'))
         self._assert_allowed(self._agent_pre('Write', {'file_path': 'src/parser.rs', 'content': 'x'}))
         self._assert_allowed(self._agent_pre('Bash', {'command': 'cargo test'}))
@@ -668,7 +739,7 @@ class TestSubagentIsolation(_HookTest):
 
     def test_parent_write_without_token_still_blocks(self):
         # Even with a confirmed, validated subagent running alongside.
-        self._write(_skill('engineering-governance') + _ul('add the handler') + _al('writing it'))
+        self._write(_governed() + _ul('add the handler') + _al('writing it'))
         self._write_agent(_ul('implement the parser') + _al('[SPEC CONFIRMED] writing it'))
         self._assert_allowed(self._pre('Write', {'file_path': 'src/handler.rs', 'content': 'x'}))
         self._assert_allowed(self._agent_pre('Write', {'file_path': 'src/parser.rs', 'content': 'x'}))
@@ -725,7 +796,7 @@ class TestSubagentIsolation(_HookTest):
 
     def test_subagent_token_in_its_own_transcript_passes_spec_gate(self):
         # Token only in the subagent's transcript: confirmed, parent never was.
-        self._write(_skill('engineering-governance') + _ul('run the plan') + _al('dispatching'))
+        self._write(_governed() + _ul('run the plan') + _al('dispatching'))
         self._write_agent(_ul('implement the parser') + _al('[SPEC CONFIRMED] writing it'))
         self._assert_allowed(self._agent_pre('Write', {'file_path': 'src/parser.rs', 'content': 'x'}))
         self.assertNotIn('spec-gate', self._agent_stop().get('reason', ''))
