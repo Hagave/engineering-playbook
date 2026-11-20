@@ -191,13 +191,15 @@ class TestGovernanceChanges(unittest.TestCase):
         self.assertIsNotNone(m)
         section = m.group(1)
         for skill in [
-            'engineering-typescript',
             'engineering-security',
             'engineering-concurrency',
             'engineering-error-handling',
             'engineering-performance',
         ]:
             self.assertIn(skill, section, f'Companion skill missing: {skill}')
+        self.assertIn('the language opt-in for the code you write', section)
+        for lang_skill in ('engineering-typescript', 'engineering-go', 'engineering-java'):
+            self.assertIn(lang_skill, section)
 
     def test_spec_gate_section_exists(self):
         self.assertIn('## Spec gate', self.content)

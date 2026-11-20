@@ -946,10 +946,31 @@ before Stop runs.
 
 #### Skill gate
 
-Writing a source file is denied until `engineering-governance` has been
+Writing a source file is denied until the skills that file needs have been
 loaded via the Skill tool in the session. This converts the most common
 failure mode observed in POC validation (skills never loaded, causing
 non-conformant scaffolds) into a mechanical block.
+
+What a write needs comes from a data table, `hooks/data/skill_requirements.json`,
+so the gate itself names no language or framework:
+
+- every source file: `engineering-governance` and its four companions
+  (security, concurrency, error handling, performance);
+- the language opt-in matching the file's extension (a `.py` file in a
+  repository that also has `tsconfig.json` does not need TypeScript);
+- a framework skill when the nearest manifest above the file declares its
+  dependency (`@nestjs/core` in `package.json` → `engineering-nestjs`), so a
+  monorepo is read per package;
+- a topic skill when the file itself touches the topic: by file name
+  (`Dockerfile`, `compose.yaml`, `*.prisma`, test files), by an import line
+  naming a package (`amqplib`, `org.apache.kafka`, `confluent_kafka`), or by a
+  code pattern. A Dockerfile needs `engineering-docker` and nothing else.
+
+The destination is read from every write channel: the editing tools, a shell
+redirect or `tee`, and the shell copy/move commands for source files. A
+temporary or git-ignored file needs nothing. The deny lists each missing skill
+with the reason it applies. Supporting another stack is a new row in the table,
+and a structural test checks that every row names an existing skill.
 
 #### Validation gate (Stop)
 

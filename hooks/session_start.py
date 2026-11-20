@@ -33,9 +33,12 @@ _ONBOARD_MARKER = os.path.join(STATE_DIR, '.onboarded')
 
 CONTEXT = """ENGINEERING PLAYBOOK ACTIVE.
 
-Load `engineering-governance` (Skill tool) before writing or editing any source \
-file this session. A PreToolUse gate denies the write otherwise, so loading it \
-up front is strictly cheaper than being denied and retrying.
+Load `engineering-governance` (Skill tool) and its companions (security, \
+concurrency, error-handling, performance, and the language opt-in of the code) \
+before writing or editing any source file this session. A PreToolUse gate \
+denies the write otherwise, and also requires the skill of the file's framework \
+and topic (a Dockerfile, a broker import, a test file), so loading them up \
+front is strictly cheaper than being denied and retrying.
 
 - Routing: `engineering-playbook` holds the full routing table (core, framework, \
 language, driver). The core rules are language-agnostic; load the \

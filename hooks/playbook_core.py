@@ -16,6 +16,7 @@ not need to be manually re-ported to a second implementation.
 
 import ast
 import contextlib
+import fnmatch
 import glob
 import hashlib
 import json
@@ -72,10 +73,12 @@ _REDIRECT_PUNCT = ';&|()<>'
 _TEE_VALUE_OPTS = frozenset({'--output-error'})
 
 
-def redirect_code_targets(command: str) -> list[str] | None:
+def redirect_code_targets(command: str, source_only: bool = True) -> list[str] | None:
     """Source files `command` writes through a redirect or `tee`, as written;
     None when it does not tokenize (the text patterns then apply, failing
-    closed).
+    closed). With `source_only` False, every file it writes that way, source or
+    not, except through a nested shell script (`bash -c`), whose targets are
+    read for source only.
 
     Read as the shell reads it, not as text: a quoted `->` in a commit message
     (`git commit -m "rename a.py -> b.py"`) or a `>` inside an echoed string is
@@ -111,7 +114,7 @@ def redirect_code_targets(command: str) -> list[str] | None:
         # redirects are read from the script itself (`bash -c "echo x > a.py"`).
         for script in _nested_scripts(words):
             targets += _redirect_or_text_targets(script)
-    return [t for t in targets if _ends_with_code_ext(t)]
+    return [t for t in targets if not source_only or _ends_with_code_ext(t)]
 
 
 def _ends_with_code_ext(path: str) -> bool:
@@ -1569,6 +1572,268 @@ def language_notice(cwd: str) -> str:
     opts = ', '.join(f'engineering-{lang}' for lang, _ in found)
     return (f'[playbook:language] Multiple languages in the root: {listed}. Load '
             f'the matching opt-in ({opts}) for the part you touch.')
+
+
+# ─── Skills a write requires ─────────────────────────────────────────────────
+
+_SKILL_REQUIREMENTS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'data', 'skill_requirements.json')
+_skill_requirements_cache: dict | None = None
+_SOURCE_READ_LIMIT = 512 * 1024
+_MANIFEST_WALK_LIMIT = 16
+_PACKAGE_JSON_SECTIONS = ('dependencies', 'devDependencies', 'peerDependencies',
+                          'optionalDependencies')
+
+# Only lines shaped as an import are read (and a dynamic import only with a
+# literal quoted argument), so a comment or docstring that mentions a package
+# does not put the file on its topic. Accepted cost: a module name built at run
+# time is not seen.
+_IMPORT_LINE_RE = re.compile(
+    r'^\s*(?:import|from|use|using|require|require_relative|extern\s+crate)\b'
+    r'|^\s*(?:\}|export\b.*)\s*\bfrom\b'
+    r'|^\s*#\s*include\b'
+    r'|^\s*(?:[\w.]+\s+)?"[^"\s]+"\s*$'
+)
+_DYNAMIC_IMPORT_RE = re.compile(r"""\b(?:require|import)\s*\(\s*["']([^"'\s]+)["']""")
+_QUOTED_RE = re.compile(r"""["']([^"'\s]+)["']""")
+
+
+class SkillRequirement(NamedTuple):
+    skill: str
+    reason: str
+
+
+def skill_requirements() -> dict:
+    """The table in hooks/data/skill_requirements.json, read once per process.
+
+    An unreadable or malformed table yields {}: the skill gate then requires
+    governance alone, which is how it behaved before the table existed. Denying
+    every write over a broken install would leave no way out but editing the
+    plugin, and the structural tests already fail on a malformed table."""
+    global _skill_requirements_cache
+    if _skill_requirements_cache is None:
+        try:
+            with open(_SKILL_REQUIREMENTS_PATH, encoding='utf-8') as f:
+                data = json.load(f)
+            _skill_requirements_cache = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _skill_requirements_cache = {}
+    return _skill_requirements_cache
+
+
+def _requirement_text(tool_name: str, tool_input: dict, command: str) -> str:
+    """The whole text a call writes, read for import lines and code patterns.
+    Not the secret scan's added-lines view: an import kept by an edit still
+    puts the file on its topic."""
+    if tool_name == 'Write':
+        return str(tool_input.get('content') or '')
+    if tool_name == 'Edit':
+        return str(tool_input.get('new_string') or '')
+    if tool_name == 'MultiEdit':
+        edits = tool_input.get('edits')
+        if isinstance(edits, list):
+            return '\n'.join(str(e.get('new_string') or '') for e in edits if isinstance(e, dict))
+        return ''
+    if tool_name == 'Bash':
+        return str(tool_input.get('command') or command or '')
+    return ''
+
+
+def _write_paths(tool_name: str, tool_input: dict, command: str, root: str) -> list[str]:
+    """Every destination of the write. An editing tool's file counts whatever its
+    extension, so a Dockerfile or a Prisma schema reaches the topic rows. A shell
+    command yields its source-file targets plus the other files it writes by a
+    redirect or `tee` (`cat > Dockerfile <<EOF`); a non-source file it copies,
+    moves or downloads is not read, a gap the topic rows accept."""
+    if tool_name in CODE_WRITE_TOOLS:
+        path = str(tool_input.get('file_path') or tool_input.get('path')
+                   or tool_input.get('target_file') or '')
+        if not path:
+            return []
+        return [os.path.normpath(os.path.join(root, os.path.expanduser(path)))]
+    if tool_name == 'Bash':
+        paths = code_write_targets(tool_name, {**tool_input, '_cwd': root}, command)
+        base = _command_root(command, root) or root
+        for target in redirect_code_targets(command, source_only=False) or ():
+            if not _ends_with_code_ext(target) and target != '/dev/null':
+                paths.append(os.path.normpath(os.path.join(base, os.path.expanduser(target))))
+        return paths
+    return []
+
+
+def _read_source(path: str) -> str:
+    # A regular file only: opening a named pipe at the written path would block
+    # the hook until its timeout.
+    if not os.path.isfile(path):
+        return ''
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read(_SOURCE_READ_LIMIT)
+    except OSError:
+        return ''
+
+
+def _project_relative(path: str, root: str) -> str:
+    real, base = os.path.realpath(path), os.path.realpath(root) if root else ''
+    if base and (real == base or real.startswith(base + os.sep)):
+        return os.path.relpath(real, base).replace(os.sep, '/')
+    return path.replace(os.sep, '/')
+
+
+def _nearest_manifest(start: str, name: str, root: str) -> str:
+    """The manifest called `name` closest above `start`: the one that governs the
+    file in a monorepo. The walk stops at the project root, at a repository
+    boundary, or after a fixed number of levels."""
+    stop = os.path.realpath(root) if root else ''
+    current = os.path.realpath(start)
+    for _ in range(_MANIFEST_WALK_LIMIT):
+        if '*' in name:
+            hits = sorted(glob.glob(os.path.join(glob.escape(current), name)))
+            if hits:
+                return hits[0]
+        elif os.path.isfile(os.path.join(current, name)):
+            return os.path.join(current, name)
+        parent = os.path.dirname(current)
+        if current == stop or os.path.exists(os.path.join(current, '.git')) or parent == current:
+            break
+        current = parent
+    return ''
+
+
+def _manifest_declares(manifest: str, dependency: str, cache: dict[str, object]) -> bool:
+    """Whether `manifest` declares `dependency`. A package.json is read by its
+    dependency sections, so a script or description mentioning the name does not
+    count; any other manifest format is matched as a whole name in its text."""
+    if manifest not in cache:
+        text = _read_source(manifest)
+        if os.path.basename(manifest) == 'package.json':
+            names: set[str] = set()
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = {}
+            if isinstance(data, dict):
+                for section in _PACKAGE_JSON_SECTIONS:
+                    deps = data.get(section)
+                    if isinstance(deps, dict):
+                        names.update(str(k) for k in deps)
+            cache[manifest] = names
+        else:
+            cache[manifest] = text
+    declared = cache[manifest]
+    if isinstance(declared, set):
+        return dependency in declared
+    return bool(re.search(r'(?<![\w.-])' + re.escape(dependency) + r'(?![\w-])', str(declared)))
+
+
+def _imported_name(text: str, names: list[str]) -> str:
+    """The first of `names` that an import line of `text` names. Inside a quoted
+    module path the name must be the whole path or its prefix up to a `/`, so
+    `./kafka` or `kafkajs` is not `kafka`; an unquoted import (Java, C#, Rust,
+    Python) matches the name as a dotted or `::` prefix of the imported path."""
+    quoted: list[str] = []
+    bare: list[str] = []
+    for line in text.splitlines():
+        quoted.extend(_DYNAMIC_IMPORT_RE.findall(line))
+        if not _IMPORT_LINE_RE.search(line):
+            continue
+        found = _QUOTED_RE.findall(line)
+        if found:
+            quoted.extend(found)
+        else:
+            bare.append(line)
+    bare_text = '\n'.join(bare)
+    for name in names:
+        if any(q == name or q.startswith(name + '/') for q in quoted):
+            return name
+        if bare_text and re.search(r'(?<![\w@./-])' + re.escape(name) + r'(?![\w-])', bare_text):
+            return name
+    return ''
+
+
+def _requirements_for_path(path: str, written: str, root: str, table: dict,
+                           manifest_cache: dict[str, object]) -> list[SkillRequirement]:
+    is_source = _ends_with_code_ext(path)
+    ext = os.path.splitext(path)[1].lower()
+    shown = _project_relative(path, root)
+    found: list[SkillRequirement] = []
+
+    language = ''
+    languages = table.get('languages')
+    if isinstance(languages, dict):
+        for name, row in languages.items():
+            if isinstance(row, dict) and ext in row.get('extensions', ()):
+                language = name
+                if is_source and row.get('skill'):
+                    found.append(SkillRequirement(str(row['skill']), f'{name} file {shown}'))
+                break
+    if is_source:
+        found[:0] = [SkillRequirement(str(s), 'every source write')
+                     for s in table.get('companions', ())]
+
+    frameworks: set[str] = set()
+    if is_source and language:
+        for row in table.get('frameworks', ()):
+            if not isinstance(row, dict) or language not in row.get('languages', ()):
+                continue
+            for manifest_name, deps in (row.get('manifests') or {}).items():
+                manifest = _nearest_manifest(os.path.dirname(path), manifest_name, root)
+                dep = next((d for d in deps if manifest and _manifest_declares(manifest, d, manifest_cache)), '')
+                if dep:
+                    frameworks.add(str(row['skill']))
+                    found.append(SkillRequirement(
+                        str(row['skill']), f'{dep} in {_project_relative(manifest, root)}'))
+                    break
+
+    text = (written + '\n' + _read_source(path)) if is_source else ''
+    for row in table.get('topics', ()):
+        if not isinstance(row, dict) or not (is_source or row.get('non_code')):
+            continue
+        if row.get('when_framework') and row['when_framework'] not in frameworks:
+            continue
+        reason = ''
+        for pattern in row.get('paths', ()):
+            target = shown if '/' in pattern else os.path.basename(path)
+            if fnmatch.fnmatchcase(target, pattern):
+                reason = f'{shown} matches {pattern}'
+                break
+        if not reason and text:
+            name = _imported_name(text, list(row.get('imports', ())))
+            if name:
+                reason = f'{shown} imports {name}'
+        if not reason and text:
+            for pattern in row.get('patterns', ()):
+                try:
+                    if re.search(pattern, text):
+                        reason = f'{shown} contains {pattern}'
+                        break
+                except re.error:
+                    continue
+        if reason:
+            found.append(SkillRequirement(str(row['skill']), reason))
+    return found
+
+
+def required_skills(tool_name: str, tool_input: dict, command: str, cwd: str) -> list[SkillRequirement]:
+    """The skills this write needs loaded, each with the reason it applies, in
+    table order and without repeats. Throwaway destinations (temp, git-ignored)
+    need none. See hooks/data/skill_requirements.json for the rows."""
+    table = skill_requirements()
+    if not table:
+        return []
+    root = cwd or os.getcwd()
+    written = _requirement_text(tool_name, tool_input, command)
+    manifest_cache: dict[str, object] = {}
+    seen: dict[str, SkillRequirement] = {}
+    for path in _write_paths(tool_name, tool_input, command, root):
+        found = _requirements_for_path(path, written, root, table, manifest_cache)
+        # Throwaway is checked last: it runs `git check-ignore`, and most shell
+        # redirects (a log, /dev/stderr) require nothing anyway.
+        if not found or is_throwaway_write(path, root):
+            continue
+        for req in found:
+            seen.setdefault(req.skill, req)
+    return list(seen.values())
 
 
 SUSPEND_SKILL = 'playbook-off'
