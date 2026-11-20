@@ -524,13 +524,9 @@ def _push_range(repo: str) -> str:
 # is exactly what still has to get out at that point.
 HANDOFF_OPEN = '[HANDOFF]'
 HANDOFF_CLOSE = '[/HANDOFF]'
-# Markers must sit on lines of their own: a response that merely MENTIONS them
-# inline ("write between `[HANDOFF]` and `[/HANDOFF]`") would otherwise save the
-# text between the two mentions as a handoff, overwriting a real one.
-HANDOFF_RE = re.compile(
-    r'^[ \t]*' + re.escape(HANDOFF_OPEN) + r'[ \t]*\n(.*?)^[ \t]*' + re.escape(HANDOFF_CLOSE) + r'[ \t]*$',
-    re.DOTALL | re.MULTILINE,
-)
+# An inline mention of the markers would otherwise save the text between the two
+# mentions as a handoff, overwriting a real one.
+HANDOFF_RE = playbook_core.marker_block_re(HANDOFF_OPEN, HANDOFF_CLOSE)
 
 _HANDOFF_FORMAT = (
     f'Write the handoff in your response text between a {HANDOFF_OPEN} line and a '
@@ -1279,6 +1275,55 @@ def _capture_handoff(transcript: str | None) -> None:
         pass  # a handoff write must never block a turn from ending
 
 
+# Seen blocks are kept by hash so the continuation Stop after a block, which
+# re-reads the same turn, records and announces each block once.
+_DEVIATIONS_SEEN_CAP = 64
+# The user-facing line for the deviations recorded at this Stop; every exit of
+# the Stop handler carries it, the blocking one included.
+_DEVIATION_NOTICE = ''
+
+
+def _capture_deviations(state: dict, transcript: str | None) -> str:
+    """Record each [PLAYBOOK-DEVIATION] block the model wrote this turn in the
+    deviation journal and return the notice for the user ('' when none is new).
+    A subagent's blocks are read from its own transcript and recorded too: a
+    deviation inside a subagent is the one most likely never to reach the user."""
+    try:
+        deviations = playbook_core.parse_deviations(_turn_assistant_text(transcript))
+    except Exception:  # noqa: BLE001 -- a deviation record must never block a turn from ending
+        return ''
+    seen = [h for h in state.get('deviations_seen') or [] if isinstance(h, str)]
+    loaded = state.get('skills') if isinstance(state.get('skills'), list) else []
+    journal = playbook_core.deviation_journal_path(STATE_DIR)
+    lines: list[str] = []
+    for deviation in deviations:
+        digest = hashlib.sha256(deviation.block.encode('utf-8')).hexdigest()[:16]
+        if digest in seen:
+            continue
+        seen.append(digest)
+        fields = deviation.fields
+        skill = fields.get('skill', '')
+        version = playbook_core.skill_version(skill)
+        playbook_core.append_incident(journal, {
+            'ts': time.time(), 'session_id': _SESSION_ID, 'agent_id': _AGENT_ID, 'cwd': _CWD,
+            **{name: fields.get(name, '') for name in playbook_core.DEVIATION_FIELDS},
+            'skill_version': version, 'skill_loaded': skill in loaded,
+            'incomplete': list(deviation.incomplete),
+        }, max_lines=playbook_core.DEVIATION_MAX_LINES)
+        line = f'- {skill or "(no skill named)"}'
+        line += f' {version}' if version else ' (not a playbook skill)'
+        line += f' — {fields.get("action") or "?"}: {fields.get("rule", "")[:160]}'
+        if deviation.incomplete:
+            line += f' [incomplete: {", ".join(deviation.incomplete)}]'
+        lines.append(line)
+    state['deviations_seen'] = seen[-_DEVIATIONS_SEEN_CAP:]
+    if not lines:
+        return ''
+    who = f' (subagent {_AGENT_ID})' if _AGENT_ID else ''
+    return (f'[playbook:deviation] The model reported {len(lines)} deviation(s) from a playbook '
+            f'rule{who}, recorded in {journal}:\n' + '\n'.join(lines))
+
+
 def _refresh_carryover(state: dict, transcript: str | None) -> None:
     """Keep the carry-over note current once the session is in compaction
     territory.
@@ -1328,12 +1373,16 @@ def _block_turn(state: dict, reason: str, gate: str) -> None:
     next. `gate` is recorded so the continuation Stop clears only its flag."""
     state['stop_blocked'] = [*state.get('stop_blocked', []), gate]
     _save_state(state)
-    print(json.dumps({'decision': 'block', 'reason': reason + _TURN_LOST_NOTE}))
+    output = {'decision': 'block', 'reason': reason + _TURN_LOST_NOTE}
+    if _DEVIATION_NOTICE:
+        output['systemMessage'] = _DEVIATION_NOTICE
+    print(json.dumps(output))
     sys.exit(0)
 
 
 def _handle_stop(input_data: dict, state: dict, transcript: str | None,
                  spec_transcript: str | None) -> None:
+    global _DEVIATION_NOTICE
     # Suspended via /playbook-off → no gate at all.
     if _scan_skills(transcript, state):
         state['pending_validation'] = False
@@ -1346,6 +1395,7 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
     # carries stop_hook_active, which returns early -- the handoff written in the
     # blocked response would never be saved.
     _capture_handoff(transcript)
+    _DEVIATION_NOTICE = _capture_deviations(state, spec_transcript)
     _refresh_carryover(state, transcript)
 
     # A continuation after a block: the gates that already blocked this turn are
@@ -1401,6 +1451,8 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
     ends = [t for t in state.get('turn_ends') or [] if isinstance(t, (int, float))]
     state['turn_ends'] = [*ends, time.time()][-REVIEW_TIMES_KEPT:]
     _save_state(state)
+    if _DEVIATION_NOTICE:
+        print(json.dumps({'systemMessage': _DEVIATION_NOTICE}))
     sys.exit(0)
 
 

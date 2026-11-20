@@ -641,6 +641,104 @@ class TestShellEditNotice(_HookTest):
 
 # ── Subagent isolation ────────────────────────────────────────────────────────
 
+class TestDeviationJournal(_HookTest):
+    """A [PLAYBOOK-DEVIATION] block in the turn's text is recorded in the
+    deviation journal and shown to the user, once, on every way a turn ends."""
+
+    _BLOCK = ('[PLAYBOOK-DEVIATION]\n'
+              'skill: engineering-concurrency\n'
+              'rule: Idempotency: store key -> response in Redis\n'
+              'action: deviated\n'
+              'instead: key and fingerprint in the same DB transaction\n'
+              'why: Redis outside the transaction loses the record when the DB write fails\n'
+              '[/PLAYBOOK-DEVIATION]')
+
+    def setUp(self):
+        super().setUp()
+        self.journal = os.path.join(self.dir, 'deviations.jsonl')
+        saved = os.environ.get('PLAYBOOK_DEVIATION_JOURNAL')
+        os.environ['PLAYBOOK_DEVIATION_JOURNAL'] = self.journal
+        self.addCleanup(lambda: os.environ.pop('PLAYBOOK_DEVIATION_JOURNAL', None) if saved is None
+                        else os.environ.__setitem__('PLAYBOOK_DEVIATION_JOURNAL', saved))
+        self.agent_id = f'a{uuid.uuid4().hex[:16]}'
+        self.addCleanup(lambda: os.path.exists(p := _state_path(f'{self.session_id}-{self.agent_id}'))
+                        and os.remove(p))
+
+    def _records(self) -> list[dict]:
+        if not os.path.exists(self.journal):
+            return []
+        with open(self.journal) as f:
+            return [json.loads(line) for line in f]
+
+    def _final_stop(self, message: str, active: bool = False) -> subprocess.CompletedProcess:
+        return _call(self.session_id, self.transcript, '', {}, event='Stop',
+                     extra={'stop_hook_active': active, 'last_assistant_message': message,
+                            'cwd': self.dir})
+
+    def test_a_block_in_the_final_message_is_recorded_and_shown(self):
+        self._write(_skill('engineering-concurrency') + _ul('add idempotency'))
+        r = self._final_stop('Done, with one deviation.\n\n' + self._BLOCK)
+        self.assertNotEqual(_out(r).get('decision'), 'block', r.stdout)
+        notice = _out(r).get('systemMessage', '')
+        self.assertIn('[playbook:deviation]', notice)
+        self.assertIn('engineering-concurrency', notice)
+        self.assertIn('deviated: Idempotency', notice)
+        self.assertIn(self.journal, notice)
+        [record] = self._records()
+        self.assertEqual(record['skill'], 'engineering-concurrency')
+        self.assertEqual(record['action'], 'deviated')
+        self.assertEqual(record['instead'], 'key and fingerprint in the same DB transaction')
+        self.assertTrue(record['skill_loaded'])
+        self.assertRegex(record['skill_version'], r'^\d+\.\d+\.\d+$')
+        self.assertEqual((record['session_id'], record['agent_id'], record['cwd']),
+                         (self.session_id, '', self.dir))
+        self.assertEqual(record['incomplete'], [])
+
+    def test_a_turn_without_a_block_records_nothing(self):
+        self._write(_ul('hi'))
+        r = self._final_stop('Hello.')
+        self.assertNotIn('systemMessage', _out(r))
+        self.assertEqual(self._records(), [])
+
+    def test_a_skill_not_loaded_or_unknown_is_flagged(self):
+        self._write(_ul('go'))
+        block = self._BLOCK.replace('engineering-concurrency', 'engineering-cobol')
+        notice = _out(self._final_stop(block)).get('systemMessage', '')
+        self.assertIn('engineering-cobol (not a playbook skill)', notice)
+        [record] = self._records()
+        self.assertEqual((record['skill_version'], record['skill_loaded']), ('', False))
+
+    def test_a_blocked_turn_still_shows_it_and_the_continuation_records_it_once(self):
+        self._write(_governed() + _ul('go') + _al('no token'))
+        self._assert_allowed(self._pre('Write', {'file_path': 'src/user.ts', 'content': 'x'}))
+        self._pre('Bash', {'command': 'npm test'})
+        blocked = self._final_stop('Wrote it.\n\n' + self._BLOCK)
+        self.assertEqual(_out(blocked).get('decision'), 'block', blocked.stdout)
+        self.assertIn('spec-gate', _out(blocked).get('reason', ''))
+        self.assertIn('[playbook:deviation]', _out(blocked).get('systemMessage', ''))
+        again = self._final_stop('[SPEC CONFIRMED] wrote it.\n\n' + self._BLOCK, active=True)
+        self.assertNotIn('systemMessage', _out(again))
+        self.assertEqual(len(self._records()), 1)
+
+    def test_a_subagent_block_is_recorded_from_its_own_transcript(self):
+        agent_transcript = os.path.join(self.dir, 'agent.jsonl')
+        with open(agent_transcript, 'w') as f:
+            f.write(_ul('implement the consumer') + _al(self._BLOCK))
+        self._write(_ul('dispatch it'))
+        r = _call(self.session_id, self.transcript, '', {}, event='SubagentStop', extra={
+            'agent_id': self.agent_id, 'agent_type': 'general-purpose',
+            'agent_transcript_path': agent_transcript, 'stop_hook_active': False})
+        self.assertIn(f'subagent {self.agent_id}', _out(r).get('systemMessage', ''))
+        [record] = self._records()
+        self.assertEqual(record['agent_id'], self.agent_id)
+
+    def test_a_suspended_playbook_records_nothing(self):
+        self._write(_skill('playbook-off') + _ul('prototype'))
+        r = self._final_stop(self._BLOCK)
+        self.assertNotIn('systemMessage', _out(r))
+        self.assertEqual(self._records(), [])
+
+
 class TestSubagentIsolation(_HookTest):
     """A subagent's hook events (Agent / Workflow) arrive with the parent's
     session_id AND transcript_path — only agent_id tells them apart (captured

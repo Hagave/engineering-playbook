@@ -3329,19 +3329,18 @@ def journal_path(state_dir: str, session_id: str = '', cwd: str | None = None,
     return path.replace('.state-', '.learn-').replace('.json', '.jsonl')
 
 
-def append_incident(path: str, record: dict) -> None:
-    """Append one failure record, trimming the journal to its last
-    JOURNAL_MAX_LINES. Never raises — a journal write must not be able to fail
-    a tool call."""
+def append_incident(path: str, record: dict, max_lines: int = JOURNAL_MAX_LINES) -> None:
+    """Append one record, trimming the journal to its last `max_lines`. Never
+    raises — a journal write must not be able to fail a tool call."""
     try:
         line = json.dumps(record, separators=(',', ':'), default=str)
         with open(path, 'a') as f:
             f.write(line + '\n')
         with open(path) as f:
             lines = f.readlines()
-        if len(lines) > JOURNAL_MAX_LINES * 2:
+        if len(lines) > max_lines * 2:
             with open(path, 'w') as f:
-                f.writelines(lines[-JOURNAL_MAX_LINES:])
+                f.writelines(lines[-max_lines:])
     except Exception:
         pass
 
@@ -3362,6 +3361,102 @@ def read_incidents(path: str, limit: int = 50) -> list[dict]:
         if isinstance(obj, dict):
             out.append(obj)
     return out
+
+
+# ─── Deviations from a playbook rule ─────────────────────────────────────────
+#
+# A model that does not follow a skill rule, or follows one it believes wrong,
+# reports it in a block of its response text; the Stop hook records it. The
+# journal is one file for every project and kept across sessions: the rule
+# belongs to the playbook, and it is the playbook that gets fixed.
+
+DEVIATION_OPEN = '[PLAYBOOK-DEVIATION]'
+DEVIATION_CLOSE = '[/PLAYBOOK-DEVIATION]'
+DEVIATION_FIELDS = ('skill', 'rule', 'action', 'instead', 'why')
+DEVIATION_ACTIONS = ('deviated', 'followed')
+DEVIATION_MAX_LINES = 500
+DEVIATION_FIELD_MAX_CHARS = 2000
+DEVIATION_JOURNAL_ENV = 'PLAYBOOK_DEVIATION_JOURNAL'
+
+
+def marker_block_re(open_marker: str, close_marker: str) -> re.Pattern[str]:
+    """The text between two markers that each sit alone on their line. A
+    sentence that only names the markers ("write between `[HANDOFF]` and
+    `[/HANDOFF]`") is not a block. Accepted cost: a response that shows the
+    format with the markers on their own lines, fenced or not, is read as a
+    block; for a deviation the user sees it in the notice."""
+    return re.compile(
+        r'^[ \t]*' + re.escape(open_marker) + r'[ \t]*\n(.*?)^[ \t]*'
+        + re.escape(close_marker) + r'[ \t]*$',
+        re.DOTALL | re.MULTILINE,
+    )
+
+
+DEVIATION_RE = marker_block_re(DEVIATION_OPEN, DEVIATION_CLOSE)
+_DEVIATION_FIELD_RE = re.compile(
+    r'^[ \t]*[-*]?[ \t]*(' + '|'.join(DEVIATION_FIELDS) + r')[ \t]*:[ \t]*(.*)$', re.IGNORECASE)
+_SKILLS_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'skills')
+
+
+class Deviation(NamedTuple):
+    fields: dict[str, str]
+    incomplete: tuple[str, ...]
+    block: str
+
+
+def _deviation_skill(value: str) -> str:
+    return value.strip().strip('`').rsplit(':', 1)[-1].strip()
+
+
+def parse_deviations(text: str) -> list[Deviation]:
+    """Every deviation block in `text`, in order. A line that does not start a
+    field continues the previous one. `incomplete` names the fields that are
+    missing or hold a value the format does not allow (`instead` is required
+    only when the rule was not followed)."""
+    found: list[Deviation] = []
+    for body in DEVIATION_RE.findall(text or ''):
+        fields: dict[str, str] = {}
+        current = ''
+        for line in body.splitlines():
+            match = _DEVIATION_FIELD_RE.match(line)
+            if match:
+                current = match.group(1).lower()
+                fields[current] = match.group(2).strip()
+            elif current and line.strip():
+                fields[current] = (fields[current] + ' ' + line.strip()).strip()
+        if 'skill' in fields:
+            fields['skill'] = _deviation_skill(fields['skill'])
+        if 'action' in fields:
+            fields['action'] = fields['action'].strip().strip('`').lower()
+        fields = {k: scrub_secrets(v)[:DEVIATION_FIELD_MAX_CHARS] for k, v in fields.items()}
+        required = ['skill', 'rule', 'action', 'why']
+        if fields.get('action') != 'followed':
+            required.append('instead')
+        incomplete = [f for f in required if not fields.get(f)]
+        if fields.get('action') and fields['action'] not in DEVIATION_ACTIONS:
+            incomplete.append('action')
+        found.append(Deviation(fields, tuple(incomplete), body.strip()))
+    return found
+
+
+def deviation_journal_path(state_dir: str) -> str:
+    """The journal every project writes to; the environment variable moves it
+    (tests, a shared location)."""
+    return os.environ.get(DEVIATION_JOURNAL_ENV) or os.path.join(state_dir, '.deviations.jsonl')
+
+
+def skill_version(name: str) -> str:
+    """The `version:` of the installed skill, '' when the playbook has no skill
+    by that name: the record says which text of the rule the model read."""
+    if not re.fullmatch(r'[\w-]+', name or ''):
+        return ''
+    try:
+        with open(os.path.join(_SKILLS_ROOT, name, 'SKILL.md'), encoding='utf-8') as f:
+            head = f.read(2048)
+    except OSError:
+        return ''
+    match = re.search(r'^version:\s*([^\s]+)', head, re.MULTILINE)
+    return match.group(1) if match else 'unversioned'
 
 
 # ─── User preferences ─────────────────────────────────────────────────────────
