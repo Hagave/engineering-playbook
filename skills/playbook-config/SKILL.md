@@ -1,7 +1,7 @@
 ---
 name: playbook-config
 description: "The playbook's settings menu: response prose level, known-failure warnings, cost budgets, menu language, session status, learning from past failures and the red-lab-playbook (security scans of the user's own app in an isolated local copy). Use when the user says /playbook-config, asks for the playbook's settings, status or configuration, wants shorter or longer answers, wants warnings about past mistakes on or off, asks the playbook to learn from this project's failures, or a prompt names a red-lab-playbook step."
-version: 3.3.0
+version: 3.4.0
 user-invocable: true
 ---
 
@@ -89,11 +89,13 @@ Every step runs `python3 <playbook>/lab/run.py` from the project root with Bash,
 
 | Step | What to do |
 |---|---|
-| `setup` | Run `--setup`. It checks Docker and Compose, downloads the pinned ZAP image (about 1.2 GB, 3.8 GB on disk) and builds the sqlmap image. Say the size before starting; it can take minutes. |
+| `setup` | Run `--setup`. It checks Docker and Compose, downloads the pinned ZAP image (about 1.2 GB, 3.8 GB on disk), builds the sqlmap image and downloads the identity client's small Python image. Say the size before starting; it can take minutes. |
 | `passive` | Run `python3 <playbook>/lab/run.py` with no `--service`: it finds the compose file (listing them if there is more than one, to pick with `--compose-file`) and scans every service built from the project, each isolated. To scan one, add `--service <svc> --port <port>` (and a start path, default `/`). ZAP only reads responses; nothing is attacked. |
 | `active` | As `passive`, then add `--active`: ZAP sends attack payloads to the isolated copy. Say so before running. |
 | `sqlmap` | As `passive`, plus ask for one endpoint with the parameter to test (`/items?id=1`). Run `--sqlmap --service <svc> --port <port> --endpoint <path>`. |
-| `uninstall` | Say which images it removes (the ZAP and sqlmap scanner images) and that `setup` downloads them again, confirm, then run `--uninstall`. |
+| `uninstall` | Say which images it removes (the ZAP and sqlmap scanner images and the identity client's Python image) and that `setup` downloads them again, confirm, then run `--uninstall`. |
+
+On request (not a menu step yet), the identity mode: `--identities <file>` signs in as the ordinary customers in a personas file and lists the routes and what each one owns. Write that file outside the project, from the seed accounts the project documents, with `role: "customer"` only (the script refuses any other role and any file inside the project); never put a staff or operator credential in it. The playbook's README shows the format.
 
 When the project has no compose file, or `--setup` never ran, say what is missing and offer the step that fixes it. Report the script's findings as it prints them, with the fiche each one points to in `engineering-security`; exit code 0 with no findings means none were found in what was reached, not that the app is safe.
 

@@ -68,6 +68,11 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import identities
+from scope import PATH_RE as _PATH_RE
+from scope import within as _within
+
 # OWASP ZAP, official image, pinned by digest (multi-arch index: amd64 and
 # arm64). Moving to a newer ZAP is a change to this line, reviewed like code.
 ZAP_IMAGE = ('ghcr.io/zaproxy/zaproxy@sha256:'
@@ -92,6 +97,18 @@ SQLMAP_TARGETS_FILE = 'targets.txt'
 # failed scan is told from a clean one by this critical line in its output.
 SQLMAP_UNREACHABLE = 'unable to connect to the target URL'
 SQLMAP_RUN_MINUTES = 15  # outer cap on one sqlmap run against one endpoint
+# The identity client (lab/identity_client.py) runs on this image, the same
+# digest-pinned base sqlmap.Dockerfile builds on, with the client copied into
+# the run directory: the lab ships no image of its own.
+CLIENT_IMAGE = ('python:3.12-slim-bookworm@sha256:'
+                '935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df')
+CLIENT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'identity_client.py')
+CLIENT_INPUT, CLIENT_RESULT = 'input.json', 'result.json'
+CLIENT_RUN_MINUTES = 10
+# How long the client waits for the target to answer HTTP before it gives up;
+# well inside CLIENT_RUN_MINUTES, which also covers the logins and the lists.
+TARGET_READY_SECONDS = 240
+TARGET_LOG_LINES = 30
 # ZAP's -T, in minutes beyond the spider budget. zap-baseline applies it twice,
 # each phase on its own clock: once to wait for ZAP to start, once to wait for
 # the passive scan of what the spider found. The spider (-m) runs in between.
@@ -131,7 +148,6 @@ MIN_COMPOSE = (2, 20, 0)
 
 EXIT_CLEAN, EXIT_FINDINGS, EXIT_REFUSED, EXIT_ERROR = 0, 1, 2, 3
 
-_PATH_RE = re.compile(r'^/(?!/)[A-Za-z0-9._~!$&\'()*+,;=:%/-]*$')
 # A query string (sqlmap needs one, e.g. `id=1`): the path charset plus `?` and
 # `&`, still with no way to name another host.
 _QUERY_RE = re.compile(r'^[A-Za-z0-9._~!$&\'()*+,;=:%/?&=-]*$')
@@ -266,13 +282,20 @@ def setup() -> int:
             raise LabError('Downloading the scanner image failed (see the output above).', EXIT_ERROR)
     if not image_present(SQLMAP_IMAGE):
         build_sqlmap_image()
+    if not image_present(CLIENT_IMAGE):
+        print(f'Downloading the identity client\'s base image, pinned by digest:\n  {CLIENT_IMAGE}',
+              flush=True)
+        pulled = _run(['docker', 'pull', CLIENT_IMAGE], timeout=1800, capture=False)
+        if pulled.returncode != 0 or not image_present(CLIENT_IMAGE):
+            raise LabError('Downloading the identity client image failed (see the output above).',
+                           EXIT_ERROR)
     print('Ready.')
     return EXIT_CLEAN
 
 
 def uninstall() -> int:
     check_docker()
-    present = [img for img in (ZAP_IMAGE, SQLMAP_IMAGE) if image_present(img)]
+    present = [img for img in (ZAP_IMAGE, SQLMAP_IMAGE, CLIENT_IMAGE) if image_present(img)]
     if not present:
         print('The scanner images are not installed; nothing to remove.')
         return EXIT_CLEAN
@@ -311,18 +334,6 @@ class HostMount:
     target: str              # where it lands in the container
     read_only: bool
     volume_name: str | None  # set when it is a named volume bound to a host path
-
-
-def _within(path: str, root: str) -> bool:
-    """Whether `path`, links resolved, is `root` or sits under it. A mount of
-    `/work/shop-data` is not inside `/work/shop`: the separator guards that."""
-    if not path or not root:
-        return False
-    try:
-        real_root, real = os.path.realpath(root), os.path.realpath(path)
-    except (OSError, ValueError):
-        return False
-    return real == real_root or real.startswith(real_root + os.sep)
 
 
 def _within_any(path: str, roots: list[str]) -> bool:
@@ -483,6 +494,9 @@ def build_lab_config(base: dict, target: Target, project: str, report_dir: str,
     lab_networks[NETWORK] = {'internal': True}
     if tool == 'sqlmap':
         image, command = SQLMAP_IMAGE, sqlmap_command(level, risk, time_sec)
+    elif tool == 'identities':
+        image = CLIENT_IMAGE
+        command = ['python3', '-I', f'{REPORT_MOUNT}/{os.path.basename(CLIENT_SCRIPT)}']
     else:
         # -m bounds the spider; -T bounds ZAP's start-up and, separately, the
         # passive scan; an active scan is capped by ZAP config in scanner_command.
@@ -1171,9 +1185,21 @@ def _resolve_targets(args: argparse.Namespace, project_root: str,
 
 
 def scan(args: argparse.Namespace) -> int:
-    tool = 'sqlmap' if args.sqlmap else 'zap'
+    if args.identities and (args.sqlmap or args.active or args.gate):
+        raise LabError('--identities runs on its own: not with --sqlmap, --active or --gate.')
+    tool = 'sqlmap' if args.sqlmap else 'identities' if args.identities else 'zap'
     if args.sqlmap and args.active:
         raise LabError('--active is a ZAP option; --sqlmap is a separate SQL-injection scan.')
+    personas: list[dict] | None = None
+    if tool == 'identities':
+        for flag, value in (('--api-prefix', args.api_prefix), ('--openapi-path', args.openapi_path)):
+            if value and (not _PATH_RE.match(value) or '@' in value or '\\' in value):
+                raise LabError(f'Invalid {flag} {value!r}: it must start with a single "/" and '
+                               'name a path on the target service, not another host.')
+        try:
+            personas = identities.load_identities(args.identities, _repo_root(args.project_dir))
+        except identities.IdentityError as exc:
+            raise LabError(str(exc)) from exc
     if args.minutes < 1 or args.startup_seconds < 0:
         raise LabError('--minutes must be 1 or more and --startup-seconds 0 or more.')
     if args.active_minutes < 1:
@@ -1181,7 +1207,7 @@ def scan(args: argparse.Namespace) -> int:
     if tool == 'sqlmap' and (not 1 <= args.level <= 5 or not 1 <= args.risk <= 3 or args.time_sec < 1):
         raise LabError('--level must be 1-5, --risk 1-3, --time-sec 1 or more.')
     check_docker()
-    needed = SQLMAP_IMAGE if tool == 'sqlmap' else ZAP_IMAGE
+    needed = {'sqlmap': SQLMAP_IMAGE, 'identities': CLIENT_IMAGE}.get(tool, ZAP_IMAGE)
     if not image_present(needed):
         raise LabError('The scanner image is not installed. Run `lab/run.py --setup` first'
                        + (f' ({ZAP_DOWNLOAD_HINT}).' if tool == 'zap' else '.'))
@@ -1210,7 +1236,7 @@ def scan(args: argparse.Namespace) -> int:
         for target in targets:
             try:
                 worst = max(worst, _scan_target(target, base, project, project_root, args,
-                                                 tool, needed, worktrees))
+                                                 tool, needed, worktrees, personas=personas))
             except LabError as exc:
                 # A refusal is stack-wide and would repeat for every target, so
                 # it aborts the run; a single-target run propagates unchanged.
@@ -1235,12 +1261,13 @@ def scan(args: argparse.Namespace) -> int:
 
 def _scan_target(target: Target, base: dict, project: str, project_root: str,
                  args: argparse.Namespace, tool: str, needed: str,
-                 worktrees: dict[str, str]) -> int:
+                 worktrees: dict[str, str], personas: list[dict] | None = None) -> int:
     """Bring up an isolated copy with the scanner on `target`'s network, scan it,
     and remove the lab. One target at a time under the shared compose project
     name, torn down before the next. Returns this target's exit code; raises
     LabError on a refusal or a Docker/scanner error. `worktrees` (empty unless
-    --gate) redirects each service's build to the committed tree."""
+    --gate) redirects each service's build to the committed tree. `personas`
+    (identity mode only) are the customers the identity client signs in as."""
     # 0700: only this user can enter. The '.' ends the prefix that
     # remove_stale_workdirs matches; it is not in a project name.
     workdir = tempfile.mkdtemp(prefix=f'{project}.')
@@ -1289,6 +1316,9 @@ def _scan_target(target: Target, base: dict, project: str, project_root: str,
                            EXIT_ERROR)
         if args.startup_seconds:
             time.sleep(args.startup_seconds)
+        if tool == 'identities':
+            return _run_identities(target, project, project_root, config_file, report_dir,
+                                   args, personas or [])
         if tool == 'sqlmap':
             # The endpoint reaches sqlmap through a one-line targets file in the
             # mounted report dir, not on the command line: only -m makes sqlmap
@@ -1337,6 +1367,56 @@ def _scan_target(target: Target, base: dict, project: str, project_root: str,
                 print('[lab] the lab was removed.', file=sys.stderr)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _run_identities(target: Target, project: str, project_root: str, config_file: str,
+                    report_dir: str, args: argparse.Namespace, personas: list[dict]) -> int:
+    """Identity mode: sign each persona in, list what each one owns and print the
+    catalog and its coverage. The client and its input (which holds the login
+    credentials) go into the run directory, which is deleted with the lab."""
+    catalog, unknown = identities.build_catalog(project_root)
+    if not catalog:
+        raise LabError('No route declaration was found in the project, so there is nothing '
+                       'to aim at.' + (f' {len(unknown)} declaration(s) were not understood.'
+                                       if unknown else ''))
+    openapi_paths = ([args.openapi_path] if args.openapi_path
+                     else [(args.api_prefix or '') + p for p in identities.OPENAPI_CANDIDATES]
+                     + (list(identities.OPENAPI_CANDIDATES) if args.api_prefix else []))
+    spec = {'base_url': f'http://{target.service}:{target.port}', 'prefix': args.api_prefix,
+            'openapi_paths': openapi_paths, 'catalog': catalog, 'personas': personas,
+            'ready_seconds': TARGET_READY_SECONDS}
+    shutil.copy(CLIENT_SCRIPT, os.path.join(report_dir, os.path.basename(CLIENT_SCRIPT)))
+    input_path = os.path.join(report_dir, CLIENT_INPUT)
+    with open(input_path, 'w', encoding='utf-8') as fh:
+        json.dump(spec, fh)
+    print(f'Signing in {len(personas)} customers and listing what each owns on '
+          f'{spec["base_url"]}...', flush=True)
+    done = _compose(project, config_file, '--profile', NETWORK, 'run', '--rm', '--no-deps',
+                    SCANNER, timeout=CLIENT_RUN_MINUTES * 60 + SCANNER_MARGIN_SECONDS)
+    os.remove(input_path)
+    result_path = os.path.join(report_dir, CLIENT_RESULT)
+    if done.returncode != 0 or not os.path.exists(result_path):
+        detail = identities.redact((done.stderr or '').strip()[-1500:], identities.secrets_of(personas))
+        raise LabError('The identity client did not finish:\n' + detail, EXIT_ERROR)
+    with open(result_path, encoding='utf-8') as fh:
+        result = json.load(fh)
+    if result.get('reachable') is False:
+        logs = _compose(project, config_file, 'logs', '--no-color', '--tail',
+                        str(TARGET_LOG_LINES), target.service, timeout=60)
+        tail = identities.redact((logs.stdout or logs.stderr or '').strip(),
+                                 identities.secrets_of(personas))
+        raise LabError(
+            f'{spec["base_url"]} never answered in {TARGET_READY_SECONDS} s, so nothing was '
+            'tested. The lab has no internet: a service that downloads at start (packages, '
+            'models) never starts in it. Give the lab a compose override (--compose-file) whose '
+            'stage has its dependencies installed at build time. Last lines of '
+            f'{target.service!r}:\n{tail}', EXIT_ERROR)
+    print(identities.format_report(spec['base_url'], catalog, unknown, result, personas))
+    if not all(session.get('signed_in') for session in result.get('sessions') or []):
+        print('[lab] a persona could not sign in: check its login request and the seed data the '
+              'project loads at start.', file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_CLEAN
 
 
 def teardown(project: str, config_file: str) -> bool:
@@ -1478,6 +1558,16 @@ def main(argv: list[str] | None = None) -> int:
                         help=f'sqlmap risk 1-3 (default: {SQLMAP_RISK})')
     parser.add_argument('--time-sec', type=int, default=SQLMAP_TIME_SEC, dest='time_sec',
                         help=f'sqlmap time-based delay seconds (default: {SQLMAP_TIME_SEC})')
+    parser.add_argument('--identities', metavar='FILE',
+                        help='sign in as the ordinary customers in FILE (kept outside the project) '
+                             'and list the routes and what each one owns; sends only the OpenAPI '
+                             'lookups, the logins and GETs of the list routes')
+    parser.add_argument('--openapi-path',
+                        help='for --identities: where the application serves its OpenAPI JSON '
+                             '(default: a few usual paths are tried)')
+    parser.add_argument('--api-prefix',
+                        help='for --identities: prefix the routes are served under, e.g. /api/v1 '
+                             '(default: read from the OpenAPI document)')
     args = parser.parse_args(argv)
     try:
         if args.setup:

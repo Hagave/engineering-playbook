@@ -268,7 +268,8 @@ class TestSqlmap(_LabCase):
             service='app', port=8080, path='/', minutes=1, startup_seconds=0,
             project_dir='.', compose_file=['compose.yml'],  active=False,
             active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=True, endpoint='/items?id=1',
-            level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
+            level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None,
+            identities=None, openapi_path=None, api_prefix=None)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
@@ -849,7 +850,8 @@ class TestEnvironment(unittest.TestCase):
                                        active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
-                                      time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
+                                      time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None,
+            identities=None, openapi_path=None, api_prefix=None)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
@@ -877,7 +879,8 @@ class TestEnvironment(unittest.TestCase):
                                        active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
-                                      time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
+                                      time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None,
+            identities=None, openapi_path=None, api_prefix=None)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
@@ -1075,7 +1078,8 @@ class TestScanOrchestration(unittest.TestCase):
         base = dict(service=None, port=None, path='/', minutes=1, startup_seconds=0,
                     project_dir='.', compose_file=['c.yml'], active=False,
                     active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False, endpoint=None,
-                    level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
+                    level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None,
+            identities=None, openapi_path=None, api_prefix=None)
         base.update(over)
         return lab.argparse.Namespace(**base)
 

@@ -1102,6 +1102,50 @@ python3 lab/run.py --service app --port 8080     # from the project directory
 python3 lab/run.py --uninstall                   # removes the image
 ```
 
+**Signed in as a customer (`--identities FILE`).** Most routes of an API need a
+session, and a scan without one only sees 401s. In identity mode a small client
+(`lab/identity_client.py`, standard library, on the digest-pinned Python image
+`--setup` pulls) runs on the lab's internal network, signs in through the
+application's own login route as each ordinary customer in `FILE`, and lists
+what each one owns. It sends only the OpenAPI lookups, the logins and `GET`s of
+the list routes.
+
+- **The routes come from the code.** `audit/surface.py` reads the route
+  declarations (NestJS, Spring, Express/Fastify): a route is the method and
+  path the code declares, whatever that method does. When the application
+  serves an OpenAPI document (a few usual paths are tried, or
+  `--openapi-path`), its operations are compared with the code and the prefix
+  the routes are served under is read from it (or pass `--api-prefix`). A
+  route in one and not the other is reported; a declaration the reader cannot
+  understand is listed, never dropped.
+- **The personas file** lives outside the project (the lab refuses one inside
+  it, since it holds passwords). Each persona is a `customer` (no other role is
+  accepted: the lab never signs in as staff or as an operator), the tenant it
+  belongs to, its login request, where the session comes back and how it is
+  sent. At least two customers of one tenant and one of another:
+
+  ```json
+  {"personas": [
+    {"name": "alice", "role": "customer", "tenant": "001",
+     "login": {"method": "POST", "path": "/api/v1/auth/login",
+               "body": {"document": "<seed CPF>", "password": "<seed password>"}},
+     "token": {"json": "/data/accessToken"},
+     "send": {"header": "Authorization", "scheme": "Bearer"}}
+  ]}
+  ```
+
+  `token` is a JSON pointer into the login response or `{"cookie": "<name>"}`;
+  `send` is a header (with an optional scheme) or `{"cookie": "<name>"}`.
+  `login.headers` (optional) adds headers to the login request, such as the
+  `Origin` an app with a CSRF check requires on every POST; their values are
+  redacted from the report like the body's. Every body value of 4 or more
+  characters is redacted too; `login.public` lists the body keys whose values
+  are not secret (`["kind"]`), so the report keeps words such as `customer`.
+  Cookie names follow RFC 6265 (`access_token`, `__Host-sid`).
+- **The report** lists the sessions, the routes, the divergences from the
+  OpenAPI document and which routes with a parameter can be aimed at a resource
+  whose owner is known. No password and no session token is printed.
+
 **How a run works:**
 
 - **Isolated copy.** The lab renders the project's compose configuration into its own compose project. That copy has no published ports, no fixed names, subnets or addresses, and fresh volumes, so the running dev stack is not touched.
