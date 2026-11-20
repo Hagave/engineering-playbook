@@ -4,6 +4,9 @@ against the isolated copy of the application. Standard library only.
 
 Reads `input.json` from the mounted run directory, then:
 
+0. waits for the target to answer HTTP at all: a container that is running is
+   not yet a server that listens (a dev stack compiles, migrates and seeds
+   first), and one that never answers is reported as such, not as a failed login;
 1. looks for the application's OpenAPI document and lists its operations;
 2. signs each persona in through the application's own login route;
 3. as each persona, calls the catalog's list routes (GET, no path parameter)
@@ -17,11 +20,16 @@ other than the OpenAPI lookups, the logins and those GETs is sent.
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
 RUN_DIR = os.environ.get('REDLAB_RUN_DIR', '/zap/wrk')
 TIMEOUT_SECONDS = 10
+DEFAULT_READY_SECONDS = 240
+READY_POLL_SECONDS = 2
+# A gateway in front of an app that is still booting answers these.
+NOT_READY_STATUSES = frozenset({0, 502, 503, 504})
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_LIST_ROUTES = 200
 MAX_WALK_NODES = 5000
@@ -86,7 +94,8 @@ def sign_in(base_url: str, persona: dict) -> tuple[int, dict[str, str] | None]:
     """The login status and the headers that carry the session, or None when
     no session came back."""
     login = persona['login']
-    status, headers, body = request(base_url, login['method'], login['path'], body=login['body'])
+    status, headers, body = request(base_url, login['method'], login['path'],
+                                    headers=login.get('headers'), body=login['body'])
     token_spec, send = persona['token'], persona['send']
     token = None
     if 'json' in token_spec:
@@ -177,8 +186,24 @@ def infer_prefix(catalog: list[dict], operations: list[dict]) -> str:
     return max(votes, key=lambda p: (votes[p], -len(p)))
 
 
+def wait_until_answering(base_url: str, ready_seconds: float) -> float | None:
+    """Seconds until the target answered with a status other than a gateway's
+    "not ready", or None when it had not once the time ran out."""
+    start = time.monotonic()
+    while True:
+        if request(base_url, 'GET', '/')[0] not in NOT_READY_STATUSES:
+            return time.monotonic() - start
+        if time.monotonic() - start >= ready_seconds:
+            return None
+        time.sleep(READY_POLL_SECONDS)
+
+
 def run(spec: dict) -> dict:
     base_url = spec['base_url']
+    ready_seconds = spec.get('ready_seconds', DEFAULT_READY_SECONDS)
+    if wait_until_answering(base_url, ready_seconds) is None:
+        return {'reachable': False, 'openapi_path': None, 'operations': [], 'prefix': '',
+                'sessions': [], 'lists': {}}
     openapi_path, operations = openapi_operations(base_url, spec.get('openapi_paths') or [])
     prefix = spec['prefix'] if spec.get('prefix') is not None else infer_prefix(spec['catalog'], operations)
     list_routes = [route for route in spec['catalog']
@@ -197,8 +222,8 @@ def run(spec: dict) -> dict:
             except ValueError:
                 ids = []
             lists.setdefault(route['path'], {})[persona['name']] = {'status': status, 'count': len(ids)}
-    return {'openapi_path': openapi_path, 'operations': operations, 'prefix': prefix,
-            'sessions': sessions, 'lists': lists}
+    return {'reachable': True, 'openapi_path': openapi_path, 'operations': operations,
+            'prefix': prefix, 'sessions': sessions, 'lists': lists}
 
 
 def main() -> int:

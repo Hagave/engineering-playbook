@@ -105,6 +105,10 @@ CLIENT_IMAGE = ('python:3.12-slim-bookworm@sha256:'
 CLIENT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'identity_client.py')
 CLIENT_INPUT, CLIENT_RESULT = 'input.json', 'result.json'
 CLIENT_RUN_MINUTES = 10
+# How long the client waits for the target to answer HTTP before it gives up;
+# well inside CLIENT_RUN_MINUTES, which also covers the logins and the lists.
+TARGET_READY_SECONDS = 240
+TARGET_LOG_LINES = 30
 # ZAP's -T, in minutes beyond the spider budget. zap-baseline applies it twice,
 # each phase on its own clock: once to wait for ZAP to start, once to wait for
 # the passive scan of what the spider found. The spider (-m) runs in between.
@@ -1379,7 +1383,8 @@ def _run_identities(target: Target, project: str, project_root: str, config_file
                      else [(args.api_prefix or '') + p for p in identities.OPENAPI_CANDIDATES]
                      + (list(identities.OPENAPI_CANDIDATES) if args.api_prefix else []))
     spec = {'base_url': f'http://{target.service}:{target.port}', 'prefix': args.api_prefix,
-            'openapi_paths': openapi_paths, 'catalog': catalog, 'personas': personas}
+            'openapi_paths': openapi_paths, 'catalog': catalog, 'personas': personas,
+            'ready_seconds': TARGET_READY_SECONDS}
     shutil.copy(CLIENT_SCRIPT, os.path.join(report_dir, os.path.basename(CLIENT_SCRIPT)))
     input_path = os.path.join(report_dir, CLIENT_INPUT)
     with open(input_path, 'w', encoding='utf-8') as fh:
@@ -1395,6 +1400,17 @@ def _run_identities(target: Target, project: str, project_root: str, config_file
         raise LabError('The identity client did not finish:\n' + detail, EXIT_ERROR)
     with open(result_path, encoding='utf-8') as fh:
         result = json.load(fh)
+    if result.get('reachable') is False:
+        logs = _compose(project, config_file, 'logs', '--no-color', '--tail',
+                        str(TARGET_LOG_LINES), target.service, timeout=60)
+        tail = identities.redact((logs.stdout or logs.stderr or '').strip(),
+                                 identities.secrets_of(personas))
+        raise LabError(
+            f'{spec["base_url"]} never answered in {TARGET_READY_SECONDS} s, so nothing was '
+            'tested. The lab has no internet: a service that downloads at start (packages, '
+            'models) never starts in it. Give the lab a compose override (--compose-file) whose '
+            'stage has its dependencies installed at build time. Last lines of '
+            f'{target.service!r}:\n{tail}', EXIT_ERROR)
     print(identities.format_report(spec['base_url'], catalog, unknown, result, personas))
     if not all(session.get('signed_in') for session in result.get('sessions') or []):
         print('[lab] a persona could not sign in: check its login request and the seed data the '

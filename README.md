@@ -1087,6 +1087,12 @@ the list routes.
 
   `token` is a JSON pointer into the login response or `{"cookie": "<name>"}`;
   `send` is a header (with an optional scheme) or `{"cookie": "<name>"}`.
+  `login.headers` (optional) adds headers to the login request, such as the
+  `Origin` an app with a CSRF check requires on every POST; their values are
+  redacted from the report like the body's. Every body value of 4 or more
+  characters is redacted too; `login.public` lists the body keys whose values
+  are not secret (`["kind"]`), so the report keeps words such as `customer`.
+  Cookie names follow RFC 6265 (`access_token`, `__Host-sid`).
 - **The report** lists the sessions, the routes, the divergences from the
   OpenAPI document and which routes with a parameter can be aimed at a resource
   whose owner is known. No password and no session token is printed.

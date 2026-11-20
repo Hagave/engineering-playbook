@@ -29,6 +29,7 @@ import identity_client
 
 PASSWORD = 'S3nha-da-Alice!'
 TOKEN_PREFIX = 'tok-'
+APP_ORIGIN = 'http://app.local'
 
 
 def _persona(name: str, tenant: str, **over: object) -> dict:
@@ -115,6 +116,47 @@ class TestPersonasFile(_FileCase):
                 personas = _personas()
                 personas[0][key] = value
                 with self.assertRaises(identities.IdentityError):
+                    self.load(personas)
+
+    def test_cookie_names_follow_rfc_6265(self):
+        for name in ('access_token', '__Host-session', 'sid.v2'):
+            with self.subTest(name=name):
+                personas = _personas()
+                personas[0]['token'] = {'cookie': name}
+                personas[0]['send'] = {'cookie': name}
+                self.assertEqual(len(self.load(personas)), 3)
+        for name in ('a;b', 'a b', 'a=b', 'a,b', ''):
+            with self.subTest(name=name):
+                personas = _personas()
+                personas[0]['token'] = {'cookie': name}
+                with self.assertRaisesRegex(identities.IdentityError, '"token"'):
+                    self.load(personas)
+
+    def test_public_login_keys_must_name_body_keys(self):
+        personas = _personas()
+        personas[0]['login']['body']['kind'] = 'customer'
+        personas[0]['login']['public'] = ['kind']
+        self.assertEqual(len(self.load(personas)), 3)
+        for public in (['missing'], 'kind', [1], ['password']):
+            with self.subTest(public=public):
+                personas = _personas()
+                personas[0]['login']['public'] = public
+                with self.assertRaisesRegex(identities.IdentityError, 'login "public"'):
+                    self.load(personas)
+
+    def test_login_headers_are_accepted(self):
+        personas = _personas()
+        personas[0]['login']['headers'] = {'Origin': 'http://app.local', 'X-Client': 'mobile'}
+        self.assertEqual(self.load(personas)[0]['login']['headers']['Origin'], 'http://app.local')
+
+    def test_unusable_login_headers_are_refused(self):
+        bad = [['Origin'], {'Host': 'evil.example'}, {'Content-Length': '0'}, {'Bad Header': 'x'},
+               {'Origin': 'http://a\r\nX-Injected: 1'}, {'Origin': 1}, {'Origin': ''}]
+        for headers in bad:
+            with self.subTest(headers=headers):
+                personas = _personas()
+                personas[0]['login']['headers'] = headers
+                with self.assertRaisesRegex(identities.IdentityError, 'login "headers"'):
                     self.load(personas)
 
     def test_duplicate_names_are_refused(self):
@@ -242,7 +284,9 @@ class _App(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or b'{}')
         who = body.get('document', '').removeprefix('doc-') or None
         ok = who is not None and body.get('password') == f'{PASSWORD}{who}'
-        if self.path == '/api/v1/auth/login' and ok:
+        if self.path == '/api/v1/auth/origin-checked' and self.headers.get('Origin') != APP_ORIGIN:
+            self._send(403, {'error': 'origin not allowed'})
+        elif self.path in ('/api/v1/auth/login', '/api/v1/auth/origin-checked') and ok:
             self._send(200, {'data': {'accessToken': f'{TOKEN_PREFIX}{who}'}})
         elif self.path == '/api/v1/auth/session' and ok:
             # The session cookie is not the last Set-Cookie: each one must be read.
@@ -287,6 +331,17 @@ class TestIdentityClient(unittest.TestCase):
         result = self._run(personas)
         self.assertEqual(result['lists']['/accounts']['alice']['count'], 2)
 
+    def test_login_headers_reach_a_login_that_checks_the_origin(self):
+        personas = _personas()
+        for persona in personas:
+            persona['login']['path'] = '/api/v1/auth/origin-checked'
+        personas[0]['login']['headers'] = {'Origin': APP_ORIGIN}
+        result = self._run(personas)
+        status = {s['persona']: (s['signed_in'], s['status']) for s in result['sessions']}
+        self.assertEqual(status['alice'], (True, 200))
+        self.assertEqual(status['bob'], (False, 403))
+        self.assertEqual(result['lists']['/accounts']['alice']['count'], 2)
+
     def test_a_wrong_password_is_reported_and_lists_nothing_for_that_persona(self):
         personas = _personas()
         personas[2]['login']['body']['password'] = 'wrong'
@@ -307,6 +362,20 @@ class TestIdentityClient(unittest.TestCase):
 
     def test_an_unreachable_target_is_status_zero(self):
         self.assertEqual(identity_client.request('http://127.0.0.1:1', 'GET', '/')[0], 0)
+
+    def test_a_target_that_never_answers_is_reported_unreachable_and_nothing_is_sent(self):
+        with mock.patch.object(identity_client, 'sign_in') as sign_in:
+            result = identity_client.run({'base_url': 'http://127.0.0.1:1', 'prefix': None,
+                                          'openapi_paths': ['/api-json'], 'catalog': self.catalog,
+                                          'personas': _personas(), 'ready_seconds': 0})
+        self.assertEqual((result['reachable'], result['sessions']), (False, []))
+        sign_in.assert_not_called()
+
+    def test_the_client_waits_for_a_target_that_starts_late(self):
+        answers = iter([(0, [], b''), (502, [], b''), (503, [], b''), (404, [], b'')])
+        with mock.patch.object(identity_client, 'request', side_effect=lambda *a, **k: next(answers)), \
+                mock.patch.object(identity_client.time, 'sleep'):
+            self.assertIsNotNone(identity_client.wait_until_answering(self.base, 60))
 
 
 class TestReport(unittest.TestCase):
@@ -341,12 +410,55 @@ class TestRedaction(unittest.TestCase):
         self.assertNotIn('pf', found)
         self.assertEqual(identities.redact('3 customers, kind pf', found), '3 customers, kind pf')
 
+    def test_public_login_values_stay_readable_and_the_password_does_not(self):
+        persona = _persona('alice', '001')
+        persona['login']['body']['kind'] = 'customer'
+        persona['login']['public'] = ['kind']
+        found = identities.secrets_of([persona])
+        self.assertEqual(identities.redact(f'3 customers via {PASSWORD}alice', found),
+                         '3 customers via ***')
+
+    def test_login_header_values_are_redacted(self):
+        persona = _persona('alice', '001')
+        persona['login']['headers'] = {'X-Device-Key': 'dev-key-123'}
+        found = identities.secrets_of([persona])
+        self.assertEqual(identities.redact('sent dev-key-123', found), 'sent ***')
+
 
 class TestLabWiring(unittest.TestCase):
 
     def setUp(self):
         self.report_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.report_dir)
+
+    def test_a_target_that_never_answered_fails_with_its_log_not_as_a_failed_login(self):
+        personas = _personas()
+        project_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, project_root)
+        os.makedirs(os.path.join(project_root, 'src'))
+        with open(os.path.join(project_root, 'src', 'a.controller.ts'), 'w') as fh:
+            fh.write("@Controller('accounts')\nexport class A { @Get() list() {} }\n")
+        calls = []
+
+        def compose(project, config_file, *args, **kwargs):
+            calls.append(args)
+            if 'run' in args:
+                with open(os.path.join(self.report_dir, lab.CLIENT_RESULT), 'w') as fh:
+                    json.dump({'reachable': False}, fh)
+                return lab.subprocess.CompletedProcess(args, 0, '', '')
+            return lab.subprocess.CompletedProcess(
+                args, 0, f'GET https://registry.npmjs.org error EAI_AGAIN {PASSWORD}alice\n', '')
+
+        args = lab.argparse.Namespace(openapi_path=None, api_prefix=None)
+        with mock.patch.object(lab, '_compose', side_effect=compose):
+            with self.assertRaises(lab.LabError) as raised:
+                lab._run_identities(lab.parse_target('app', 3000, '/'), 'redlab-x', project_root,
+                                    'cfg.json', self.report_dir, args, personas)
+        message = str(raised.exception)
+        self.assertIn('never answered', message)
+        self.assertIn('EAI_AGAIN', message)
+        self.assertNotIn(f'{PASSWORD}alice', message)
+        self.assertTrue(any('logs' in call for call in calls))
 
     def test_the_client_runs_locked_down_on_the_internal_network_only(self):
         base = {'services': {'app': {'build': {'context': '/work/shop'}, 'ports': [

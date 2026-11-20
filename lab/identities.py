@@ -28,7 +28,11 @@ LOGIN_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'GET'})
 # them everywhere would mangle the report, and no password is that short.
 MIN_SECRET_LENGTH = 4
 _HEADER_RE = re.compile(r'^[A-Za-z0-9-]+$')
+_HEADER_VALUE_RE = re.compile(r'^[\x20-\x7e]{1,512}$')
+# RFC 6265 cookie-name: an RFC 7230 token, so `access_token` and `__Host-sid` are names.
+_COOKIE_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _NAME_RE = re.compile(r'^[A-Za-z0-9_.-]{1,40}$')
+_SECRET_KEY_RE = re.compile(r'pass|secret|token|credential|pin', re.IGNORECASE)
 # Headers a persona may not set: they would redirect the request or change how
 # the lab itself talks to the target.
 _RESERVED_HEADERS = frozenset({'host', 'content-length', 'transfer-encoding', 'connection'})
@@ -69,10 +73,26 @@ def _check_persona(index: int, persona: object) -> list[str]:
                             'path on the target, not another host')
         if not isinstance(login.get('body'), dict):
             problems.append(f'{where}: login "body" must be a JSON object')
+        headers = login.get('headers', {})
+        if not isinstance(headers, dict) or any(
+                not isinstance(key, str) or not _HEADER_RE.match(key)
+                or key.lower() in _RESERVED_HEADERS
+                or not isinstance(value, str) or not _HEADER_VALUE_RE.match(value)
+                for key, value in headers.items()):
+            problems.append(f'{where}: login "headers" must map plain header names other than '
+                            f'{", ".join(sorted(_RESERVED_HEADERS))} to single-line values')
+        public = login.get('public', [])
+        body = login.get('body') if isinstance(login.get('body'), dict) else {}
+        if not isinstance(public, list) or any(
+                not isinstance(key, str) or key not in body or _SECRET_KEY_RE.search(key)
+                for key in public):
+            problems.append(f'{where}: login "public" must list keys of the login body whose '
+                            'values are not secret (a role or kind field), never a password, '
+                            'token or PIN field')
     token = persona.get('token')
     if not isinstance(token, dict) or len(token) != 1 or not (
             isinstance(token.get('json'), str) and (token['json'] == '' or token['json'].startswith('/'))
-            or isinstance(token.get('cookie'), str) and _HEADER_RE.match(token['cookie'])):
+            or isinstance(token.get('cookie'), str) and _COOKIE_RE.match(token['cookie'])):
         problems.append(f'{where}: "token" must be {{"json": "<JSON pointer>"}} or '
                         '{"cookie": "<name>"}: where the session comes back in the login response')
     send = persona.get('send')
@@ -86,7 +106,7 @@ def _check_persona(index: int, persona: object) -> list[str]:
                 or not _HEADER_RE.match(send.get('scheme') or 'x')):
             problems.append(f'{where}: "send.header" must be a plain header name other than '
                             f'{", ".join(sorted(_RESERVED_HEADERS))}, with an optional "scheme"')
-    elif set(send) != {'cookie'} or not isinstance(send['cookie'], str) or not _HEADER_RE.match(send['cookie']):
+    elif set(send) != {'cookie'} or not isinstance(send['cookie'], str) or not _COOKIE_RE.match(send['cookie']):
         problems.append(f'{where}: "send.cookie" must be a cookie name')
     return problems
 
@@ -128,7 +148,9 @@ def load_identities(path: str, project_root: str) -> list[dict]:
 
 
 def secrets_of(personas: list[dict]) -> list[str]:
-    """Every string value of the login bodies: what a report must never show."""
+    """Every string value of the login bodies and login headers: what a report
+    must never show. A header may carry a credential, so it is treated as one;
+    only the body keys a persona lists in `public` are left out."""
     found: list[str] = []
 
     def walk(node: object) -> None:
@@ -142,7 +164,9 @@ def secrets_of(personas: list[dict]) -> list[str]:
             found.append(node)
 
     for persona in personas:
-        walk(persona['login']['body'])
+        public = set(persona['login'].get('public', []))
+        walk({key: value for key, value in persona['login']['body'].items() if key not in public})
+        walk(persona['login'].get('headers', {}))
     return sorted(set(found), key=len, reverse=True)
 
 
