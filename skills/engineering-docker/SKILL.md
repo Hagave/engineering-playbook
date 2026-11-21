@@ -1,7 +1,7 @@
 ---
 name: engineering-docker
 description: "Docker and docker-compose rules for any language. Invoke when Docker is part of the project setup: creating a Dockerfile, docker-compose, or .dockerignore. Covers multi-stage builds, production security (non-root user, an init process, minimal images), migrations as their own step, and compose composition based on project infrastructure choices. Per-ecosystem templates live in references/."
-version: 3.0.0
+version: 3.0.1
 user-invocable: false
 ---
 

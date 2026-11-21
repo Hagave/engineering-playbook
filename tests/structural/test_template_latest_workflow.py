@@ -1,9 +1,12 @@
 """
 Every real run of a skill's code template is in the scheduled workflow that
-runs it against the latest releases. A template test left out of the matrix
-would only run when someone remembers to, and a release that breaks it would
-reach users first. The test files also must not pin versions: the playbook
-follows latest, and a pinned run proves an older release.
+runs it against the releases a new project installs today. A template test
+left out of the matrix would only run when someone remembers to, and a release
+that breaks it would reach users first. The test files also must not write a
+version or a registry tag themselves: a pinned run proves an older release, and
+a hard-coded `latest` installs a prerelease when the tag names one. They build
+package.json through tests/e2e/npm_versions.py, which checks the tag at run
+time ("Dependency versions" in engineering-governance).
 """
 import glob
 import os
@@ -36,13 +39,16 @@ class TestTemplateLatestWorkflow(unittest.TestCase):
         self.assertRegex(self.workflow, r'(?m)^\s*schedule:\s*$')
         self.assertRegex(self.workflow, r'(?m)^\s*workflow_dispatch:\s*$')
 
-    def test_template_tests_install_latest(self) -> None:
+    def test_template_tests_resolve_the_release_at_run_time(self) -> None:
         for path in _TEMPLATE_TESTS:
             with open(path, encoding='utf-8') as f:
                 text = f.read()
             with self.subTest(test=os.path.basename(path)):
-                self.assertNotRegex(text, r"""['"]\^?\d+\.\d+\.\d+['"]""",
-                                    'a template test pins a version; the playbook follows latest')
+                self.assertNotRegex(text, r"""['"](?:[\^~]\d+(?:\.\d+){0,2}|\d+\.\d+\.\d+)['"]""",
+                                    'a template test pins a version')
+                self.assertNotRegex(text, r"""['"]latest['"]""",
+                                    'a template test hard-codes the latest tag; it can name a prerelease')
+                self.assertIn('from tests.e2e.npm_versions import package_json', text)
 
 
 if __name__ == '__main__':

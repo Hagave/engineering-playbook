@@ -16,7 +16,7 @@
 ### Stage: base
 
 ```dockerfile
-FROM node:22-alpine AS base
+FROM node:26-alpine AS base
 WORKDIR /app
 RUN apk add --no-cache libc6-compat
 COPY package*.json ./
@@ -29,7 +29,7 @@ COPY prisma.config.ts ./
 COPY src/infrastructure/database/prisma ./src/infrastructure/database/prisma/
 ```
 
-- Use `node:<lts>-alpine`. Never `node:latest`, and Debian only when a native addon requires glibc.
+- Use `node:<lts>-alpine`, the newest LTS line (Active LTS), in both `FROM` lines. Never `node:latest`, and Debian only when a native addon requires glibc.
 - `libc6-compat` is required on Alpine for Node.js native binaries.
 - Copy only `package*.json` here: `COPY . .` at this stage invalidates the cache on every file change.
 
@@ -93,7 +93,7 @@ CMD ["./node_modules/.bin/prisma", "migrate", "deploy"]
 ### Stage: production
 
 ```dockerfile
-FROM node:22-alpine AS production
+FROM node:26-alpine AS production
 ARG ENVIRONMENT=production
 ENV NODE_ENV=${ENVIRONMENT}
 WORKDIR /app
@@ -110,7 +110,7 @@ ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "dist/main.js"]
 ```
 
-- Start fresh from `node:22-alpine`; never inherit from `builder`, which has the source, the tooling and the development dependencies.
+- Start fresh from `node:26-alpine`; never inherit from `builder`, which has the source, the tooling and the development dependencies.
 - `dumb-init` is PID 1: it forwards signals and reaps zombies. Without it, `SIGTERM` on stop does not reach Node.js.
 - A dedicated non-root user with a fixed UID/GID (1001), never the built-in `node` user.
 - Copy only `dist/`, `node_modules/` and `package.json`; never `src/` or `tsconfig.json`.

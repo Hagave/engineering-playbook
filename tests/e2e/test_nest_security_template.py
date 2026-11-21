@@ -10,9 +10,10 @@ model reads. A minimal AppModule around them is the only code written here. The
 app is compiled under `strict` and started, and every claim the skill makes
 about the proxy trust and the CSP is checked over HTTP.
 
-Every package is installed at its latest version, as the skills' own install
-commands do (`<pm> add <name>`, no version): the playbook follows latest, and
-this run is how a release that breaks a template is found. The resolved
+Every package is installed at the release a new project installs: the `latest`
+tag when it is stable, else the newest stable, with Nest's core packages at one
+version ("Dependency versions" in engineering-governance). This run is how a
+release that breaks a template is found. The resolved
 versions are printed, so a failure names the release that caused it. The
 scheduled workflow `.github/workflows/template-latest.yml` runs it weekly.
 """
@@ -29,6 +30,8 @@ import unittest
 import urllib.error
 import urllib.request
 
+from tests.e2e.npm_versions import package_json
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _SKILL = os.path.join(_ROOT, 'skills', 'engineering-nestjs-security', 'SKILL.md')
 _FENCE_RE = re.compile(r'^```typescript\n(.*?)^```', re.DOTALL | re.MULTILINE)
@@ -44,12 +47,7 @@ _DEPENDENCIES = (
 )
 _DEV_DEPENDENCIES = ('@types/node', 'typescript')
 
-_PACKAGE = {
-    'name': 'nest-security-template-it',
-    'private': True,
-    'dependencies': dict.fromkeys(_DEPENDENCIES, 'latest'),
-    'devDependencies': dict.fromkeys(_DEV_DEPENDENCIES, 'latest'),
-}
+_COUPLED = {'@nestjs/common': '@nestjs/core', '@nestjs/platform-fastify': '@nestjs/core'}
 
 _TSCONFIG = {
     'compilerOptions': {
@@ -132,7 +130,8 @@ class TestNestSecurityTemplate(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app_dir = tempfile.mkdtemp(prefix='nest_security_it_')
         files = {
-            'package.json': json.dumps(_PACKAGE, indent=2),
+            'package.json': json.dumps(package_json('nest-security-template-it', _DEPENDENCIES,
+                                                    _DEV_DEPENDENCIES, _COUPLED), indent=2),
             'tsconfig.json': json.dumps(_TSCONFIG, indent=2),
             'src/main.ts': _skill_block('async function bootstrap'),
             'src/config/trust-proxy.config.ts': _skill_block('export function readTrustProxy'),

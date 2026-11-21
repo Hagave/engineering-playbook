@@ -1,7 +1,7 @@
 ---
 name: engineering-nestjs
 description: "**Opt-in for NestJS:** load only when NestJS is the chosen framework. NestJS-specific rules: module structure, controllers, dependency injection, DTOs, configuration, and logging. Use when working on a NestJS project: creating modules, controllers, services, guards, interceptors, or configuring the framework."
-version: 3.0.0
+version: 3.1.0
 user-invocable: false
 ---
 
@@ -114,8 +114,9 @@ Remove deleted files from `app.module.ts` (controllers and providers arrays).
 # TypeORM + PostgreSQL
 <pm> add @nestjs/typeorm typeorm pg
 
-# Prisma
-<pm> add @prisma/client && <pm> add -D prisma
+# Prisma: the adapter and the CLI at the client's version (engineering-prisma, Installation)
+<pm> add @prisma/client
+<pm> add @prisma/adapter-pg@<the installed @prisma/client version> && <pm> add -D prisma@<the installed @prisma/client version>
 
 # Validation (always for NestJS)
 <pm> add class-validator class-transformer
@@ -402,19 +403,19 @@ Validate all env vars at startup via `@nestjs/config` with a Joi schema. Missing
 ```typescript
 ConfigModule.forRoot({
   isGlobal: true,
+  skipProcessEnv: true,
   validationSchema: Joi.object({
     NODE_ENV: Joi.string().valid('development', 'production', 'test').required(),
     PORT: Joi.number().default(3000),
     DATABASE_URL: Joi.string().required(),
     REDIS_URL: Joi.string().required(),
   }),
-  validationOptions: {
-    allowUnknown: false,
-    abortEarly: false,
-  },
 })
 ```
 
+- The schema validates the whole `process.env` merged with `.env`. Never set Joi's `allowUnknown: false`: it rejects `PATH`, `HOME` and every other variable of the machine, and the app never boots. `@nestjs/config` already gives a Joi schema `abortEarly: false` (every invalid variable reported at once) and `allowUnknown: true`.
+- `skipProcessEnv: true` keeps the variables of `process.env` that the schema does not declare out of `ConfigService`: only declared, validated values are served.
+- Since `@nestjs/config` 12 the schema is any Standard Schema (Joi 18, Zod 4), and `validationOptions` takes `{ libraryOptions }`, passed to that library. A project on an older major follows its installed version (see "Dependency versions" in `engineering-governance`).
 - Never read `process.env` directly outside the config validation module.
 - Inject `ConfigService` and use `getOrThrow` for required values.
 

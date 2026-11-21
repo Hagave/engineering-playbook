@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines when to stop and ask, prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 5.1.0
+version: 5.2.0
 user-invocable: false
 ---
 
@@ -90,6 +90,14 @@ Stop and ask before implementing when any of the following is true:
 Send all questions in a single message. Never send multiple rounds of one question each.
 
 After receiving answers: summarize your understanding before starting implementation. Confirm before proceeding.
+
+---
+
+## Dependency versions
+
+- **Which release.** A runtime, base image or package goes in at its LTS line when its maintainer publishes one (Node.js, Java, .NET, a Linux distribution). Otherwise it goes in at the registry's `latest` tag when that tag names a stable release, and at the newest stable release when it names a prerelease. Never install a prerelease (`-rc`, `-beta`, `-alpha`, `-next`, `-canary`, `-dev`) unasked. A bare install follows the tag, so read the tag first (`npm view <name> dist-tags`, or the registry's equivalent) and name the version when the tag is a prerelease. When another package's peer range rules the tag out, the package manager's resolution decides (it steps down to a release that fits); never force the tag past it (`--force`, `--legacy-peer-deps`).
+- **Coupled packages share one version.** A CLI, the runtime client it generates for and their adapters (an ORM's CLI, client and driver adapters; a framework's core and its platform packages) are installed at one version: the runtime package's. Each at its own tag can mix majors, as when an ORM tags a release candidate of its CLI as `latest` while its client stays on the previous major.
+- **The installed version decides, not the skill.** Before writing code against a dependency the project already has, read its version from the lockfile or the manifest and check the API of that version: the installed type definitions, its changelog or its documentation. When that version contradicts a skill's example, follow the version and report the rule in a `[PLAYBOOK-DEVIATION]` block whose `why` starts with `version <name>@<version>:` and says what changed.
 
 ---
 
