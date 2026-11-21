@@ -47,6 +47,8 @@ STATE_DIR = os.path.expanduser('~/.claude/hooks')
 # by this script instead of cut off with nothing said.
 RUN_TIMEOUT_S = 540
 DOCKER_TIMEOUT_S = 5
+# All of a `show`'s Docker checks together, well under the mod's 30 s call.
+DOCKER_BUDGET_S = 10
 ERROR_SHOWN_CHARS = 300
 WHAT_SHOWN_CHARS = 200
 REGISTER_COMMAND_MAX = 2000
@@ -96,21 +98,23 @@ def _language() -> str:
     return playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
 
 
-def _still_there(item: dict) -> bool:
+def _still_there(item: dict, deadline: float) -> bool:
     """Whether what the item removes still exists: an item whose target is
     gone (removed by the model, the person or anything else) leaves the
     panel. An item with no target, or a Docker one where `docker` cannot
-    answer, is kept: only a known absence removes it."""
+    answer before `deadline` (a monotonic time), is kept: only a known
+    absence removes it, and the mod's call is never held past its limit."""
     target = item.get('target') if isinstance(item.get('target'), dict) else {}
     kind, value = target.get('kind'), target.get('value')
     if not isinstance(value, str) or not value:
         return True
     if kind == 'path':
         return os.path.lexists(value)
-    if kind in ('container', 'volume', 'network') and shutil.which('docker'):
+    left = deadline - time.monotonic()
+    if kind in ('container', 'volume', 'network') and left > 0 and shutil.which('docker'):
         try:
             ran = subprocess.run(['docker', kind, 'inspect', value], capture_output=True,
-                                 timeout=DOCKER_TIMEOUT_S, stdin=subprocess.DEVNULL)
+                                 timeout=min(DOCKER_TIMEOUT_S, left), stdin=subprocess.DEVNULL)
         except (subprocess.TimeoutExpired, OSError):
             return True
         return ran.returncode == 0
@@ -149,8 +153,9 @@ def show(session_id: str, project_dir: str) -> dict:
     pending = playbook_core.consent_pending(STATE_DIR, session_id)
     turn_end = playbook_core.consent_turn_end(STATE_DIR, session_id)
     items = []
+    deadline = time.monotonic() + DOCKER_BUDGET_S
     for item in playbook_core.temporary_data_items(STATE_DIR, project_dir):
-        if not _still_there(item):
+        if not _still_there(item, deadline):
             playbook_core.temporary_data_drop(STATE_DIR, project_dir, item['id'])
         elif _is_released(item, session_id, turn_end):
             items.append(item)
@@ -258,6 +263,7 @@ def remove(project_dir: str, item_id: str) -> dict:
     return {'text': say(language, 'tmp_removed'), 'note': '', 'is_error': False}
 
 
+_CONTROL_CHAR_RE = re.compile(r'[\x00-\x08\x0b-\x1f\x7f\x9b]')
 _DOCKER_REMOVALS = (['rm'], ['container', 'rm'], ['volume', 'rm'], ['network', 'rm'])
 
 
@@ -286,6 +292,10 @@ def register(project_dir: str, cwd: str, command: str, what: str, target: str) -
     if len(command) > REGISTER_COMMAND_MAX or len(what) > WHAT_SHOWN_CHARS:
         raise UsageError(f'--command is at most {REGISTER_COMMAND_MAX} characters and '
                          f'--what at most {WHAT_SHOWN_CHARS}')
+    # The panel draws both in the terminal: an escape sequence could redraw
+    # what the person reads before pressing Remove.
+    if _CONTROL_CHAR_RE.search(what) or _CONTROL_CHAR_RE.search(command.replace('\n', ' ')):
+        raise UsageError('--command and --what may not hold control characters')
     if target and not (os.path.isabs(target) and os.path.lexists(target)):
         raise UsageError(f'--target must be an existing absolute path: {target!r}')
     effect = _deletion_effect(command)

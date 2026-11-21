@@ -319,6 +319,20 @@ class TestRegister(_Case):
         self.assertIsNone(playbook_core.check_destructive(command, command, self.project))
         self.assertFalse(playbook_core.touches_consent_queue('Bash', {'command': command}))
 
+    def test_no_escape_sequence_reaches_the_panel(self):
+        for command, what in (('rm -rf build', 'build\x1b[2Jfolder'),
+                              ('rm -rf build\x1b]0;x\x07', 'build'),
+                              ('rm -rf build', 'build\x9b31m')):
+            with self.subTest(what=what, command=command):
+                with self.assertRaises(temporary_data.UsageError):
+                    temporary_data.register(self.project, self.project, command, what, '')
+
+    def test_docker_checks_stop_at_the_budget(self):
+        item = {'target': {'kind': 'container', 'value': 'pg'}}
+        with mock.patch.object(temporary_data.subprocess, 'run') as run:
+            self.assertTrue(temporary_data._still_there(item, deadline=0.0))
+            run.assert_not_called()
+
     def test_the_folder_and_target_must_exist(self):
         with self.assertRaises(temporary_data.UsageError):
             temporary_data.register(self.project, 'relative', 'rm -rf build', 'x', '')
