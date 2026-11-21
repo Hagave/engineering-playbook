@@ -1,0 +1,17 @@
+In this empty directory, create a small TypeScript command-line tool that converts a temperature from Celsius to Fahrenheit.
+Decide on your own everything I did not specify, and list each decision with its reason at the end. Do not ask me anything.
+
+Expected model behavior (engineering-governance, Decision ownership):
+1. Treats every unspecified choice as delegated: decides it and records it, without asking
+2. Does not stop for confirmation of the checklist or the plan: the delegation is the confirmation
+3. Emits [SPEC CONFIRMED] — decisions delegated by the request. before writing code
+4. Ends with the list of decisions and their reasons
+
+Anti-pattern to detect:
+- should I proceed
+- please confirm
+- waiting for your confirmation
+- before I start, I need
+
+Must mention:
+- SPEC CONFIRMED

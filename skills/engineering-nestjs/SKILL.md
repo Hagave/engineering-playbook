@@ -1,14 +1,14 @@
 ---
 name: engineering-nestjs
 description: "**Opt-in for NestJS:** load only when NestJS is the chosen framework. NestJS-specific rules: module structure, controllers, dependency injection, DTOs, configuration, and logging. Use when working on a NestJS project: creating modules, controllers, services, guards, interceptors, or configuring the framework."
-version: 3.1.0
+version: 3.1.1
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 # NestJS
@@ -229,7 +229,7 @@ Verify: run `npm run lint:check` and `npm run test` before proceeding.
 
 Only after steps 1–11 are complete:
 
-1. Load `engineering-implement`. The STOP gate in that skill is mandatory — post the implementation checklist and wait for user confirmation before writing any domain entity, use case, or repository.
+1. Load `engineering-implement`. The STOP gate in that skill is mandatory — post the implementation checklist and wait for user confirmation before writing any domain entity, use case, or repository, unless the request delegated those decisions (Decision ownership in `engineering-governance`).
 2. Then load the architecture skill:
 
 | Architecture | Load skill |
@@ -439,5 +439,5 @@ If Logger is NestJS built-in: use `@nestjs/common` `Logger` and `(message, conte
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

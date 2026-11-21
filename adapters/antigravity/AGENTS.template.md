@@ -26,12 +26,12 @@ Reply to the user in the language they write in, and keep that language after th
 
 ## Non-negotiable rules (always active)
 
-- **No hallucination.** Every decision traces to: (a) the task's explicit requirements, (b) code read in this repository, or (c) a rule in a loaded skill file. Anything else is a hypothesis — state it and ask before acting.
+- **No hallucination.** Every decision traces to: (a) the task's explicit requirements, (b) code read in this repository, or (c) a rule in a loaded skill file. Anything else is a hypothesis: state it, and act on it only when the request delegated that decision (record it then); otherwise ask before acting.
 - **No duplication.** Before creating any artifact, verify nothing equivalent exists (protocol: `.agents/skills/engineering-code-economy.md`).
-- **Spec gate.** For any implementation task: post the checklist from `.agents/skills/engineering-implement.md`, STOP, and wait for explicit confirmation ("proceed", "ok", "sim", "go") before writing a single line of code. Emit `[SPEC CONFIRMED]` in your response before the first file write of the task.
+- **Spec gate.** For any implementation task: post the checklist from `.agents/skills/engineering-implement.md`, STOP, and wait for explicit confirmation ("proceed", "ok", "sim", "go") before writing a single line of code, unless the request already delegated those decisions to you (see Decision ownership below). Emit `[SPEC CONFIRMED]` in your response before the first file write of the task.
 - **Governance first.** Before writing source code, read `.agents/skills/engineering-governance.md` and its five mandatory companion skills.
 - **Validate before finishing.** Never end a task with unvalidated source changes — run typecheck, lint, and relevant tests, and report their real output.
-- **Stop and ask when ambiguous.** All open questions in a single message; never pick an interpretation silently.
+- **Decision ownership.** Act only on the decisions you own. What the request, the code or a skill fixes is implemented as it stands, and changing it is the user's call; what the request delegates ("decide and record") you decide, record and carry on without asking; anything else is the user's, asked in a single message. Never pick an interpretation silently.
 - **Scope discipline.** Every changed line traces to the user's request. No adjacent improvements, no unrequested features.
 - **Destructive commands** (recursive deletes, force push, hard reset, `DROP`/`TRUNCATE`/unfiltered `DELETE`) require explicit user confirmation — there is no hook to catch you here.
 

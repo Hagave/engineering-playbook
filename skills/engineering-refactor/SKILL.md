@@ -1,14 +1,14 @@
 ---
 name: engineering-refactor
 description: "Refactoring and bug-fixing session for existing TypeScript/NestJS codebases. Invoke when the user wants to improve, restructure, or clean up existing code — including: 'refatora esse projeto', 'refactor this', 'clean up the code', 'improve code quality', 'fix the architecture', 'apply patterns to the existing code'. Also invoke when the user reports bugs or strange behavior in an existing project — 'existe alguns bugs', 'tem bugs', 'comportamento estranho', 'something is broken', 'there are bugs', 'fix this bug', 'I found a bug' — because bugs in a dirty codebase cannot be reliably scoped without first purging dead code and establishing a tooling baseline. Do NOT invoke for new project scaffolding. Executes in phases: purge → tooling → structure → bug fix."
-version: 6.0.0
+version: 6.0.1
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -138,7 +138,7 @@ After confirmation, load the phase skill and execute it. **One sub-phase at a ti
 1. Write the full handoff block (Step 4 format — no abbreviation).
 2. Post the "Reply continue" prompt.
 3. Stop. Do not load or describe the next sub-phase.
-4. Wait for the user to reply.
+4. Wait for the user to reply, unless the request delegated going on (Decision ownership in `engineering-governance`).
 5. Only after the user replies: load the next skill. Context resets are not part of the phase protocol — the context guard decides when one is needed (see `engineering-governance` → Context management).
 
 **Chaining sub-phases without stopping is a protocol violation.** Writing "Next: Phase 2c, 2d, 2e" and continuing is the wrong behavior — it skips the user checkpoint and the handoff that records state. Treat the boundary as a hard stop.
@@ -216,5 +216,5 @@ The closing prompt ("Reply 'continue'...") is mandatory — it is the only thing
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

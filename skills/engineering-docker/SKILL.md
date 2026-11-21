@@ -1,14 +1,14 @@
 ---
 name: engineering-docker
 description: "Docker and docker-compose rules for any language. Invoke when Docker is part of the project setup: creating a Dockerfile, docker-compose, or .dockerignore. Covers multi-stage builds, production security (non-root user, an init process, minimal images), migrations as their own step, and compose composition based on project infrastructure choices. Per-ecosystem templates live in references/."
-version: 3.0.1
+version: 3.0.2
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 # Docker
@@ -217,5 +217,5 @@ Add the ecosystem's build output, dependency directory and test files, as listed
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->
