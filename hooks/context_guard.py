@@ -866,10 +866,11 @@ def _consent_queued_msg(hit: dict, number: int) -> str:
         f"It is queued for the user's approval as #{number}. Do not stop or wait for it: "
         'carry on with the rest of the work the user approved. In your next message to the '
         f'user, say in plain words what #{number} removes, why it has to go, and what '
-        'happens if it is kept, and ask whether it may run. The user approves it by writing '
-        'so ("pode apagar", "pode remover", "yes, delete it"); the hook then tells you, and '
-        'you run this exact command again, once. Nothing else lifts this block, and you '
-        'cannot approve it yourself.'))
+        'happens if it is kept, and ask whether it may run. The user answers with the button '
+        'above the chat, where the playbook runs it or keeps it for later and tells you which, '
+        'or by writing so ("pode apagar", "pode remover", "yes, delete it"); for a written '
+        'approval the hook tells you, and you run this exact command again, once. Nothing '
+        'else lifts this block, and you cannot approve it yourself.'))
 
 
 def _destructive_verdict(hit: dict, input_data: dict, command: str, prefs: dict) -> dict:
@@ -916,7 +917,7 @@ def _destructive_verdict(hit: dict, input_data: dict, command: str, prefs: dict)
     except OSError:
         pass  # an approval that cannot be read is none: the user is asked again
     if input_data.get('permission_mode') == 'auto':
-        return {'queue': True, 'hit': hit, 'fallback': ask}
+        return {'queue': True, 'hit': hit, 'fallback': ask, 'cwd': str(input_data.get('cwd') or '')}
     return ask
 
 
@@ -927,7 +928,7 @@ def _queue_for_consent(queued: dict, command: str) -> dict:
     hit = queued['hit']
     try:
         number = playbook_core.consent_request(
-            STATE_DIR, _SESSION_ID, command, str(hit.get('effect') or ''))
+            STATE_DIR, _SESSION_ID, command, str(hit.get('effect') or ''), queued['cwd'])
     except OSError:
         return queued['fallback']
     return {**hit, 'msg': _consent_queued_msg(hit, number)}

@@ -3613,14 +3613,21 @@ def consent_path(state_dir: str, session_id: str) -> str:
     return os.path.join(state_dir, f'{_CONSENT_FILE_PREFIX}{session_id}.json')
 
 
+_TEMPORARY_DATA_PART = '/temporary-data/'
+
+
 def touches_consent_queue(tool_name: str, tool_input: dict) -> bool:
-    """Whether a tool call names the consent queue's files. The queue is the
-    user's answer; the model reading or writing it could approve itself. A
-    path the shell computes (`.con"sent"-`) is not seen: a known gap."""
+    """Whether a tool call names the consent queue's files or the Temporary
+    data folder. The queue is the user's answer, and each Temporary data item
+    is a command the user's press runs: the model writing either could approve
+    itself or plant one. A path the shell computes (`.con"sent"-`) is not
+    seen: a known gap."""
     if tool_name == 'Bash':
-        return _CONSENT_FILE_PREFIX in str(tool_input.get('command') or '')
-    path = tool_input.get('file_path') or tool_input.get('notebook_path') or ''
-    return os.path.basename(str(path)).startswith(_CONSENT_FILE_PREFIX)
+        command = str(tool_input.get('command') or '')
+        return _CONSENT_FILE_PREFIX in command or _TEMPORARY_DATA_PART in command
+    path = str(tool_input.get('file_path') or tool_input.get('notebook_path') or '')
+    return (os.path.basename(path).startswith(_CONSENT_FILE_PREFIX)
+            or _TEMPORARY_DATA_PART in path.replace('\\', '/'))
 
 
 @contextlib.contextmanager
@@ -3661,9 +3668,11 @@ def _consent_entries(data: dict, key: str) -> list[dict]:
     return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
 
 
-def consent_request(state_dir: str, session_id: str, command: str, effect: str) -> int:
+def consent_request(state_dir: str, session_id: str, command: str, effect: str,
+                    cwd: str = '') -> int:
     """Queue `command` for the user's approval and return its number; the same
-    command queued again keeps its number."""
+    command queued again keeps its number. `cwd` is where the model's shell
+    was: the button runs the command there."""
     os.makedirs(state_dir, exist_ok=True)
     _prune_consent_files(state_dir)
     path = consent_path(state_dir, session_id)
@@ -3676,8 +3685,10 @@ def consent_request(state_dir: str, session_id: str, command: str, effect: str) 
                 return _consent_number(entry)
         next_id = data.get('next_id')
         number = next_id if isinstance(next_id, int) and next_id > 0 else 1
+        # A cut command is kept for showing; the button never runs it (`is_cut`).
         pending.append({'id': number, 'key': key, 'command': command[:_CONSENT_COMMAND_KEPT],
-                        'effect': effect, 'ts': time.time()})
+                        'is_cut': len(command) > _CONSENT_COMMAND_KEPT,
+                        'effect': effect, 'cwd': cwd, 'ts': time.time()})
         data['pending'] = pending[-CONSENT_PENDING_MAX:]
         data['next_id'] = number + 1
         save_state(path, data)
@@ -3757,6 +3768,92 @@ def consent_answer(state_dir: str, session_id: str, text: str) -> ConsentAnswer:
         data['approved'] = (_consent_entries(data, 'approved') + chosen)[-CONSENT_PENDING_MAX:]
         save_state(path, data)
     return ConsentAnswer(chosen, data['pending'], False)
+
+
+# ─── The answer from the button above the chat, and Temporary data ──────────
+#
+# The playbook's mod (hooks/temporary_data.tsx) shows each queued command with
+# Approve and Decline; scripts/temporary_data.py carries the answer out here,
+# under the queue's lock. A declined deletion is kept in Temporary data, one
+# file per item and one folder per project, so each writer creates its own
+# file and nothing is rewritten under another writer. Only a deletion is kept:
+# a declined reset or force push has no later moment where it would make sense.
+
+DELETION_EFFECTS = frozenset({'delete_tree', 'mass_delete', 'script_delete', 'worktree_remove'})
+TEMPORARY_DATA_DIR = 'temporary-data'
+TEMPORARY_DATA_MAX = 200
+_ITEM_ID_RE = re.compile(r'[0-9a-f]{12}')
+
+
+def consent_pending(state_dir: str, session_id: str) -> list[dict]:
+    """The commands of `session_id` still waiting for the user's answer."""
+    return _consent_entries(load_state(consent_path(state_dir, session_id)), 'pending')
+
+
+def consent_decide(state_dir: str, session_id: str, number: int) -> dict | None:
+    """Take `#number` out of the queue for the answer the user gave on the
+    button; the entry, or None when it is no longer waiting (answered in the
+    chat, or already by another press)."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return None
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        entry = next((one for one in pending if _consent_number(one) == number), None)
+        if entry is None:
+            return None
+        data['pending'] = [one for one in pending if one is not entry]
+        save_state(path, data)
+    return entry
+
+
+def temporary_data_dir(state_dir: str, project_dir: str) -> str:
+    """The folder of one project's Temporary data: the project's real path,
+    every character but letters and digits as `-`, as Claude Code names its
+    own per-project folders."""
+    key = re.sub(r'[^A-Za-z0-9]', '-', os.path.realpath(project_dir))
+    return os.path.join(state_dir, TEMPORARY_DATA_DIR, key)
+
+
+def temporary_data_add(state_dir: str, project_dir: str, *, command: str, cwd: str,
+                       effect: str, origin: str) -> dict:
+    """Keep a deletion the user has not run yet; the item written."""
+    folder = temporary_data_dir(state_dir, project_dir)
+    os.makedirs(folder, exist_ok=True)
+    item = {'id': os.urandom(6).hex(), 'command': command, 'cwd': cwd, 'effect': effect,
+            'origin': origin, 'ts': time.time()}
+    save_state(os.path.join(folder, f"{item['id']}.json"), item)
+    return item
+
+
+def _is_item(value: object) -> bool:
+    return (isinstance(value, dict) and isinstance(value.get('id'), str)
+            and bool(_ITEM_ID_RE.fullmatch(value['id']))
+            and isinstance(value.get('command'), str) and isinstance(value.get('cwd'), str)
+            and isinstance(value.get('ts'), (int, float)) and not isinstance(value.get('ts'), bool))
+
+
+def temporary_data_items(state_dir: str, project_dir: str) -> list[dict]:
+    """One project's Temporary data, oldest first, at most TEMPORARY_DATA_MAX;
+    a file that is not an item is left out."""
+    folder = temporary_data_dir(state_dir, project_dir)
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    items = [load_state(os.path.join(folder, name)) for name in names
+             if _ITEM_ID_RE.fullmatch(name.removesuffix('.json')) and name.endswith('.json')]
+    kept = [item for item in items if _is_item(item)]
+    kept.sort(key=lambda item: item['ts'])
+    return kept[:TEMPORARY_DATA_MAX]
+
+
+def temporary_data_drop(state_dir: str, project_dir: str, item_id: str) -> None:
+    if not _ITEM_ID_RE.fullmatch(item_id):
+        raise ValueError(f'not an item id: {item_id!r}')
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(os.path.join(temporary_data_dir(state_dir, project_dir), f'{item_id}.json'))
 
 
 GIT_PUSH_RE = re.compile(_GIT_PREFIX + r'push\b', re.IGNORECASE)
@@ -4000,7 +4097,12 @@ PREFS_DEFAULTS: dict = {
     # the user turns them on: a user who installed before the setting existed
     # never saw the first-run offer, and sending is never assumed.
     'reports': False,
+    # Declined deletions kept in the Temporary data panel (hooks/temporary_data.tsx)
+    # instead of dropped, so a leftover the user did not remove right away is
+    # not forgotten by them or the model.
+    'temporary_data': True,
 }
+PREF_FLAGS = ('watch', 'reports', 'temporary_data')
 
 MEMORY_FILE = 'CLAUDE.md'
 
@@ -4035,7 +4137,7 @@ def load_prefs(state_dir: str) -> dict:
         return prefs
     if stored.get('prose') in PROSE_LEVELS:
         prefs['prose'] = stored['prose']
-    for flag in ('watch', 'reports'):
+    for flag in PREF_FLAGS:
         if isinstance(stored.get(flag), bool):
             prefs[flag] = stored[flag]
     budget = stored.get('claude_md_budget')
@@ -4070,7 +4172,7 @@ def set_pref(state_dir: str, key: str, value: str) -> tuple[dict, str | None]:
         if raw not in PROSE_LEVELS:
             return prefs, f'prose must be one of {", ".join(PROSE_LEVELS)} — got {value!r}'
         prefs['prose'] = raw
-    elif key in ('watch', 'reports'):
+    elif key in PREF_FLAGS:
         if raw in ('on', 'true', '1', 'yes'):
             prefs[key] = True
         elif raw in ('off', 'false', '0', 'no'):

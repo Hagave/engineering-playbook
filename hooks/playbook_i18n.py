@@ -172,6 +172,42 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     # A group of settings, as the main screen lists it, and its screen's help.
     'group_budgets': {'en': 'Cost budgets', 'pt-br': 'Orçamentos de custo', 'es': 'Presupuestos de costo'},
+    'group_reminders': {
+        'en': 'Warnings and reminders',
+        'pt-br': 'Avisos e lembretes',
+        'es': 'Avisos y recordatorios',
+    },
+    'group_reminders_help': {
+        'en': 'What the playbook tells you before a risky action, and what it keeps for later.',
+        'pt-br': 'O que o playbook avisa antes de uma ação arriscada, e o que guarda para depois.',
+        'es': 'Lo que el playbook avisa antes de una acción arriesgada, y lo que guarda para después.',
+    },
+    'label_temporary_data': {
+        'en': 'Temporary data panel',
+        'pt-br': 'Painel Temporary data',
+        'es': 'Panel Temporary data',
+    },
+    'help_temporary_data': {
+        'en': ('In auto mode, a deletion you decline on the button above the chat is kept in '
+               'the Temporary data panel of this project, so you can remove it later. Off: a '
+               'declined deletion is only dropped. On by default.'),
+        'pt-br': ('No modo auto, uma remoção que você recusa no botão acima do chat fica no '
+                  'painel Temporary data deste projeto, para você apagar depois. Desligado: a '
+                  'remoção recusada só é descartada. Ligado por padrão.'),
+        'es': ('En modo auto, un borrado que rechazas en el botón sobre el chat queda en el '
+               'panel Temporary data de este proyecto, para borrarlo después. Apagado: el '
+               'borrado rechazado solo se descarta. Encendido por defecto.'),
+    },
+    'effect_temporary_data_on': {
+        'en': 'In force now: a deletion you decline is kept in the Temporary data panel.',
+        'pt-br': 'Em vigor agora: uma remoção recusada fica no painel Temporary data.',
+        'es': 'En vigor ahora: un borrado rechazado queda en el panel Temporary data.',
+    },
+    'effect_temporary_data_off': {
+        'en': 'In force now: a deletion you decline is dropped; what the panel holds stays.',
+        'pt-br': 'Em vigor agora: uma remoção recusada é descartada; o que o painel já tem fica.',
+        'es': 'En vigor ahora: un borrado rechazado se descarta; lo que el panel ya tiene queda.',
+    },
     'group_budgets_help': {
         'en': 'The CLAUDE.md size and the context size past which the playbook speaks up.',
         'pt-br': 'O tamanho do CLAUDE.md e o tamanho de contexto a partir dos quais o playbook avisa.',
@@ -331,6 +367,76 @@ STRINGS: dict[str, dict[str, str]] = {
         'es': ('[playbook] Este comando {effect}: `{command}`. Apruébalo solo si quieres que se '
                'ejecute exactamente esto. Donde nadie puede responder esta solicitud, se '
                'deniega: ejecuta el comando tú mismo.'),
+    },
+    # The button above the chat and the Temporary data panel (hooks/temporary_data.tsx).
+    'tmp_waiting': {
+        'en': 'Auto mode is waiting for your answer:',
+        'pt-br': 'O modo auto está esperando a sua resposta:',
+        'es': 'El modo auto espera tu respuesta:',
+    },
+    'tmp_row': {'en': '#{id} {effect}: {command}', 'pt-br': '#{id} {effect}: {command}',
+                'es': '#{id} {effect}: {command}'},
+    'tmp_hint': {
+        'en': 'Click, or ctrl+x tab, the arrows and Enter. The rest of the work goes on.',
+        'pt-br': 'Clique, ou ctrl+x tab, as setas e Enter. O resto do trabalho segue.',
+        'es': 'Haz clic, o ctrl+x tab, las flechas y Enter. El resto del trabajo sigue.',
+    },
+    'tmp_approve': {'en': 'Approve', 'pt-br': 'Aprovar', 'es': 'Aprobar'},
+    'tmp_decline': {'en': 'Decline', 'pt-br': 'Recusar', 'es': 'Rechazar'},
+    'tmp_more': {'en': '+{count} more waiting', 'pt-br': '+{count} na fila',
+                 'es': '+{count} más en espera'},
+    'tmp_cut': {
+        'en': 'Too long to run from here: answer in the chat ("pode apagar #{id}").',
+        'pt-br': 'Longo demais para rodar daqui: responda no chat ("pode apagar #{id}").',
+        'es': 'Demasiado largo para ejecutarlo desde aquí: responde en el chat ("pode apagar #{id}").',
+    },
+    'tmp_open': {'en': 'Temporary data ({count})', 'pt-br': 'Temporary data ({count})',
+                 'es': 'Temporary data ({count})'},
+    'tmp_title': {'en': 'Temporary data', 'pt-br': 'Temporary data', 'es': 'Temporary data'},
+    'tmp_help': {
+        'en': ('Deletions of this project you have not run yet. Pick one to remove it or keep '
+               'it: click, type its number and send, or ctrl+x tab and the arrows.'),
+        'pt-br': ('Remoções deste projeto que você ainda não rodou. Escolha uma para apagar ou '
+                  'manter: clique, digite o número e envie, ou ctrl+x tab e as setas.'),
+        'es': ('Borrados de este proyecto que aún no ejecutaste. Elige uno para borrarlo o '
+               'mantenerlo: haz clic, escribe su número y envía, o ctrl+x tab y las flechas.'),
+    },
+    'tmp_close': {'en': 'Close', 'pt-br': 'Fechar', 'es': 'Cerrar'},
+    'tmp_empty': {
+        'en': 'Nothing kept for this project.',
+        'pt-br': 'Nada guardado para este projeto.',
+        'es': 'Nada guardado para este proyecto.',
+    },
+    'tmp_item': {
+        'en': '{effect}: {command} (asked by Claude on {when})',
+        'pt-br': '{effect}: {command} (pedido pelo Claude em {when})',
+        'es': '{effect}: {command} (pedido por Claude el {when})',
+    },
+    'tmp_confirm': {
+        'en': 'Remove it? This runs, in {cwd}:',
+        'pt-br': 'Apagar? Isto roda, em {cwd}:',
+        'es': '¿Borrarlo? Esto se ejecuta, en {cwd}:',
+    },
+    'tmp_yes': {'en': 'Yes, remove', 'pt-br': 'Sim, apagar', 'es': 'Sí, borrar'},
+    'tmp_no': {'en': 'No, keep it', 'pt-br': 'Não, manter', 'es': 'No, mantener'},
+    'tmp_ran': {'en': '#{id} ran.', 'pt-br': '#{id} rodou.', 'es': '#{id} se ejecutó.'},
+    'tmp_failed': {
+        'en': 'It failed (exit {code}): {error}',
+        'pt-br': 'Falhou (saída {code}): {error}',
+        'es': 'Falló (salida {code}): {error}',
+    },
+    'tmp_kept': {
+        'en': '#{id} kept in Temporary data.',
+        'pt-br': '#{id} guardado no Temporary data.',
+        'es': '#{id} guardado en Temporary data.',
+    },
+    'tmp_dropped': {'en': '#{id} will not run.', 'pt-br': '#{id} não vai rodar.',
+                    'es': '#{id} no se ejecutará.'},
+    'tmp_removed': {'en': 'Removed.', 'pt-br': 'Apagado.', 'es': 'Borrado.'},
+    'tmp_gone': {
+        'en': 'Already answered: nothing to do.',
+        'pt-br': 'Já respondido: nada a fazer.',
+        'es': 'Ya respondido: nada que hacer.',
     },
     'destructive_part': {
         'en': 'That is one part of a longer command: approving runs the whole command.',

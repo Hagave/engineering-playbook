@@ -20,6 +20,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ConfigSetting, ConfigSnapshot, MenuScreen, PanelNotice, PanelText } from './config_panel_state'
+import { panelPrompt, registerTemporaryData } from './temporary_data'
 
 const COMMAND = 'playbook-config'
 const EXIT = '0'
@@ -44,6 +45,7 @@ const notice = atom({ plugin: 'engineering-playbook', key: 'notice' } as const, 
 const filterReport = atom({ plugin: 'engineering-playbook', key: 'filterReport' } as const, null, {
   shape: 'filter-report-1',
 })
+// temporary_data.tsx reads the same value: change the shape in both files.
 const screen = atom({ plugin: 'engineering-playbook', key: 'screen' } as const, null, {
   shape: 'screen-3',
 })
@@ -369,9 +371,12 @@ export const register: Register = on => {
   // sent closes the menu and goes on as typed, so a later digit meant for the
   // model (an answer to its numbered question) is never taken by a forgotten
   // menu.
+  // The Temporary data panel answers the same way while it is open.
   on('prompt.submit', async ($, e, next) => {
     if ((await read($, screen)) === null) {
-      return next(e)
+      const panel = await panelPrompt($, e.text, e.command !== undefined)
+
+      return panel === 'pass' ? await next(e) : panel
     }
     const digit = DIGIT_RE.exec(e.text)?.[1]
     if (digit === undefined || e.command !== undefined) {
@@ -445,4 +450,6 @@ export const register: Register = on => {
       </Box>
     )
   })
+
+  registerTemporaryData(on)
 }

@@ -1,7 +1,7 @@
 ---
 name: playbook-config
 description: "The playbook's settings menu: response prose level, known-failure warnings, cost budgets, menu language, session status, learning from past failures and the red-lab-playbook (security scans of the user's own app in an isolated local copy). Use when the user says /playbook-config, asks for the playbook's settings, status or configuration, wants shorter or longer answers, wants warnings about past mistakes on or off, asks the playbook to learn from this project's failures, or a prompt names a red-lab-playbook step."
-version: 3.4.1
+version: 3.5.0
 user-invocable: true
 ---
 
@@ -49,10 +49,17 @@ Read the current values first: `python3 <playbook>/scripts/playbook_config.py sh
 | Entry | Key | Values | What it does |
 |---|---|---|---|
 | Prose level | `prose` | `low`, `mid` (default), `high` | How much explanation a response carries. See *Prose levels*. |
-| Known-failure warnings | `watch` | `on`, `off` (default) | Before a write or a command that touches something that already failed in this project, show the recorded failure. See *Known-failure warnings*. |
+| Warnings and reminders | | | Opens a screen with the two settings below. |
 | Cost budgets | | | Opens a screen with the two budgets below. |
 | Language | `language` | `auto` (default, follows the system locale), `en`, `pt-br`, `es` | Language of the fixed text in Claude Code's numbered settings menu. Replies always follow the language the user writes in. |
 | Deviation reports | `reports` | `on`, `off` (default) | Sends the maintainer each deviation a model reports from a skill rule. See *Deviation reports*. |
+
+Warnings and reminders screen:
+
+| Entry | Key | Values | What it does |
+|---|---|---|---|
+| Known-failure warnings | `watch` | `on`, `off` (default) | Before a write or a command that touches something that already failed in this project, show the recorded failure. See *Known-failure warnings*. |
+| Temporary data panel | `temporary_data` | `on` (default), `off` | In auto mode, a deletion the user declines on the button above the chat is kept in this project's Temporary data panel (`/temporary-data`) to remove later; off, it is only dropped. Claude Code only. |
 
 Cost budgets screen:
 
