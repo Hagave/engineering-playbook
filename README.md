@@ -288,7 +288,12 @@ the arrows and Enter; no digit presses them, so a message you start typing never
 runs one). Approve runs it right away and tells the agent; Decline drops it, or
 keeps a deletion in the project's **Temporary data** panel (`/temporary-data`,
 or the button that appears above the chat), where you remove it later or keep
-it. `temporary_data` in `/playbook-config` turns the panel off. Or answer the
+it. The panel also gets, once the agent's turn ends, what a command made and
+left behind: a git worktree, a named Docker container, volume or network, what a
+lone `mktemp` printed, and anything else the agent keeps there with
+`scripts/temporary_data.py register` (a deletion only). An item whose target is
+already gone leaves the panel by itself. `temporary_data` in `/playbook-config`
+turns the panel off. Or answer the
 agent's question in your own words: "pode apagar", "pode remover", "apaga isso", "yes, delete it"
 approve every command it listed, and naming a number ("pode apagar o #2")
 approves that one. A message that also refuses ("não apague isso") approves

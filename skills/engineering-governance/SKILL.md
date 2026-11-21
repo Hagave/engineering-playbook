@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines who owns each decision (and so when to ask), prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 7.1.0
+version: 7.2.0
 user-invocable: false
 ---
 
@@ -62,6 +62,7 @@ Four additional gates are enforced mechanically by the plugin hook — they cann
   - **Auto:** the gate denies without a dialog and queues the command as `#n`. Do not stop or wait: carry on with the rest of the approved work, and in your next message say in plain words what `#n` removes, why, and what happens if it is kept, and ask whether it may run. In Claude Code the user may answer with the button above the chat: the playbook then runs the command itself, or keeps a declined deletion in the Temporary data panel, and tells you which; do not run it again either way. The user may also approve by writing it ("pode apagar", "pode remover", "yes, delete it"; `#n` narrows it to that one); the hook then tells you which, and you run that exact command again, once. Never write the approval words yourself or ask the user to type a fixed phrase.
   - **Elsewhere** (other permission modes, a subagent, a cloud session) the gate denies: show the user the exact command and what it destroys, and ask them to run it themselves.
   - An `rm` of literal absolute paths inside this session's scratchpad is exempt.
+  - **Temporary data** (Claude Code): what a command makes and leaves behind goes to the project's Temporary data panel once your turn ends, for the user to remove: a git worktree, a named Docker container, volume or network, and what a lone `mktemp` printed. Something else you made that should go and the hook cannot see (a folder named by a variable, `$(mktemp -d)`), keep there yourself in the message where you ask the user about it: `python3 <playbook>/scripts/temporary_data.py register --project <the folder Claude Code started in> --cwd <where the command runs> --command '<the deletion>' --what '<what it is>' [--target <its absolute path>]`, `<playbook>` being two levels above this skill's base directory. Only a deletion is accepted. Never write the Temporary data folder or the queue yourself: the gate denies it.
 - **Learn gate (Stop):** when the user's message says the previous turn was wrong, when the same call has failed repeatedly, or when a review reported Blocker/Major findings in code you wrote, ending the turn is blocked until you emit `[LEARNED]`. To clear it: name the premise you got wrong in one line, say what is actually true and what proves it, and persist the rule in the project `CLAUDE.md` inside the `<!-- engineering-learn:live -->` block (ask before creating `CLAUDE.md` itself). If the signal was a false positive, emit `[LEARNED] none — <reason>`. Do not emit the token without the rule; the gate exists to produce the rule, not the token.
 
 All gates are suspended while `playbook-off` is active.

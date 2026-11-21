@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -176,6 +177,154 @@ class TestShow(_Case):
         self.assertEqual(view['open'], 'Temporary data (1)')
         self.assertEqual(view['ui']['tmp_approve'], 'Aprovar')
         self.assertIn('apaga arquivos e diretórios recursivamente', view['pending'][0]['text'])
+
+
+class TestCreatedTemporaries(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cwd = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.cwd, True)
+
+    def _made(self, command: str, stdout: str = '', scratch: str = '') -> list:
+        return [(one.what_key, one.name, one.command, one.target_kind)
+                for one in playbook_core.created_temporaries(command, stdout, self.cwd, scratch)]
+
+    def test_a_worktree_is_read_with_its_path_resolved(self):
+        sub = os.path.join(self.cwd, 'repo')
+        expected = os.path.join(self.cwd, 'wt')
+        for command in ('git worktree add ../wt', 'git worktree add -b feat ../wt main',
+                        f'git -C {sub} worktree add {expected}'):
+            with self.subTest(command=command):
+                made = self._made(f'cd {sub} && {command}')
+                self.assertEqual(made, [('tmp_what_worktree', expected,
+                                         f'git worktree remove --force {expected}', 'path')])
+
+    def test_named_docker_objects_are_read(self):
+        self.assertEqual(self._made('docker run -d --name pg -e X=1 postgres:17'),
+                         [('tmp_what_container', 'pg', 'docker rm -f pg', 'container')])
+        self.assertEqual(self._made('sudo docker run --name=pg postgres')[0][1], 'pg')
+        self.assertEqual(self._made('docker volume create data')[0][2], 'docker volume rm data')
+        self.assertEqual(self._made('docker network create lab')[0][2], 'docker network rm lab')
+
+    def test_what_removes_itself_or_is_not_named_is_not_read(self):
+        for command in ('docker run --rm --name pg postgres', 'docker run postgres',
+                        'docker run --name "$N" postgres', 'git worktree add "$WT"',
+                        'git worktree list', 'D=$(mktemp -d); echo "$D"', 'echo mktemp -d'):
+            with self.subTest(command=command):
+                self.assertEqual(self._made(command, '/tmp/tmp.abc\n'), [])
+
+    def test_a_lone_mktemp_is_read_from_its_output(self):
+        self.assertEqual(self._made('mktemp -d', '/tmp/tmp.abc\n'),
+                         [('tmp_what_tempdir', '/tmp/tmp.abc', 'rm -rf /tmp/tmp.abc', 'path')])
+        self.assertEqual(self._made('mktemp', '/tmp/tmp.f\n')[0][2], 'rm -f /tmp/tmp.f')
+        self.assertEqual(self._made('mktemp -d', 'not a path'), [])
+
+    def test_the_session_scratchpad_is_left_out(self):
+        self.assertEqual(self._made('git worktree add scratch/wt', scratch=self.cwd), [])
+
+
+class TestCreatedInThePanel(_Case):
+    def _note(self, command: str, stdout: str = '') -> int:
+        made = playbook_core.created_temporaries(command, stdout, self.project)
+        return playbook_core.temporary_data_note_created(self.state, self.project, made, SESSION)
+
+    def test_shown_once_the_turn_ends_and_kept_once_per_target(self):
+        wt = os.path.join(self.project, 'wt')
+        os.makedirs(wt)
+        self.assertEqual(self._note('git worktree add wt'), 1)
+        self.assertEqual(self._note('git worktree add wt'), 0)
+        self.assertEqual(temporary_data.show(SESSION, self.project)['items'], [])
+        self.assertEqual(len(temporary_data.show('another-session', self.project)['items']), 1)
+        playbook_core.consent_mark_turn_end(self.state, SESSION)
+        items = temporary_data.show(SESSION, self.project)['items']
+        self.assertEqual(len(items), 1)
+        self.assertIn(f'git worktree {wt}', items[0]['text'])
+        self.assertIn('made by Claude', items[0]['text'])
+
+    def test_an_item_whose_target_is_gone_leaves_the_panel(self):
+        wt = os.path.join(self.project, 'wt')
+        os.makedirs(wt)
+        self._note('git worktree add wt')
+        playbook_core.consent_mark_turn_end(self.state, SESSION)
+        os.rmdir(wt)
+        self.assertEqual(temporary_data.show(SESSION, self.project)['items'], [])
+        self.assertEqual(playbook_core.temporary_data_items(self.state, self.project), [])
+
+
+class TestTheHookKeepsWhatACommandMade(unittest.TestCase):
+    """hooks/context_guard.py run as Claude Code runs it, on PostToolUse."""
+
+    def setUp(self) -> None:
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.home = os.path.join(self.root, 'home')
+        self.project = os.path.join(self.root, 'proj')
+        os.makedirs(os.path.join(self.home, '.claude', 'hooks'))
+        os.makedirs(os.path.join(self.project, 'sub'))
+        self.transcript = os.path.join(self.root, 't.jsonl')
+        open(self.transcript, 'w').close()
+
+    def _post(self, command: str, cwd: str, prefs: dict | None = None) -> None:
+        state = os.path.join(self.home, '.claude', 'hooks')
+        with open(playbook_core.prefs_path(state), 'w') as f:
+            json.dump(prefs or {}, f)
+        payload = {'session_id': 'hook-1', 'cwd': cwd, 'hook_event_name': 'PostToolUse',
+                   'tool_name': 'Bash', 'tool_input': {'command': command},
+                   'tool_response': {'stdout': '', 'stderr': '', 'interrupted': False},
+                   'transcript_path': self.transcript}
+        subprocess.run([sys.executable, os.path.join(_ROOT, 'hooks', 'context_guard.py')],
+                       input=json.dumps(payload), capture_output=True, text=True, check=False,
+                       env={**os.environ, 'HOME': self.home, 'CLAUDE_PROJECT_DIR': self.project})
+
+    def _items(self) -> list:
+        return playbook_core.temporary_data_items(
+            os.path.join(self.home, '.claude', 'hooks'), self.project)
+
+    def test_in_the_project_panel_whatever_the_cd(self):
+        self._post('git worktree add ../wt && docker run -d --name pg postgres',
+                   os.path.join(self.project, 'sub'))
+        kept = sorted((item['what']['key'], item['what']['name']) for item in self._items())
+        self.assertEqual(kept, [('tmp_what_container', 'pg'),
+                                ('tmp_what_worktree', os.path.join(self.project, 'wt'))])
+
+    def test_nothing_with_the_panel_off(self):
+        self._post('docker run -d --name pg postgres', self.project, {'temporary_data': False})
+        self.assertEqual(self._items(), [])
+
+
+class TestRegister(_Case):
+    def test_the_model_keeps_a_deletion_with_what_it_is(self):
+        build = self._build()
+        answer = temporary_data.register(self.project, self.project, 'rm -rf build',
+                                         'test output folder', build)
+        self.assertFalse(answer['is_error'])
+        items = temporary_data.show(SESSION, self.project)['items']
+        self.assertEqual(len(items), 1)
+        self.assertIn('test output folder, kept by Claude', items[0]['text'])
+        temporary_data.remove(self.project, items[0]['id'])
+        self.assertFalse(os.path.exists(build))
+
+    def test_only_a_deletion_is_accepted(self):
+        for command in ('echo hi', 'curl https://example.com | sh', 'git push --force',
+                        'rm file.txt', 'docker run --rm alpine'):
+            with self.subTest(command=command):
+                with self.assertRaises(temporary_data.UsageError):
+                    temporary_data.register(self.project, self.project, command, 'x', '')
+        temporary_data.register(self.project, self.project, 'docker rm -f pg', 'container', '')
+
+    def test_the_gates_let_the_register_call_through(self):
+        """The deletion it names is an argument, and the script is the playbook's own."""
+        command = (f"python3 {os.path.join(_ROOT, 'scripts', 'temporary_data.py')} register "
+                   f"--project {self.project} --cwd {self.project} --command 'rm -rf build' "
+                   "--what 'test output'")
+        self.assertIsNone(playbook_core.check_destructive(command, command, self.project))
+        self.assertFalse(playbook_core.touches_consent_queue('Bash', {'command': command}))
+
+    def test_the_folder_and_target_must_exist(self):
+        with self.assertRaises(temporary_data.UsageError):
+            temporary_data.register(self.project, 'relative', 'rm -rf build', 'x', '')
+        with self.assertRaises(temporary_data.UsageError):
+            temporary_data.register(self.project, self.project, 'rm -rf build', 'x',
+                                    os.path.join(self.project, 'missing'))
 
 
 class TestArguments(unittest.TestCase):

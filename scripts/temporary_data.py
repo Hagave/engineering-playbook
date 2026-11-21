@@ -12,6 +12,13 @@ Usage:
   temporary_data.py approve --session <id> --project <dir> --id <n>
   temporary_data.py decline --session <id> --project <dir> --id <n>
   temporary_data.py remove  --project <dir> --item <item id>
+  temporary_data.py register --project <dir> --cwd <dir> --command <deletion>
+                             --what <text> [--target <path>]
+
+`register` is the model's: something it made that the hook could not see (a
+path from a variable, `$(mktemp -d)`), kept with the command that removes it.
+Only a deletion is accepted (the destructive gate's deletion effects, or a
+`docker rm`), since a press in the panel runs it.
 
 Each prints one JSON object. `approve`, `decline` and `remove` answer
 `{"text": ..., "note": ..., "is_error": ...}`: `text` for the person, `note`
@@ -26,6 +33,7 @@ cut (`is_cut`) is never run from the button: the person answers in the chat.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -38,7 +46,10 @@ STATE_DIR = os.path.expanduser('~/.claude/hooks')
 # Under the mod's ten-minute process limit, so a slow deletion is reported
 # by this script instead of cut off with nothing said.
 RUN_TIMEOUT_S = 540
+DOCKER_TIMEOUT_S = 5
 ERROR_SHOWN_CHARS = 300
+WHAT_SHOWN_CHARS = 200
+REGISTER_COMMAND_MAX = 2000
 PENDING_SHOWN = 3
 UI_KEYS = ('tmp_waiting', 'tmp_hint', 'tmp_approve', 'tmp_decline', 'tmp_title', 'tmp_help',
            'tmp_close', 'tmp_empty', 'tmp_yes', 'tmp_no')
@@ -85,11 +96,64 @@ def _language() -> str:
     return playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
 
 
+def _still_there(item: dict) -> bool:
+    """Whether what the item removes still exists: an item whose target is
+    gone (removed by the model, the person or anything else) leaves the
+    panel. An item with no target, or a Docker one where `docker` cannot
+    answer, is kept: only a known absence removes it."""
+    target = item.get('target') if isinstance(item.get('target'), dict) else {}
+    kind, value = target.get('kind'), target.get('value')
+    if not isinstance(value, str) or not value:
+        return True
+    if kind == 'path':
+        return os.path.lexists(value)
+    if kind in ('container', 'volume', 'network') and shutil.which('docker'):
+        try:
+            ran = subprocess.run(['docker', kind, 'inspect', value], capture_output=True,
+                                 timeout=DOCKER_TIMEOUT_S, stdin=subprocess.DEVNULL)
+        except (subprocess.TimeoutExpired, OSError):
+            return True
+        return ran.returncode == 0
+    return True
+
+
+def _is_released(item: dict, session_id: str, turn_end: float) -> bool:
+    """Whether the model is done with what the item names: something a
+    command made shows once the turn that made it ended, never while the
+    work that uses it may still be running."""
+    if item.get('kind') != 'created' or item.get('origin') != session_id:
+        return True
+    return item['ts'] <= turn_end
+
+
+def _item_text(language: str, item: dict) -> str:
+    say = playbook_i18n.text
+    when = time.strftime('%Y-%m-%d %H:%M', time.localtime(item['ts']))
+    command = playbook_core.shown_command(item['command'])
+    what = item.get('what') if isinstance(item.get('what'), dict) else {}
+    key, name, text = what.get('key'), what.get('name'), what.get('text')
+    if isinstance(key, str) and key in playbook_i18n.STRINGS and isinstance(name, str):
+        label = say(language, key, name=name)
+    elif isinstance(text, str) and text:
+        label = text[:WHAT_SHOWN_CHARS]
+    else:
+        label = _effect_text(language, item.get('effect'))
+    template = {'created': 'tmp_item_created', 'registered': 'tmp_item_registered'}.get(
+        str(item.get('kind')), 'tmp_item')
+    return say(language, template, effect=label, command=command, when=when)
+
+
 def show(session_id: str, project_dir: str) -> dict:
     language = _language()
     say = playbook_i18n.text
     pending = playbook_core.consent_pending(STATE_DIR, session_id)
-    items = playbook_core.temporary_data_items(STATE_DIR, project_dir)
+    turn_end = playbook_core.consent_turn_end(STATE_DIR, session_id)
+    items = []
+    for item in playbook_core.temporary_data_items(STATE_DIR, project_dir):
+        if not _still_there(item):
+            playbook_core.temporary_data_drop(STATE_DIR, project_dir, item['id'])
+        elif _is_released(item, session_id, turn_end):
+            items.append(item)
     return {
         'ui': {key: say(language, key) for key in UI_KEYS},
         'pending': [{
@@ -104,9 +168,7 @@ def show(session_id: str, project_dir: str) -> dict:
         'open': say(language, 'tmp_open', count=len(items)) if items else '',
         'items': [{
             'id': item['id'],
-            'text': say(language, 'tmp_item', effect=_effect_text(language, item.get('effect')),
-                        command=playbook_core.shown_command(item['command']),
-                        when=time.strftime('%Y-%m-%d %H:%M', time.localtime(item['ts']))),
+            'text': _item_text(language, item),
             'confirm': say(language, 'tmp_confirm', cwd=item['cwd']),
             'command': playbook_core.shown_command(item['command']),
         } for item in items],
@@ -196,11 +258,58 @@ def remove(project_dir: str, item_id: str) -> dict:
     return {'text': say(language, 'tmp_removed'), 'note': '', 'is_error': False}
 
 
+_DOCKER_REMOVALS = (['rm'], ['container', 'rm'], ['volume', 'rm'], ['network', 'rm'])
+
+
+def _deletion_effect(command: str) -> str | None:
+    """What a command the model registers removes, as the destructive gate
+    names it; None when it is not a deletion. Only a deletion goes in the
+    panel: what a press there runs is never anything else."""
+    hit = playbook_core.check_destructive(playbook_core.strip_heredoc_bodies(command), command)
+    if hit is not None:
+        effect = str(hit.get('effect'))
+        return effect if effect in playbook_core.DELETION_EFFECTS else None
+    segments = playbook_core.shell_segments(command) or []
+    if len(segments) != 1:
+        return None
+    words = playbook_core.command_words(segments[0])
+    if words[:1] == ['docker'] and any(words[1:1 + len(form)] == form for form in _DOCKER_REMOVALS):
+        return 'delete_tree'
+    return None
+
+
+def register(project_dir: str, cwd: str, command: str, what: str, target: str) -> dict:
+    """Keep something the model made, and the hook could not see, for the
+    person to remove: the model calls this with the question it asks."""
+    if not os.path.isabs(cwd) or not os.path.isdir(cwd):
+        raise UsageError(f'--cwd must be an existing absolute folder: {cwd!r}')
+    if len(command) > REGISTER_COMMAND_MAX or len(what) > WHAT_SHOWN_CHARS:
+        raise UsageError(f'--command is at most {REGISTER_COMMAND_MAX} characters and '
+                         f'--what at most {WHAT_SHOWN_CHARS}')
+    if target and not (os.path.isabs(target) and os.path.lexists(target)):
+        raise UsageError(f'--target must be an existing absolute path: {target!r}')
+    effect = _deletion_effect(command)
+    if effect is None:
+        raise UsageError('--command must be a deletion (rm -r, a forced worktree removal, '
+                         f'docker rm): {command!r}')
+    playbook_core.temporary_data_add(
+        STATE_DIR, project_dir, command=command, cwd=cwd, effect=effect, origin='model',
+        kind='registered', what={'text': what},
+        target={'kind': 'path', 'value': target} if target else None)
+    return {'text': playbook_i18n.text(_language(), 'tmp_registered'),
+            'note': '[playbook:temporary-data] Kept in the Temporary data panel.',
+            'is_error': False}
+
+
 def main(argv: list[str]) -> int:
     action = argv[0] if argv else ''
     try:
         options = _options(argv[1:])
-        if action == 'show':
+        if action == 'register':
+            project_dir, cwd, command, what = _required(options, 'project', 'cwd', 'command',
+                                                        'what')
+            answer = register(project_dir, cwd, command, what, options.get('target', ''))
+        elif action == 'show':
             session_id, project_dir = _required(options, 'session', 'project')
             answer = show(session_id, project_dir)
         elif action in ('approve', 'decline'):
@@ -213,7 +322,8 @@ def main(argv: list[str]) -> int:
             project_dir, item_id = _required(options, 'project', 'item')
             answer = remove(project_dir, item_id)
         else:
-            raise UsageError(f'unknown action {action!r}: use show, approve, decline or remove')
+            raise UsageError(f'unknown action {action!r}: use show, approve, decline, remove '
+                             'or register')
     except (UsageError, ValueError) as error:
         print(f'[playbook:temporary-data] {error}', file=sys.stderr)
         return 2
