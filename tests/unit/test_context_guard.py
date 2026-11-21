@@ -876,7 +876,8 @@ class TestDestructiveFalsePositives(unittest.TestCase):
     def test_each_detection_names_its_effect(self):
         for command, effect in (('rm -rf build', 'delete_tree'),
                                 ('git push --force origin main', 'force_push'),
-                                ('x=rm; $x -rf build', 'dynamic'),
+                                ('x=$(printf rm); $x -rf build', 'dynamic'),
+                                ('x=rm; $x -rf build', 'delete_tree'),
                                 ('python3 -c "import shutil; shutil.rmtree(\'b\')"', 'script_delete')):
             with self.subTest(command=command):
                 runnable = playbook_core.strip_inline_payloads(command)

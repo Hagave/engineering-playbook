@@ -81,6 +81,34 @@ DESTRUCTIVE = [
     ('env -i $TOOL --wipe', True),
     ('sudo -u app $TOOL --wipe', True),
     ('nice -n 5 $TOOL --wipe', True),
+    # A variable bound to a literal command earlier in the command is read as
+    # that literal (2026-11-19). One that may hold anything else at run time
+    # stays decided at run time.
+    ('R="rm -rf"; $R build', True),
+    ('S=/tmp/x; G="git -C $S"; $G reset --hard', True),
+    ('$P -rf build; P=echo', True),
+    ('true && P=echo; $P -rf build', True),
+    ('false || P=echo; $P -rf build', True),
+    ('if true; then P=echo; fi; $P -rf build', True),
+    ('case x in x) P=echo;; esac; $P -rf build', True),
+    ('{ P=echo; }; $P -rf build', True),
+    ('(P=echo); $P -rf build', True),
+    ('P=echo; P=$(cat f); $P -rf build', True),
+    ('P=echo; for P in rm; do $P -rf build; done', True),
+    ('P=echo; read P; $P -rf build', True),
+    ('P=echo; source ./env.sh; $P -rf build', True),
+    ('P=echo; . ./env.sh; $P -rf build', True),
+    ('P=echo $P -rf build', True),
+    ('P=/bin/r*; $P -rf build', True),
+    ('P=$HOME/bin/x; $P -rf build', True),
+    ('P=echo; x=$($P -rf build)', True),
+    ('P=; $P rm -rf build', True),
+    ('P=(rm -rf); $P build', True),
+    ('sleep 1 & P=echo; $P -rf build', True),
+    ('IFS=x; P=rmx-rf; $P build', True),
+    ('P=rmx-rf; IFS=x $P build', True),
+    ('function f {\nP=echo\n}\n$P -rf build', True),
+    ('f() {\nP=echo\n}\n$P -rf build', True),
     # Recursive deletion through an interpreter one-liner.
     ("python3 -c \"import shutil; shutil.rmtree('build')\"", True),
     ("node -e \"require('fs').rmSync('build',{recursive:true})\"", True),
@@ -105,6 +133,12 @@ DESTRUCTIVE = [
     ("python3 -c \"import os; os.remove('x.json')\"", False),
     ("python3 -c \"print('shutil.rmtree is documented here')\"", False),
     ('bash -c "echo $HOME"', False),
+    ('P="docker exec db psql -U postgres"; $P -c "select 1"', False),
+    ('P="docker exec db psql"\n$P -c "select 1"\n$P -c "select 2"', False),
+    ('S=/tmp/x; T=$S/t; G="git -C $T -c user.name=t"; $G commit -q -m "feat: x"', False),
+    ('J=/opt/jdk/bin/javap; $J -cp lib.jar Foo', False),
+    ('[[ "$t" > "12:31" && "$t" < "12:58" ]] || continue', False),
+    ('for f in a b; do [[ -f "$f" && -s "$f" ]] && cat "$f"; done', False),
     ('for f in a b; do $f -rf build; done', True),
     ('if true; then rm -rf build; fi', True),
     ('/usr/bin/$TOOL -rf build', True),
@@ -293,6 +327,10 @@ KNOWN_GAPS = [
      'the boundary, and it exists only inside the lab'),
     ('./bin/scan --target https://example.com', 'lab',
      'a renamed or wrapped scanner binary is not recognized'),
+    ('P=echo; reset_tools; $P -rf build', 'destructive',
+     'a shell function from the user\'s own environment (`reset_tools`) could rebind a '
+     'variable the command bound to a literal; the text cannot show it, and a function '
+     'the user defined is theirs'),
 ]
 
 
@@ -304,8 +342,12 @@ class TestDestructiveCorpus(unittest.TestCase):
                 self.assertEqual(_destructive(command), must_block)
 
     def test_message_tells_why_a_dynamic_command_is_blocked(self):
-        result = playbook_core.check_destructive('x=rm; $x -rf build')
+        result = playbook_core.check_destructive('x=$(printf rm); $x -rf build')
         self.assertIn('decided at run time', result['msg'])
+
+    def test_a_literal_command_variable_is_read_as_the_literal(self):
+        result = playbook_core.check_destructive('x=rm; $x -rf build')
+        self.assertEqual(result['effect'], 'delete_tree')
 
     def test_every_heredoc_with_the_same_delimiter_is_stripped(self):
         command = "cat > a <<EOF\nrm -rf one\nEOF\ncat > b <<EOF\nrm -rf two\nEOF"
@@ -433,6 +475,40 @@ class TestScriptFiles(unittest.TestCase):
         self._script('run.sh', '#!/bin/sh\n# rm -rf dist is done by clean.sh\nexec "$@"\n',
                      executable=True)
         self.assertFalse(self._destructive('./run.sh make test'))
+
+    def test_script_named_by_a_literal_variable_is_read(self):
+        self._script('clean.sh', 'rm -rf dist\n', executable=True)
+        self.assertTrue(self._destructive('S=./clean.sh; $S'))
+        self._script('show.sh', 'ls dist\n', executable=True)
+        self.assertFalse(self._destructive('S=./show.sh; $S'))
+
+    def test_script_removing_its_own_temporary_directory_passes(self):
+        self._script('probe.js', (
+            'const fs = require("fs"); const os = require("os");\n'
+            'const dir = fs.mkdtempSync(os.tmpdir() + "/probe-");\n'
+            'try { run(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }\n'))
+        self.assertFalse(self._destructive('node probe.js'))
+        self._script('probe.py', (
+            'import shutil, tempfile\nd = tempfile.mkdtemp()\ntry:\n    pass\n'
+            'finally:\n    shutil.rmtree(d)\n'))
+        self.assertFalse(self._destructive('python3 probe.py'))
+
+    def test_temporary_directory_name_used_for_something_else_is_blocked(self):
+        cases = {
+            'other.js': 'const dir = fs.mkdtempSync("/tmp/p");\nfs.rmSync(process.argv[2], {recursive: true});\n',
+            'rebound.js': 'let dir = fs.mkdtempSync("/tmp/p");\ndir = "/home";\nfs.rmSync(dir, {recursive: true});\n',
+            'param.js': 'const dir = fs.mkdtempSync("/tmp/p");\nfunction f(dir) { fs.rmSync(dir, {recursive: true}); }\n',
+            'arrow.js': 'const dir = fs.mkdtempSync("/tmp/p");\nconst f = (dir) => fs.rmSync(dir, {recursive: true});\n',
+            'loop.js': 'const dir = fs.mkdtempSync("/tmp/p");\nfor (const dir of ["/home"]) fs.rmSync(dir, {recursive: true});\n',
+            'loop.py': 'import shutil, tempfile\nd = tempfile.mkdtemp()\nfor d in ["/home"]:\n    shutil.rmtree(d)\n',
+            'rebound.py': 'import shutil, tempfile\nd = tempfile.mkdtemp()\nd = "/home"\nshutil.rmtree(d)\n',
+            'param.py': 'import shutil, tempfile\nd = tempfile.mkdtemp()\ndef f(d):\n    shutil.rmtree(d)\n',
+        }
+        for name, text in cases.items():
+            with self.subTest(script=name):
+                self._script(name, text)
+                interpreter = 'node' if name.endswith('.js') else 'python3'
+                self.assertTrue(self._destructive(f'{interpreter} {name}'))
 
     def test_script_run_by_a_script_is_followed(self):
         self._script('outer.sh', '#!/bin/sh\nbash inner.sh\n', executable=True)

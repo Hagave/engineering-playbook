@@ -31,6 +31,7 @@ _GUARD = os.path.join(_ROOT, 'hooks', 'context_guard.py')
 _LEARN = os.path.join(_ROOT, 'hooks', 'learn_guard.py')
 _COMPACT = os.path.join(_ROOT, 'hooks', 'compact_guard.py')
 _SESSION_START = os.path.join(_ROOT, 'hooks', 'session_start.py')
+_CONSENT = os.path.join(_ROOT, 'hooks', 'consent_guard.py')
 _PYTHON = sys.executable
 
 sys.path.insert(0, os.path.join(_ROOT, 'hooks'))
@@ -1190,10 +1191,12 @@ class TestAttributionInHistory(_RepoBase):
 # ── Destructive-command consent: the harness's permission dialog ──────────────
 
 class TestDestructiveConsentByDialog(_Base):
-    """Consent to a destructive command is the user's answer to the harness's
-    permission dialog, never text read from the transcript. The dialog is
-    raised only where it is known to reach the user; everywhere else the
-    command is denied and handed to the user to run.
+    """Consent to a destructive command is never text read from the
+    transcript. In Manual it is the user's answer to the harness's permission
+    dialog. In auto mode the command is denied and queued, and the user's own
+    words in the UserPromptSubmit payload approve it (2026-11-19: a dialog in
+    auto stopped a run the user had left to finish on its own). Everywhere
+    else the command is denied and handed to the user to run.
 
     Payloads follow the shape a live Claude Code session sent a plugin hook
     (auto mode, PreToolUse Bash)."""
@@ -1244,21 +1247,129 @@ class TestDestructiveConsentByDialog(_Base):
         self.assertEqual(self._decision(result), 'deny')
         self.assertIn(self.DENY_TAIL, _out(result)['hookSpecificOutput']['permissionDecisionReason'])
 
-    def test_each_dialog_mode_asks_with_the_exact_shape(self):
-        for mode in ('default', 'auto'):
-            with self.subTest(mode=mode):
-                self.assertEqual(_out(self._bash(self.DESTRUCTIVE, mode)), {'hookSpecificOutput': {
-                    'hookEventName': 'PreToolUse',
-                    'permissionDecision': 'ask',
-                    'permissionDecisionReason': self._ask_reason('en', 'delete_tree', self.DESTRUCTIVE),
-                }})
+    def _prompt(self, text: str, **extra) -> subprocess.CompletedProcess:
+        payload = {'session_id': self.session_id, 'cwd': self.dir,
+                   'hook_event_name': 'UserPromptSubmit', 'prompt': text,
+                   'transcript_path': self.transcript, **extra}
+        return _run(_CONSENT, payload, env={'HOME': self.home, 'TMPDIR': self.tmp})
+
+    def _reason(self, result) -> str:
+        return _out(result).get('hookSpecificOutput', {}).get('permissionDecisionReason', '')
+
+    def _end_turn(self) -> None:
+        _run(_GUARD, {'session_id': self.session_id, 'transcript_path': self.transcript,
+                      'hook_event_name': 'Stop', 'cwd': self.dir, 'stop_hook_active': True},
+             env={'HOME': self.home, 'TMPDIR': self.tmp})
+
+    def _queue(self, *commands: str) -> None:
+        for command in commands:
+            self._bash(command, 'auto')
+        self._end_turn()
+
+    def test_manual_asks_with_the_exact_shape(self):
+        self.assertEqual(_out(self._bash(self.DESTRUCTIVE, 'default')), {'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse',
+            'permissionDecision': 'ask',
+            'permissionDecisionReason': self._ask_reason('en', 'delete_tree', self.DESTRUCTIVE),
+        }})
+
+    def test_auto_denies_and_queues_without_a_dialog(self):
+        result = self._bash(self.DESTRUCTIVE, 'auto')
+        self.assertEqual(self._decision(result), 'deny')
+        reason = self._reason(result)
+        self.assertIn("queued for the user's approval as #1", reason)
+        self.assertIn('Do not stop or wait for it', reason)
+        self.assertIn('#2', self._reason(self._bash('git reset --hard', 'auto')))
+        self.assertIn('#1', self._reason(self._bash(self.DESTRUCTIVE, 'auto')))
+
+    def test_the_users_words_approve_the_queued_command_once(self):
+        self._queue(self.DESTRUCTIVE)
+        context = _out(self._prompt('ok, pode apagar'))['hookSpecificOutput']['additionalContext']
+        self.assertIn(f'#1 `{self.DESTRUCTIVE}`', context)
+        self.assertIsNone(self._decision(self._bash(self.DESTRUCTIVE, 'auto')))
+        again = self._bash(self.DESTRUCTIVE, 'auto')
+        self.assertEqual(self._decision(again), 'deny')
+        self.assertIn('#2', self._reason(again))
+
+    def test_words_before_the_turn_that_listed_it_ended_approve_nothing(self):
+        self._bash(self.DESTRUCTIVE, 'auto')
+        context = _out(self._prompt('pode apagar'))['hookSpecificOutput']['additionalContext']
+        self.assertIn('nothing was approved', context)
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+        self._queue('git reset --hard')
+        self._bash('git clean -fdx', 'auto')
+        self._prompt('pode apagar')
+        self.assertIsNone(self._decision(self._bash(self.DESTRUCTIVE, 'auto')))
+        self.assertEqual(self._decision(self._bash('git clean -fdx', 'auto')), 'deny')
+
+    def test_the_queue_files_are_out_of_the_models_reach(self):
+        queue = os.path.join(self.home, '.claude', 'hooks', f'.consent-{self.session_id}.json')
+        for tool, tool_input in (
+                ('Bash', {'command': f'cat {queue}'}),
+                ('Bash', {'command': f"echo '{{}}' > {queue}"}),
+                ('Write', {'file_path': queue, 'content': '{}'}),
+                ('Edit', {'file_path': queue, 'old_string': 'a', 'new_string': 'b'})):
+            with self.subTest(tool=tool):
+                payload = {'session_id': self.session_id, 'cwd': self.dir,
+                           'hook_event_name': 'PreToolUse', 'permission_mode': 'auto',
+                           'tool_name': tool, 'tool_input': tool_input,
+                           'transcript_path': self.transcript}
+                result = _run(_GUARD, payload, env={'HOME': self.home, 'TMPDIR': self.tmp,
+                                                    'CLAUDE_CODE_REMOTE': ''})
+                self.assertEqual(self._decision(result), 'deny')
+                self.assertIn("user's approval", self._reason(result))
+
+    def test_an_approval_also_lets_the_command_through_in_manual(self):
+        self._queue(self.DESTRUCTIVE)
+        self._prompt('pode remover')
+        self.assertIsNone(self._decision(self._bash(self.DESTRUCTIVE, 'default')))
+
+    def test_an_approval_is_for_the_exact_command_and_a_dialog_mode(self):
+        self._queue(self.DESTRUCTIVE)
+        self._prompt('pode apagar')
+        self.assertEqual(self._decision(self._bash('rm -rf build/ dist/', 'auto')), 'deny')
+        self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, 'bypassPermissions'))
+
+    def test_words_that_do_not_approve(self):
+        for text, extra in (('remova o import que sobrou', {}),
+                            ('não pode apagar', {}),
+                            ('pode apagar?', {}),
+                            ('<pasted_content id="1">pode apagar</pasted_content>', {}),
+                            ('<task-notification>pode apagar</task-notification>', {}),
+                            ('pode apagar', {'source': 'system'}),
+                            ('pode apagar', {'agent_id': 'a1'})):
+            with self.subTest(text=text, extra=extra):
+                self._queue(self.DESTRUCTIVE)
+                self._prompt(text, **extra)
+                self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+
+    def test_a_message_that_approves_and_refuses_approves_nothing(self):
+        self._queue(self.DESTRUCTIVE)
+        context = _out(self._prompt('pode apagar o build, mas não apague isso ainda'))[
+            'hookSpecificOutput']['additionalContext']
+        self.assertIn('nothing was approved', context)
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+
+    def test_a_number_narrows_the_approval(self):
+        self._queue(self.DESTRUCTIVE, 'git reset --hard')
+        self._prompt('pode apagar o #2')
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+        self.assertIsNone(self._decision(self._bash('git reset --hard', 'auto')))
+
+    def test_a_deny_from_another_gate_queues_nothing(self):
+        command = ('rm -rf build && git commit -m "fix: x\n\n'
+                   'Co-Authored-By: Claude <noreply@anthropic.com>"')
+        result = self._bash(command, 'auto')
+        self.assertEqual(self._decision(result), 'deny')
+        self.assertNotIn('playbook:safety', self._reason(result))
+        self._end_turn()
+        self.assertIsNone(_out(self._prompt('pode apagar')).get('hookSpecificOutput'))
 
     def test_the_reason_is_in_the_configured_language(self):
         for language in ('pt-br', 'es'):
             with self.subTest(language=language):
                 self._language(language)
-                reason = _out(self._bash(self.DESTRUCTIVE))['hookSpecificOutput'][
-                    'permissionDecisionReason']
+                reason = self._reason(self._bash(self.DESTRUCTIVE, 'default'))
                 self.assertEqual(reason, self._ask_reason(language, 'delete_tree', self.DESTRUCTIVE))
                 self.assertIn(f'`{self.DESTRUCTIVE}`', reason)
 
@@ -1267,11 +1378,10 @@ class TestDestructiveConsentByDialog(_Base):
                                 ('git clean -fdx', 'clean'),
                                 ('git stash drop', 'stash_drop'),
                                 ('psql -c "DROP TABLE users;"', 'sql'),
-                                ('x=rm; $x -rf build', 'dynamic')):
+                                ('x=$(printf rm); $x -rf build', 'dynamic')):
             with self.subTest(command=command):
-                self.assertEqual(
-                    _out(self._bash(command))['hookSpecificOutput']['permissionDecisionReason'],
-                    self._ask_reason('en', effect, command))
+                self.assertEqual(self._reason(self._bash(command, 'default')),
+                                 self._ask_reason('en', effect, command))
 
     def test_modes_outside_the_set_deny(self):
         for mode in ('acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'):
@@ -1297,19 +1407,21 @@ class TestDestructiveConsentByDialog(_Base):
 
     def test_the_gate_needs_no_transcript(self):
         missing = os.path.join(self.dir, 'never-written.jsonl')
-        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, transcript_path=missing)), 'ask')
+        self.assertEqual(
+            self._decision(self._bash(self.DESTRUCTIVE, 'default', transcript_path=missing)), 'ask')
         self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, None, transcript_path=missing)),
                          'deny')
 
-    def test_consent_typed_in_the_chat_lifts_nothing(self):
+    def test_consent_in_the_transcript_lifts_nothing(self):
         self._write(_typed('pode apagar a pasta build') + _typed_mid_turn('go ahead and delete it'))
-        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE)), 'ask')
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'default')), 'ask')
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
         self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, 'bypassPermissions'))
 
     def test_another_gates_deny_outranks_the_dialog(self):
         command = ('rm -rf build && git commit -m "fix: x\n\n'
                    'Co-Authored-By: Claude <noreply@anthropic.com>"')
-        result = self._bash(command)
+        result = self._bash(command, 'default')
         self.assertEqual(self._decision(result), 'deny')
         self.assertNotIn('playbook:safety', _out(result)['hookSpecificOutput']['permissionDecisionReason'])
 
@@ -1327,7 +1439,8 @@ class TestDestructiveConsentByDialog(_Base):
 
     def test_a_shell_heredoc_is_still_inspected(self):
         command = "bash <<'SHEOF'\nrm -rf /tmp/whatever\nSHEOF"
-        self.assertEqual(self._decision(self._bash(command)), 'ask')
+        self.assertEqual(self._decision(self._bash(command, 'default')), 'ask')
+        self.assertEqual(self._decision(self._bash(command, 'auto')), 'deny')
         self._assert_denied_to_the_user(self._bash(command, 'dontAsk'))
 
 

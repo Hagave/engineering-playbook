@@ -35,7 +35,7 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 | Partial implementations | Hard spec gate in `engineering-implement` — no code written before explicit user sign-off on the checklist |
 | Context loss | Non-negotiable rules anchored in every skill via identical prefix blocks — KV cache hits across sessions |
 | Context overflow | At 70% the model finishes the task and writes a handoff; at 85% every tool call is denied. Either way the exit is `/clear` + "resume", never `/compact` |
-| Destructive operations | Hook intercepts `rm -r*`, `git push --force`, `git reset --hard`, `DROP TABLE`, and similar — requires explicit user confirmation |
+| Destructive operations | Hook intercepts `rm -r*`, `git push --force`, `git reset --hard`, `DROP TABLE`, and similar — requires explicit user approval (a dialog in Manual; in auto mode a queued request the user answers in the chat, without stopping the run) |
 | Vulnerable code | 13 vulnerability fiches, a security review whose every candidate is confirmed, ruled out or left as a named proof gap, and a local lab that scans your own running app |
 | Leaked secrets | Hook scans what a write adds, what a commit records and what a push publishes with gitleaks' rules — tokens with a known shape are denied |
 | Repeated errors | `engineering-learn` mines real session logs and writes specific corrections back into the project |
@@ -268,18 +268,26 @@ machine: destructive commands, AI attribution in history, and secrets.
 **How it works.**
 - **Destructive commands** (`rm -r`, `git reset --hard`, force push,
   `git clean`, `DROP TABLE`, and their respellings) run only after you approve
-  Claude Code's permission dialog for that command, which says what it
-  destroys. Where no dialog can reach you (permission modes other than Manual
-  and auto, a subagent, a cloud session) they are denied, and you run them
-  yourself. An `rm` inside the session's own scratchpad needs none.
+  them. In Manual, Claude Code's permission dialog for that command says what
+  it destroys. In auto mode nothing stops the run: the command is denied and
+  queued as `#n`, the agent carries on and tells you in its message what `#n`
+  removes and why, and runs it once after you approve it in the chat. Where
+  neither can reach you (other permission modes, a subagent, a cloud session)
+  they are denied, and you run them yourself. An `rm` inside the session's own
+  scratchpad needs none.
 - **AI attribution** (`Co-Authored-By: Claude`, "Generated with Claude") is
   denied in commits, tags, pull requests and their bodies.
 - **Secrets** with a known token shape (AWS, GitHub, Stripe, private keys and
   about a hundred more, from gitleaks' rules) are denied in what a write adds,
   a commit records or a push publishes. Generic patterns only warn.
 
-**How to use it.** When a destructive command comes up, read the dialog and
-approve or decline it; typing consent in the chat does not approve it. For a secret
+**How to use it.** When a destructive command comes up in Manual, read the
+dialog and approve or decline it. In auto mode, answer the agent's question in
+your own words: "pode apagar", "pode remover", "apaga isso", "yes, delete it"
+approve every command it listed, and naming a number ("pode apagar o #2")
+approves that one. A message that also refuses ("não apague isso") approves
+nothing, and a bare verb about code ("remova o import") is not an answer. Only
+words you type count: pasted text and notifications do not. For a secret
 false positive, add the fingerprint from the denial to
 `.playbook/secrets-allow` yourself; the agent cannot write that file. If your
 team allows attribution, set `PLAYBOOK_ALLOW_AI_ATTRIBUTION=1` in your own
@@ -346,6 +354,7 @@ rows at the end.
 | What it proves | Command | Needs |
 | --- | --- | --- |
 | The gates cannot be talked past: a corpus of evasion attempts (respelled commands, `eval`, `sh -c`, `find -exec`, interpreter one-liners, heredocs, script files) against the destructive-command, code-write, AI-attribution and scanner-outside-the-lab checks, plus the gaps left open on purpose | `python3 -m unittest tests.unit.test_gate_evasion -v` | Python 3.10+ |
+| In auto mode a destructive command is queued, not asked: only the user's own explicit words approve it, once, for that exact command; refusals, mixed messages, pasted text and notifications approve nothing | `python3 -m unittest tests.unit.test_consent tests.e2e.test_learn_and_push.TestDestructiveConsentByDialog -v` | Python 3.10+ |
 | The secret scanner loads and compiles gitleaks' rules, denies distinctive tokens and only warns on keyword-shaped ones, honors the allow file, redacts what it shows, and blocks a write, a commit or a push that carries a secret | `python3 -m unittest tests.unit.test_secret_scan tests.e2e.test_secret_gate -v` | Python 3.10+, git |
 | Static analysis is offered with the exact command when `semgrep`/`opengrep` is installed, and its scan counts as validation | `python3 -m unittest tests.unit.test_sast -v` | Python 3.10+ |
 | The lab refuses every unsafe compose configuration (host network, privileged, devices, host namespaces, bind mounts, external networks...) and cleans up after itself | `python3 -m unittest tests.unit.test_lab -v` | Python 3.10+ (no Docker) |
@@ -721,15 +730,25 @@ not the hook's `cwd`: the `cwd` follows the model's `cd` into a subfolder, and t
 
 The `PreToolUse` guard's **destructive-command block** (`rm -r`, `git reset
 --hard`, force push, `git clean`, mass delete, destructive SQL) answers
-`permissionDecision: "ask"`, so Claude Code shows the user its permission
-dialog with the command and, in the configured language, what it destroys; the
-command runs only if the user approves. Consent is that answer, given to the
-harness for that one call: the guard reads nothing from the transcript, and
-nothing the model or the user writes in the chat approves it. The dialog is
-raised only where it is documented to reach the user — the `default` (Manual)
-and `auto` permission modes, in the main session outside a cloud session.
-Every other mode, an unknown or missing mode, and a subagent's call are denied,
-with the model told to hand the command to the user. An `rm` of literal
+`permissionDecision: "ask"` in the `default` (Manual) mode, so Claude Code shows
+the user its permission dialog with the command and, in the configured
+language, what it destroys; the command runs only if the user approves. In
+`auto` mode a dialog stops a run the user left to finish on its own, so the
+guard denies instead and queues the exact command, per session, in
+`~/.claude/hooks/.consent-<session>.json`; the model carries on and asks the
+user in its message. `hooks/consent_guard.py` reads the user's answer from the
+`UserPromptSubmit` payload's `prompt` field (never the transcript): an explicit
+consent moves the queued commands to approved, and the guard lets each exact
+command through once. A prompt the payload marks as not typed by the user, a
+notification, pasted blocks and a subagent's prompt approve nothing, and so
+does a message that both approves and refuses. An approval covers only what was
+queued before the last turn ended (marked at `Stop`), so the user never approves
+a command the model had not yet listed. Any tool call that names the queue's
+files is denied, so the model cannot read or write its own approval; a path the
+shell computes is a known gap. Another gate's deny outranks
+both the dialog and the queue, so nothing is queued that would be denied
+anyway. Every other mode, an unknown or missing mode, a subagent's call and a
+cloud session are denied, with the model told to hand the command to the user. An `rm` of literal
 absolute paths inside the session's own scratchpad needs no consent: it deletes
 only what the session made there. Two false-positive sources were also removed: a heredoc body
 written by `cat`, `tee` or a non-shell interpreter is data, not shell about to
@@ -1059,9 +1078,19 @@ check. Two more cases are denied the same way:
 
 - a command whose **program is decided at run time** (`$x -rf build`,
   `eval "$CMD"`, `bash -c "$CMD"`): nothing can read what it runs. A variable
-  directory with a literal program (`$JAVA_HOME/bin/java`) is fine.
+  directory with a literal program (`$JAVA_HOME/bin/java`) is fine, and so is a
+  variable the same command binds to a literal command before it uses it
+  (`P="docker exec db psql"; $P -c "select 1"`): it is read as that literal.
+  The binding counts only when it always runs first and nothing can change it:
+  at the top level, after `;` or the start (not `&&`, `||`, `|`, `&`), not in
+  `if`, a loop, `case`, a group or a subshell, a literal value (no
+  substitution, glob or unbound reference), the name assigned nowhere else, and
+  no `source`, `.` or `eval` in the command. The test operators inside
+  `[[ ... ]]` (`&&`, `||`) no longer split it into commands.
 - **recursive deletion in an interpreter one-liner** (`shutil.rmtree(`,
-  `fs.rmSync(..., {recursive: true})`, `FileUtils.rm_rf`, `rmtree(`).
+  `fs.rmSync(..., {recursive: true})`, `FileUtils.rm_rf`, `rmtree(`), except on
+  a temporary directory the same script created and never rebinds
+  (`const dir = fs.mkdtempSync(...)`, `d = tempfile.mkdtemp()`).
 
 The corpus of evasion attempts and the gaps left open on purpose are in
 `tests/unit/test_gate_evasion.py`.
