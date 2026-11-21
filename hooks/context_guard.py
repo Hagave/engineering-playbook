@@ -690,6 +690,7 @@ def _scan_skills(transcript: str | None, state: dict) -> bool:
             state['gov_loaded'] = False
             state['suspended'] = False
             state['pending_skills'] = {}
+            state['unpaired_results'] = {}
         with open(transcript, encoding='utf-8', errors='replace') as f:
             f.seek(offset)
             for line in f:
