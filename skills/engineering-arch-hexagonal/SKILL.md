@@ -1,7 +1,7 @@
 ---
 name: engineering-arch-hexagonal
 description: "Hexagonal architecture (ports and adapters) directory structure and dependency rules, language-agnostic. Load when the user chose hexagonal architecture during project scaffolding, or when working on a project that already uses this structure."
-version: 2.1.0
+version: 2.1.1
 user-invocable: false
 ---
 
@@ -167,10 +167,12 @@ Registered in the composition root (NestJS `AppModule`):
 ```typescript
 ConfigModule.forRoot({
   isGlobal: true,
+  skipProcessEnv: true,
   validationSchema: envValidationSchema,
-  validationOptions: { allowUnknown: false, abortEarly: false },
 })
 ```
+
+The schema sees the whole `process.env`, so it never sets `allowUnknown: false`; `skipProcessEnv: true` serves only the declared variables (rules owned by `engineering-nestjs`, Configuration).
 
 If env variables are missing or invalid, the process exits at boot with a descriptive error — no silent `undefined` values at runtime.
 

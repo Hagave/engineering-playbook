@@ -1,9 +1,12 @@
 name: template-latest
 
-# The playbook follows the latest release of every package its code templates
-# use. Each template's real test installs what a new project installs today
-# (no pinned versions) and runs the template; when a release breaks one, this
-# opens an issue, or comments on the open one, with the versions it resolved.
+# The playbook follows the current release of every package its code templates
+# use: the LTS line where one is published, else the `latest` tag when it is
+# stable, else the newest stable release ("Dependency versions" in
+# engineering-governance). Each template's real test resolves what a new
+# project installs today (no pinned versions) and runs the template; when a
+# release breaks one, this opens an issue, or comments on the open one, with
+# the versions it resolved.
 # Scheduled workflows run from the default branch, so this checks the skills
 # users install.
 on:
@@ -29,6 +32,7 @@ jobs:
       matrix:
         suite:
           - tests.e2e.test_nest_security_template
+          - tests.e2e.test_nest_config_template
           - tests.e2e.test_docker_node_template
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

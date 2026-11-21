@@ -9,12 +9,15 @@ compose file is the services block of the skill's core, and the .dockerignore
 joins the core list and the Node additions: the test proves the text the model
 reads. Only a minimal app is written here: one Prisma model, one migration and
 an HTTP server that counts rows through the generated client. Packages are
-installed at their latest version, as the skills' install commands do.
+installed at the release the skills tell a new project to install (`latest`
+when it is stable, else the newest stable), with the prisma CLI and adapter at
+the client's version, as engineering-prisma's Installation says.
 
 Checked: the migrate service runs the migration and exits 0, and the app starts
 only after it finished; the production command runs no migration; the app
 answers through the pruned image, as a non-root user; and `docker compose stop`
-ends it through SIGTERM, which dumb-init forwards.
+ends it through SIGTERM, which dumb-init forwards. The base image is the
+newest Node.js LTS line, read from nodejs.org.
 """
 import json
 import os
@@ -28,24 +31,26 @@ import unittest
 import urllib.request
 import uuid
 
+from tests.e2e.npm_versions import package_json
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _SKILL_DIR = os.path.join(_ROOT, 'skills', 'engineering-docker')
 _UP_TIMEOUT_S = 900
 _HEALTH_TIMEOUT_S = 60.0
 
-# Latest, except where a skill this test exercises is written for an older
-# major: engineering-prisma is written for Prisma 7, and the `latest` tag of the
-# prisma CLI is 8, which has no `prisma generate`. The pin is a known gap of
-# that skill, not of this one; it goes when engineering-prisma follows Prisma 8.
-_PINNED = {'prisma': '^7', '@prisma/client': '^7', '@prisma/adapter-pg': '^7'}
+_NODE_RELEASES_URL = 'https://nodejs.org/dist/index.json'
+_DEPENDENCIES = ('@prisma/adapter-pg', '@prisma/client')
+_DEV_DEPENDENCIES = ('@types/node', 'prisma', 'typescript')
+_COUPLED = {'prisma': '@prisma/client', '@prisma/adapter-pg': '@prisma/client'}
 
-_PACKAGE = {
-    'name': 'docker-node-template-it',
-    'private': True,
-    'scripts': {'build': 'tsc -p tsconfig.json'},
-    'dependencies': {name: _PINNED.get(name, 'latest') for name in ('@prisma/adapter-pg', '@prisma/client')},
-    'devDependencies': {name: _PINNED.get(name, 'latest') for name in ('@types/node', 'prisma', 'typescript')},
-}
+
+def _newest_node_lts_major() -> int:
+    with urllib.request.urlopen(_NODE_RELEASES_URL, timeout=30) as response:
+        releases = json.load(response)
+    majors = [int(r['version'].lstrip('v').split('.')[0]) for r in releases if r.get('lts')]
+    if not majors:
+        raise AssertionError(f'{_NODE_RELEASES_URL} lists no LTS release')
+    return max(majors)
 
 _TSCONFIG = {
     'compilerOptions': {
@@ -166,6 +171,8 @@ class TestDockerNodeTemplate(unittest.TestCase):
         cls.app_dir = tempfile.mkdtemp(prefix='docker_node_it_')
         cls.project = f'pbdockerit{uuid.uuid4().hex[:8]}'
         node = _read('references/node.md')
+        package = package_json('docker-node-template-it', _DEPENDENCIES, _DEV_DEPENDENCIES, _COUPLED,
+                               scripts={'build': 'tsc -p tsconfig.json'})
         core = _read('SKILL.md')
         compose = [b for b in _blocks(core, 'yaml') if 'x-database' in b]
         if len(compose) != 1:
@@ -177,7 +184,7 @@ class TestDockerNodeTemplate(unittest.TestCase):
             'compose.override.yaml': _OVERRIDE,
             '.dockerignore': '\n'.join(_blocks(core, '') + _blocks(node, '')),
             'docker/entrypoint-development.sh': _blocks(node, 'bash')[0],
-            'package.json': json.dumps(_PACKAGE, indent=2),
+            'package.json': json.dumps(package, indent=2),
             'tsconfig.json': json.dumps(_TSCONFIG, indent=2),
             'prisma.config.ts': _PRISMA_CONFIG,
             f'{prisma_dir}/schema.prisma': _SCHEMA,
@@ -197,7 +204,7 @@ class TestDockerNodeTemplate(unittest.TestCase):
             locked = json.load(f)
         resolved = {name[len('node_modules/'):]: meta.get('version') for name, meta in locked['packages'].items()
                     if name.count('node_modules/') == 1 and name[len('node_modules/'):] in
-                    {*_PACKAGE['dependencies'], *_PACKAGE['devDependencies']}}
+                    {*package['dependencies'], *package['devDependencies']}}
         sys.stderr.write(f'\nResolved versions: {json.dumps(resolved, sort_keys=True)}\n')
         try:
             cls._run(cls._compose('up', '-d', '--build'), timeout=_UP_TIMEOUT_S)
@@ -247,6 +254,12 @@ class TestDockerNodeTemplate(unittest.TestCase):
                 last = repr(error)
                 time.sleep(1)
         self.fail(f'/health never answered: {last}\n{self._run(self._compose("logs", "--no-color", "app"))}')
+
+    def test_0_the_base_image_is_the_newest_node_lts(self) -> None:
+        images = re.findall(r'^FROM (node:\S+)', _read('references/node.md'), re.MULTILINE)
+        lts = _newest_node_lts_major()
+        self.assertTrue(images)
+        self.assertEqual(set(images), {f'node:{lts}-alpine'}, f'the newest Node.js LTS line is {lts}')
 
     def test_1_the_migration_runs_as_its_own_step_and_exits_0(self) -> None:
         state = self._state('migrate')
