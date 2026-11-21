@@ -165,6 +165,18 @@ STRINGS: dict[str, dict[str, str]] = {
         'es': 'Presupuesto de contexto (tokens)',
     },
     'label_language': {'en': 'Language', 'pt-br': 'Idioma', 'es': 'Idioma'},
+    'label_reports': {
+        'en': 'Deviation reports to the maintainer',
+        'pt-br': 'Relatos de desvio ao mantenedor',
+        'es': 'Informes de desvío al mantenedor',
+    },
+    # A group of settings, as the main screen lists it, and its screen's help.
+    'group_budgets': {'en': 'Cost budgets', 'pt-br': 'Orçamentos de custo', 'es': 'Presupuestos de costo'},
+    'group_budgets_help': {
+        'en': 'The CLAUDE.md size and the context size past which the playbook speaks up.',
+        'pt-br': 'O tamanho do CLAUDE.md e o tamanho de contexto a partir dos quais o playbook avisa.',
+        'es': 'El tamaño de CLAUDE.md y el tamaño de contexto a partir de los cuales el playbook avisa.',
+    },
     # What each setting does, shown under its name on its own screen.
     'help_prose': {
         'en': 'How much explanation a response carries. Applies from the next session.',
@@ -202,6 +214,22 @@ STRINGS: dict[str, dict[str, str]] = {
                   'As respostas seguem o idioma em que você escreve.'),
         'es': ('Idioma de este menú y sus mensajes. auto sigue el locale del sistema. '
                'Las respuestas siguen el idioma en que escribes.'),
+    },
+    'help_reports': {
+        'en': ('When a model reports a deviation from a skill rule, open a GitHub issue for '
+               'the maintainer with your account (gh), or show a pre-filled link. It sends only '
+               'the skill, its version, the rule as the skill words it, the model and the '
+               'playbook version: never your folder, code, session or reasoning. Off by default.'),
+        'pt-br': ('Quando um modelo relata um desvio de uma regra de skill, abre uma issue no '
+                  'GitHub para o mantenedor com a sua conta (gh), ou mostra um link '
+                  'pré-preenchido. Envia só a skill, a versão, a regra como a skill a escreve, o '
+                  'modelo e a versão do playbook: nunca a sua pasta, código, sessão ou raciocínio. '
+                  'Desligado por padrão.'),
+        'es': ('Cuando un modelo informa un desvío de una regla de skill, abre un issue en GitHub '
+               'para el mantenedor con tu cuenta (gh), o muestra un enlace prellenado. Envía solo '
+               'la skill, su versión, la regla como la skill la escribe, el modelo y la versión '
+               'del playbook: nunca tu carpeta, código, sesión o razonamiento. Apagado por '
+               'defecto.'),
     },
     'off': {'en': 'off', 'pt-br': 'desligado', 'es': 'apagado'},
     'on': {'en': 'on', 'pt-br': 'ligado', 'es': 'encendido'},
@@ -264,6 +292,19 @@ STRINGS: dict[str, dict[str, str]] = {
         'en': 'In force now: this menu is shown in {value}.',
         'pt-br': 'Em vigor agora: este menu aparece em {value}.',
         'es': 'En vigor ahora: este menú se muestra en {value}.',
+    },
+    'effect_reports_on': {
+        'en': ('In force from the next deviation a model reports: it is sent as an issue with '
+               'your GitHub account, or shown as a link when gh is missing or logged out.'),
+        'pt-br': ('Vale a partir do próximo desvio que um modelo relatar: ele sai como issue com '
+                  'a sua conta do GitHub, ou aparece como link quando o gh falta ou está sem login.'),
+        'es': ('En vigor desde el próximo desvío que informe un modelo: sale como issue con tu '
+               'cuenta de GitHub, o aparece como enlace cuando falta gh o no tiene sesión.'),
+    },
+    'effect_reports_off': {
+        'en': 'In force now: nothing is sent; deviations stay in the local journal only.',
+        'pt-br': 'Em vigor agora: nada é enviado; os desvios ficam só no diário local.',
+        'es': 'En vigor ahora: no se envía nada; los desvíos quedan solo en el diario local.',
     },
     'effect_generic': {'en': 'In force now.', 'pt-br': 'Em vigor agora.', 'es': 'En vigor ahora.'},
     # The output filter's totals line (hooks/output_filter.py --report).

@@ -273,10 +273,39 @@ class TestHarness(unittest.TestCase):
         self.assertIn('Prose budget: LOW', out)
 
     def test_the_numbered_menu_has_a_digit_for_every_claude_code_setting(self):
-        # hooks/config_panel.tsx MAX_SETTING_ROWS: digits 1-9 hold the settings
-        # plus Status, Learn, red-lab-playbook and Diff panel. A sixth setting
-        # would silently fall off the menu.
-        self.assertLessEqual(len(config.HARNESS_SETTINGS['claude']), 5)
+        # hooks/config_panel.tsx MAX_SETTING_ROWS: digits 1-9 hold the setting
+        # rows plus Status, Learn, red-lab-playbook and Diff panel. A group is
+        # one row; a sixth row would silently fall off the menu.
+        rows = {config._group_of(key) or key for key in config.HARNESS_SETTINGS['claude']}
+        self.assertLessEqual(len(rows), 5)
+
+    def test_every_grouped_setting_reaches_its_group_screen(self):
+        shown = config.snapshot(config.playbook_core.load_prefs(self.state), 'claude')
+        groups = {group['key'] for group in shown['groups']}
+        for setting in shown['settings']:
+            with self.subTest(key=setting['key']):
+                self.assertTrue(setting['group'] == '' or setting['group'] in groups)
+        self.assertEqual({s['key'] for s in shown['settings'] if s['group'] == 'budgets'},
+                         {'claude_md_budget', 'context_budget'})
+
+    def test_deviation_reports_are_off_by_default_and_offered_on_claude_code_only(self):
+        self.assertIs(config.playbook_core.PREFS_DEFAULTS['reports'], False)
+        self.assertIs(config.playbook_core.load_prefs(self.state)['reports'], False)
+        self.assertIn('reports', config.HARNESS_SETTINGS['claude'])
+        for harness in ('codex', 'antigravity'):
+            with self.subTest(harness=harness):
+                self.assertNotIn('reports', config.HARNESS_SETTINGS[harness])
+
+    def test_reports_turn_on_and_off_with_the_effect_said(self):
+        language = config.playbook_i18n.resolve('auto')
+        code, out, _ = self._run('set', 'reports', 'on')
+        self.assertEqual(code, 0)
+        self.assertIn('reports = on', out)
+        self.assertIn(config.effect_note('reports', True, language), out)
+        self.assertIs(config.playbook_core.load_prefs(self.state)['reports'], True)
+        code, out, _ = self._run('set', 'reports', 'off')
+        self.assertIn(config.effect_note('reports', False, language), out)
+        self.assertIs(config.playbook_core.load_prefs(self.state)['reports'], False)
 
     def test_every_setting_is_mapped_to_its_harnesses(self):
         for harness, keys in config.HARNESS_SETTINGS.items():

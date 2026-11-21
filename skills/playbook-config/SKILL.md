@@ -1,7 +1,7 @@
 ---
 name: playbook-config
 description: "The playbook's settings menu: response prose level, known-failure warnings, cost budgets, menu language, session status, learning from past failures and the red-lab-playbook (security scans of the user's own app in an isolated local copy). Use when the user says /playbook-config, asks for the playbook's settings, status or configuration, wants shorter or longer answers, wants warnings about past mistakes on or off, asks the playbook to learn from this project's failures, or a prompt names a red-lab-playbook step."
-version: 3.3.0
+version: 3.4.0
 user-invocable: true
 ---
 
@@ -52,6 +52,7 @@ Read the current values first: `python3 <playbook>/scripts/playbook_config.py sh
 | Known-failure warnings | `watch` | `on`, `off` (default) | Before a write or a command that touches something that already failed in this project, show the recorded failure. See *Known-failure warnings*. |
 | Cost budgets | | | Opens a screen with the two budgets below. |
 | Language | `language` | `auto` (default, follows the system locale), `en`, `pt-br`, `es` | Language of the fixed text in Claude Code's numbered settings menu. Replies always follow the language the user writes in. |
+| Deviation reports | `reports` | `on`, `off` (default) | Sends the maintainer each deviation a model reports from a skill rule. See *Deviation reports*. |
 
 Cost budgets screen:
 
@@ -104,7 +105,7 @@ When the project has no compose file, or `--setup` never ran, say what is missin
 The SessionStart hook offers this once, on the first run on the machine (a first-run line in the session context). When the user accepts, walk them through the playbook in their language, and let them stop at any point:
 
 1. In two or three lines, say what the playbook gives them: the governance gates (spec, validation, review, secret and destructive-command gates), the security layer (fiches, SAST when installed, the red-lab-playbook), and that every setting below is optional with a sensible default.
-2. Walk the **Settings** entries one at a time (prose level, known-failure warnings, the two budgets, and in Claude Code the menu language), each with its default, applying only what they choose — exactly as the menu does. For the language, offer the one they are writing in: `auto` follows the system locale, which is often English on a machine whose user writes in another language.
+2. Walk the **Settings** entries one at a time (prose level, known-failure warnings, the two budgets, and in Claude Code the menu language and deviation reports), each with its default, applying only what they choose — exactly as the menu does. For the language, offer the one they are writing in: `auto` follows the system locale, which is often English on a machine whose user writes in another language.
 3. Offer **Status** so they see the result, then leave.
 
 If the user skips, say that `/playbook-config` reopens this anytime, and do nothing else. Never block their first task on it.
@@ -122,6 +123,15 @@ Every level forbids the same filler; the difference is what substance is allowed
 | `high` | Full reasoning: alternatives considered, trade-offs, failure modes, how to verify, grounded in `file:line`, command output or documentation. |
 
 No level permits preamble, restating the request, recapping steps the user just watched, or flattery. It reduces output tokens only; input context is governed by the context guard.
+
+## Deviation reports
+
+Off by default, and never turned on for the user: only their own choice in this menu or in the guided setup turns it on. When they ask about it, say exactly what it does before they choose:
+
+- When a model reports a deviation from a skill rule (`[PLAYBOOK-DEVIATION]`), the hook opens a GitHub issue on the playbook's repository **with the user's own GitHub account**, through `gh` when it is installed and logged in, or shows a pre-filled link for them to send.
+- It sends the skill, its version and section, the rule only as a quote found word for word in the skill's text, the action, the playbook version, the harness and the model, and for a version deviation the `name@version` pair. Never the project folder, code, session, `instead` or reasoning.
+- A rule someone already reported gets a +1 reaction instead of a second issue. At most five issues a day; sending never delays a turn.
+- Turning it off stops sending at once; what was recorded stays in the local journal.
 
 ## Known-failure warnings
 

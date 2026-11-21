@@ -3525,6 +3525,10 @@ PREFS_DEFAULTS: dict = {
     # Language of the fixed text the settings menu shows (playbook_i18n). 'auto'
     # follows the system locale; replies follow the language the user writes in.
     'language': 'auto',
+    # Deviation reports to the maintainer (hooks/deviation_report.py). Off until
+    # the user turns them on: a user who installed before the setting existed
+    # never saw the first-run offer, and sending is never assumed.
+    'reports': False,
 }
 
 MEMORY_FILE = 'CLAUDE.md'
@@ -3560,8 +3564,9 @@ def load_prefs(state_dir: str) -> dict:
         return prefs
     if stored.get('prose') in PROSE_LEVELS:
         prefs['prose'] = stored['prose']
-    if isinstance(stored.get('watch'), bool):
-        prefs['watch'] = stored['watch']
+    for flag in ('watch', 'reports'):
+        if isinstance(stored.get(flag), bool):
+            prefs[flag] = stored[flag]
     budget = stored.get('claude_md_budget')
     if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 0:
         prefs['claude_md_budget'] = budget
@@ -3594,13 +3599,13 @@ def set_pref(state_dir: str, key: str, value: str) -> tuple[dict, str | None]:
         if raw not in PROSE_LEVELS:
             return prefs, f'prose must be one of {", ".join(PROSE_LEVELS)} — got {value!r}'
         prefs['prose'] = raw
-    elif key == 'watch':
+    elif key in ('watch', 'reports'):
         if raw in ('on', 'true', '1', 'yes'):
-            prefs['watch'] = True
+            prefs[key] = True
         elif raw in ('off', 'false', '0', 'no'):
-            prefs['watch'] = False
+            prefs[key] = False
         else:
-            return prefs, f'watch must be on or off — got {value!r}'
+            return prefs, f'{key} must be on or off — got {value!r}'
     elif key == 'claude_md_budget':
         if raw in ('off', 'none'):
             prefs['claude_md_budget'] = 0

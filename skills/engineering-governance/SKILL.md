@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines when to stop and ask, prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 5.2.0
+version: 5.3.0
 user-invocable: false
 ---
 
@@ -108,7 +108,7 @@ A skill rule you do not follow, or follow while you believe it is wrong, is evid
 ```
 [PLAYBOOK-DEVIATION]
 skill: engineering-concurrency
-rule: the rule as the skill states it, with its section
+rule: the rule quoted word for word from the skill, then its section
 action: deviated
 instead: what you did in its place
 why: the reason, and the evidence for it
@@ -118,6 +118,7 @@ why: the reason, and the evidence for it
 - `action: deviated` — you did not follow the rule. `instead` is required.
 - `action: followed` — you followed the rule but believe it is wrong or conflicts with another one. `instead` says what you think the rule should say.
 - The Stop hook records every block in a journal outside the project, with the version of the skill you read, and shows the user one line per block. Say it in your final message too, in plain words: the block is the record, and the user still has to read what you did differently.
+- Quote the rule exactly, copied from the skill, never paraphrased and never mixed with project names. When the user turned deviation reports on (`reports` in `/playbook-config`), the hook sends the maintainer only a quote it finds word for word in the skill's text; a paraphrase stays in the local journal and the playbook never learns of it.
 - A deviation does not lift a hook gate.
 
 ---
