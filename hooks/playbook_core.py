@@ -646,91 +646,113 @@ def _tokenize_segments(command: str) -> list[list[str]] | None:
     return None if statements is None else [words for _, words in statements]
 
 
-_BLOCK_OPENERS = frozenset({'if', 'for', 'while', 'until', 'case', 'select', 'function'})
-_BLOCK_CLOSERS = frozenset({'fi', 'done', 'esac'})
-# Statements that can assign a variable of the running shell where the text
-# does not show it.
-_CURRENT_SHELL_RUNNERS = frozenset({'source', '.', 'eval'})
-# Changes how the shell splits an expanded value into words: `IFS=x; P=rmx-rf;
-# $P /` runs `rm -rf /`.
-_WORD_SPLITTING_RE = re.compile(r'\bIFS\b')
 _VAR_REF_RE = re.compile(r'\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))')
-# A value with any of these is not one fixed command once the shell expands it.
+# A value with any of these is not one fixed text once the shell expands it.
 _NON_LITERAL_VALUE_CHARS = frozenset(';&|<>()*?[`$')
+# Builtins whose arguments are assignments to the running shell.
+_DECLARE_WORDS = frozenset({'export', 'local', 'readonly', 'declare', 'typeset'})
+# A name with more literal values than this is checked on its first ones.
+_CANDIDATES_MAX = 16
+_DEFAULT_IFS = ' \t\n'
 
 
-def _literal_value(value: str, bound: dict[str, str]) -> str | None:
-    """`value` with its references to names already bound expanded, or None
-    when the shell would compute it at run time."""
-    parts: list[str] = []
+def _expand_candidates(value: str, candidates: dict[str, list[str]]) -> list[str]:
+    """Every text `value` can be with its references replaced by the literal
+    values those names take in the command; [] when it holds anything the
+    shell computes (a substitution, a glob, a name with no literal value)."""
+    texts = ['']
     position = 0
     for match in _VAR_REF_RE.finditer(value):
         name = match.group(1) or match.group(2)
-        if name not in bound:
-            return None
-        parts += [value[position:match.start()], bound[name]]
+        if not candidates.get(name):
+            return []
+        prefix = value[position:match.start()]
+        texts = [text + prefix + one for text in texts
+                 for one in candidates[name]][:_CANDIDATES_MAX]
         position = match.end()
-    text = ''.join(parts) + value[position:]
-    if not text.strip() or any(ch in _NON_LITERAL_VALUE_CHARS for ch in text):
-        return None
-    return text
+    texts = [text + value[position:] for text in texts]
+    return [text for text in texts
+            if text.strip() and not any(ch in _NON_LITERAL_VALUE_CHARS for ch in text)]
 
 
-def _assigned_once(name: str, command: str) -> bool:
-    """Whether `name` appears in `command` once outside `$name` / `${name}`
-    references: its one assignment. Any other appearance (`for name`, `read
-    name`, a second assignment, `unset name`) may change it."""
-    return len(re.findall(rf'(?<![\w${{]){re.escape(name)}(?!\w)', command)) == 1
+def _assignments(words: list[str]) -> list[str]:
+    """The `NAME=value` words a statement assigns in the running shell: a
+    statement of assignments alone, the leading ones of a command (which also
+    count: conservatively, since only that command sees them), and the
+    arguments of `export`, `local` and the other declaring builtins."""
+    while words and words[0] in _SHELL_KEYWORDS:
+        words = words[1:]
+    at = 1 if words and words[0] in _DECLARE_WORDS else 0
+    found = []
+    for word in words[at:]:
+        if _ENV_ASSIGN_RE.match(word):
+            found.append(word)
+        elif not (at and word.startswith('-')):
+            break
+    return found
+
+
+def _literal_candidates(statements: list[tuple[str, list[str]]]) -> dict[str, list[str]]:
+    """Every literal value each name takes anywhere in the command: each
+    assignment and each word a `for NAME in ...` list holds, wherever it sits
+    (a branch, a loop, after `&&`), in any order. Read twice, so a value that
+    names a variable assigned later in the text is expanded too."""
+    candidates: dict[str, list[str]] = {}
+    for _ in range(2):
+        for _separator, words in statements:
+            pairs = [tuple(word.split('=', 1)) for word in _assignments(words)]
+            if len(words) > 2 and words[0] == 'for' and words[2] == 'in':
+                pairs += [(words[1], word) for word in words[3:] if word != 'do']
+            for name, value in pairs:
+                known = candidates.setdefault(name, [])
+                for text in _expand_candidates(value, candidates):
+                    if text not in known and len(known) < _CANDIDATES_MAX:
+                        known.append(text)
+    return candidates
+
+
+def _split_words(value: str, separators: list[str]) -> list[list[str]]:
+    """`value` split into words the way each IFS the command may set splits it."""
+    shapes = []
+    for ifs in separators:
+        words = [word for word in re.split('[' + re.escape(ifs) + ']+', value) if word]
+        if words and words not in shapes:
+            shapes.append(words)
+    return shapes
 
 
 def resolve_literal_commands(command: str) -> str:
-    """`command` with each command word that is a variable bound to a literal
-    command earlier in it (`P="docker exec db psql"; $P -c "select 1"`)
-    replaced by that literal, one simple command per line; `command` itself
-    when it has none.
+    """`command` with each command word that is a variable replaced by every
+    literal value the command gives it (`P="docker exec db psql"; $P -c "select
+    1"`), one simple command per line and one line per value; `command`
+    itself when there is none.
 
-    A binding counts only where it always runs before the use: a statement of
-    assignments alone, at the top level (not inside `if`, a loop, `case`, a
-    brace group or a subshell), after the start of the command or a `;` (not
-    after `&&`, `||`, `|` or `&`), its value literal (no substitution, no
-    reference to a name not bound the same way, no glob, never empty), the name
-    assigned nowhere else in the command, and no `source`, `.`, `eval` or `IFS`
-    anywhere in it. Anything else leaves the command word decided at run time.
+    Every literal the text holds for the name counts, wherever it is assigned
+    and in whatever order (`ok && P="rm -rf" || P=echo; $P build` is read as
+    both), split by every IFS the command sets. What the text cannot show (a
+    value from `$(...)`, `read`, `source`, the environment) is not read: a
+    program the command does not show is not asked about (decided by the user
+    for the auto-mode consent work), while every one it does show is checked.
     Commands inside substitutions are kept as they are."""
-    if _WORD_SPLITTING_RE.search(command):
-        return command
     outer, inner = _lift_substitutions(command.replace('\\\n', ' '))
     statements = _statements(outer)
     if not statements:
         return command
-    if any(words[0] in _CURRENT_SHELL_RUNNERS for words in
-           (command_words(words) or words for _, words in statements)):
-        return command
-    bound: dict[str, str] = {}
-    depth = 0
+    candidates = _literal_candidates(statements)
+    separators = [_DEFAULT_IFS] + candidates.get('IFS', [])
     resolved: list[list[str]] = []
     changed = False
-    for separator, words in statements:
-        depth += separator.count('(') - separator.count(')')
-        if (depth == 0 and separator in ('', ';')
-                and all(_ENV_ASSIGN_RE.match(word) for word in words)):
-            for word in words:
-                name, value = word.split('=', 1)
-                literal = _literal_value(value, bound)
-                if literal is not None and _assigned_once(name, command):
-                    bound[name] = literal
+    for _separator, words in statements:
         effective = command_words(words)
         reference = _VAR_REF_RE.fullmatch(effective[0]) if effective else None
         name = (reference.group(1) or reference.group(2)) if reference else ''
-        if name in bound:
-            words = words[:len(words) - len(effective)] + bound[name].split() + effective[1:]
-            changed = True
-        resolved.append(words)
-        depth += words.count('{') - words.count('}')
-        if words and words[0] in _BLOCK_OPENERS:
-            depth += 1
-        elif words and words[0] in _BLOCK_CLOSERS:
-            depth -= 1
+        if not candidates.get(name):
+            resolved.append(words)
+            continue
+        prefix = words[:len(words) - len(effective)]
+        for value in candidates[name]:
+            resolved += [prefix + shape + effective[1:] for shape in _split_words(value, separators)]
+        changed = True
     if not changed:
         return command
     return '\n'.join([' '.join(shlex.quote(word) for word in words) for words in resolved]
@@ -772,38 +794,9 @@ def normalized_command(command: str) -> str:
     if not segments:
         return ''
     # One command per line, and a bare assignment is not a command: `x=rm` next
-    # to `$x -rf` must not read as `rm -rf` (that one is unattestable_command's).
+    # to `$x -rf` must not read as `rm -rf` (that one is resolve_literal_commands').
     text = '\n'.join(' '.join(words) for words in map(command_words, segments) if words)
     return _GIT_GLOBAL_OPTS_RE.sub('git ', text)
-
-
-def _starts_unknown(word: str) -> bool:
-    return word.startswith(('$', '`'))
-
-
-def _program_unknown(word: str) -> bool:
-    """Whether the program NAME is decided at run time. `$JAVA_HOME/bin/java`
-    is attestable — the directory varies, the program is `java` — while `$P`,
-    `/usr/bin/$X` and `$(echo rm)` (read as `$SUBST`) are not."""
-    return _starts_unknown(word.rsplit('/', 1)[-1])
-
-
-def unattestable_command(command: str) -> str:
-    """The first simple command whose program is decided at run time — a
-    variable or a command substitution as the command word, or as the whole
-    script of `eval` / `sh -c`. What such a command runs cannot be read before
-    the shell runs it, so no pattern can clear it. '' when there is none."""
-    for segment in shell_segments(command) or ():
-        words = command_words(segment)
-        if not words:
-            continue
-        base = words[0].rsplit('/', 1)[-1]
-        if (_program_unknown(words[0])
-                or (base == 'eval' and len(words) > 1 and _starts_unknown(words[1]))
-                or (base in _SHELL_WORDS and '-c' in words[:-1]
-                    and _starts_unknown(words[words.index('-c') + 1]))):
-            return ' '.join(segment)
-    return ''
 
 
 def inline_payloads(command: str) -> list[str]:
@@ -937,7 +930,8 @@ def _tracked_by_git(path: str) -> bool:
 # file under the root: a script written into the plugin directory and run from
 # there is still read.
 PLAYBOOK_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-PLAYBOOK_ENTRY_SCRIPTS = ('lab/run.py', 'scripts/playbook_config.py', 'hooks/output_filter.py', 'audit/surface.py')
+PLAYBOOK_ENTRY_SCRIPTS = ('lab/run.py', 'scripts/playbook_config.py', 'hooks/output_filter.py',
+                          'audit/surface.py', 'scripts/temporary_data.py')
 
 
 def _is_playbook_entry_script(path: str) -> bool:
@@ -2242,22 +2236,24 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
     approves it (Claude Code: a permission dialog; Codex: never in-session).
 
     `command` is the runnable command (heredoc bodies and inline scripts
-    stripped). Four readings of it, each closing a way past the one before:
+    stripped). Three readings of it, each closing a way past the one before:
 
-    1. the patterns, per simple command in its shell-normalized form, so
-       quoting the command word or adding git global options does not hide it;
-    2. a command whose program is decided at run time (`$x -rf`, `eval "$c"`),
-       which no pattern can read;
-    3. recursive deletion through an interpreter API in a `-c`/`-e` script,
+    1. the patterns and the `rm` tokens, per simple command in its
+       shell-normalized form, so quoting the command word or adding git global
+       options does not hide it; a variable command word is read as every
+       literal value the command gives it (`resolve_literal_commands`);
+    2. recursive deletion through an interpreter API in a `-c`/`-e` script,
        read in `raw` — the full command — because that source is stripped
        from `command` before step 1;
-    4. the scripts the command runs (`script_sources`): a Python or other
+    3. the scripts the command runs (`script_sources`): a Python or other
        interpreter script for the same APIs, a shell script as a command. Of
        the script files, only those git does not track: see `script_sources`.
 
-    Inside a script file (`_depth` > 0) step 2 is skipped: a variable command
-    word there (`exec "$@"`) is the script's own logic, and the command the
-    model typed was literal.
+    A program the command does not show (`$(...)`, `eval "$c"`, a variable with
+    no literal value) is not flagged: only what is shown to be destructive asks
+    (decided by the user for the auto-mode consent work). Inside a script file
+    (`_depth` > 0) variables are not resolved: a variable command word there
+    (`exec "$@"`) is the script's own logic.
 
     `disposable_root` is the session's own scratchpad: an `rm` of literal paths
     inside it deletes only what the session made there, and needs no consent
@@ -2278,13 +2274,6 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
         return _destructive_block(
             f'Destructive operation detected (`{part[:120]}`). Show the user the exact '
             'command and what it destroys.', effect, part)
-    unknown = unattestable_command(expanded) if _depth == 0 else ''
-    if unknown:
-        return _destructive_block(
-            f'Command decided at run time (`{unknown[:120]}`): its program comes from a '
-            'variable or a command substitution, so the destructive check cannot read what '
-            'it runs. Write the command literally; if it has to stay dynamic, show the user '
-            'what it expands to.', 'dynamic')
     # Heredoc bodies that are data (a PR body, a doc) are left out: one quoting
     # `node -e "fs.rmSync(dir, opts)"` is text. A heredoc fed to a shell stays.
     for payload in inline_payloads(strip_heredoc_bodies(raw or command)):
@@ -3716,10 +3705,10 @@ def consent_take(state_dir: str, session_id: str, command: str, use: bool = True
 
 def consent_mark_turn_end(state_dir: str, session_id: str) -> None:
     """Record that a turn of the main session ended: what was queued before it
-    is what the model could have listed to the user in that turn's messages."""
+    is what the model could have listed to the user in that turn's messages,
+    and what a command of it made is released to Temporary data."""
+    os.makedirs(state_dir, exist_ok=True)
     path = consent_path(state_dir, session_id)
-    if not os.path.exists(path):
-        return
     with _file_lock(path):
         data = load_state(path)
         data['turn_end'] = time.time()
@@ -3785,6 +3774,12 @@ TEMPORARY_DATA_MAX = 200
 _ITEM_ID_RE = re.compile(r'[0-9a-f]{12}')
 
 
+def consent_turn_end(state_dir: str, session_id: str) -> float:
+    """When the last turn of `session_id` ended; 0 before the first."""
+    value = load_state(consent_path(state_dir, session_id)).get('turn_end')
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
 def consent_pending(state_dir: str, session_id: str) -> list[dict]:
     """The commands of `session_id` still waiting for the user's answer."""
     return _consent_entries(load_state(consent_path(state_dir, session_id)), 'pending')
@@ -3816,15 +3811,158 @@ def temporary_data_dir(state_dir: str, project_dir: str) -> str:
     return os.path.join(state_dir, TEMPORARY_DATA_DIR, key)
 
 
+TEMPORARY_KINDS = frozenset({'declined', 'created', 'registered'})
+
+
 def temporary_data_add(state_dir: str, project_dir: str, *, command: str, cwd: str,
-                       effect: str, origin: str) -> dict:
-    """Keep a deletion the user has not run yet; the item written."""
+                       effect: str, origin: str, kind: str = 'declined',
+                       what: dict | None = None, target: dict | None = None) -> dict:
+    """Keep a deletion the user has not run yet; the item written.
+
+    `kind`: `declined` on the button, `created` by a command the hook read
+    (`created_temporaries`), `registered` by the model. `what` names it for
+    the person (`{key, name}` for a playbook_i18n text, `{text}` as written);
+    `target` is what the deletion removes (`{kind: path | container | volume
+    | network, value}`), so an item whose target is gone leaves the panel."""
+    if kind not in TEMPORARY_KINDS:
+        raise ValueError(f'not a Temporary data kind: {kind!r}')
     folder = temporary_data_dir(state_dir, project_dir)
     os.makedirs(folder, exist_ok=True)
     item = {'id': os.urandom(6).hex(), 'command': command, 'cwd': cwd, 'effect': effect,
-            'origin': origin, 'ts': time.time()}
+            'origin': origin, 'ts': time.time(), 'kind': kind, 'what': what or {},
+            'target': target or {}}
     save_state(os.path.join(folder, f"{item['id']}.json"), item)
     return item
+
+
+class Temporary(NamedTuple):
+    """Something a command made that outlives it: what it is (a playbook_i18n
+    key and the name), the command that removes it, and what to check for
+    whether it still exists."""
+    what_key: str
+    name: str
+    command: str
+    cwd: str
+    target_kind: str
+    target: str
+
+
+_DOCKER_CREATES = {('volume', 'create'): 'volume', ('network', 'create'): 'network'}
+
+
+def _docker_created(words: list[str], cwd: str) -> Temporary | None:
+    """A named container `docker run --name` starts without `--rm`, or a
+    volume or network `docker volume|network create <name>` makes."""
+    args = words[1:]
+    if args[:1] == ['run'] or args[:2] == ['container', 'run']:
+        if '--rm' in args:
+            return None
+        name = ''
+        for at, word in enumerate(args):
+            if word == '--name' and at + 1 < len(args):
+                name = args[at + 1]
+            elif word.startswith('--name='):
+                name = word.split('=', 1)[1]
+        if not _is_literal_path(name) or not name:
+            return None
+        return Temporary('tmp_what_container', name, f'docker rm -f {shlex.quote(name)}', cwd,
+                         'container', name)
+    kind = _DOCKER_CREATES.get(tuple(args[:2]))
+    if kind is None:
+        return None
+    names = [word for word in args[2:] if not word.startswith('-')]
+    if len(names) != 1 or not _is_literal_path(names[0]):
+        return None
+    return Temporary(f'tmp_what_{kind}', names[0], f'docker {kind} rm {shlex.quote(names[0])}',
+                     cwd, kind, names[0])
+
+
+def _mktemp_created(words: list[str], stdout: str, cwd: str) -> Temporary | None:
+    """What `mktemp` made, read from its output: only when the command was
+    `mktemp` alone, so the output is its path and nothing else."""
+    path = stdout.strip()
+    if '\n' in path or not os.path.isabs(path):
+        return None
+    is_dir = any(word in ('-d', '--directory') or re.fullmatch(r'-[a-zA-Z]*d[a-zA-Z]*', word)
+                 for word in words[1:] if word.startswith('-'))
+    return Temporary('tmp_what_tempdir' if is_dir else 'tmp_what_tempfile', path,
+                     f"rm -{'rf' if is_dir else 'f'} {shlex.quote(path)}", cwd, 'path', path)
+
+
+def _worktree_created(call: GitCall) -> Temporary | None:
+    """The worktree `git worktree add <path>` made, in a repository the
+    command names literally."""
+    if call.repo is None or call.sub != 'worktree' or call.args[:1] != ['add']:
+        return None
+    operands: list[str] = []
+    skip = False
+    for word in call.args[1:]:
+        if skip:
+            skip = False
+        elif word in ('-b', '-B', '--reason'):
+            skip = True
+        elif not word.startswith('-'):
+            operands.append(word)
+    if not operands or not _is_literal_path(operands[0]):
+        return None
+    path = os.path.normpath(os.path.join(call.repo, os.path.expanduser(operands[0])))
+    return Temporary('tmp_what_worktree', path,
+                     f'git worktree remove --force {shlex.quote(path)}', call.repo, 'path', path)
+
+
+def created_temporaries(command: str, stdout: str, cwd: str, disposable_root: str = ''
+                        ) -> list[Temporary]:
+    """What a command that ran made and leaves behind, read from its words:
+    a git worktree, a named Docker container, volume or network, and what a
+    lone `mktemp` printed. Anything inside `disposable_root` (the session's
+    scratchpad) is left out: the session's own clean-up removes it. What the
+    words do not name literally (a path from a variable, `$(mktemp -d)`) is
+    not read: the model registers it (scripts/temporary_data.py register)."""
+    read = _simple_commands(strip_heredoc_bodies(command))
+    if read is None:
+        return []
+    commands = read[0]
+    found: list[Temporary] = []
+    for words in commands:
+        base = words[0].rsplit('/', 1)[-1]
+        if base == 'docker':
+            made = _docker_created(words, cwd)
+        elif base == 'mktemp' and len(commands) == 1:
+            made = _mktemp_created(words, stdout, cwd)
+        else:
+            made = None
+        if made is not None:
+            found.append(made)
+    found += [made for made in map(_worktree_created, git_calls(command, cwd) or [])
+              if made is not None]
+    if disposable_root:
+        root = os.path.realpath(disposable_root)
+        found = [made for made in found if made.target_kind != 'path'
+                 or os.path.commonpath((os.path.realpath(made.target), root)) != root]
+    return found
+
+
+def temporary_data_note_created(state_dir: str, project_dir: str, made: list[Temporary],
+                                origin: str) -> int:
+    """Keep what a command made in Temporary data, once per target; how many
+    were added."""
+    if not made:
+        return 0
+    known = {(item['target'].get('kind'), item['target'].get('value'))
+             for item in temporary_data_items(state_dir, project_dir)
+             if isinstance(item.get('target'), dict)}
+    added = 0
+    for one in made:
+        if (one.target_kind, one.target) in known:
+            continue
+        known.add((one.target_kind, one.target))
+        temporary_data_add(state_dir, project_dir, command=one.command, cwd=one.cwd,
+                           effect='worktree_remove' if one.what_key == 'tmp_what_worktree'
+                           else 'delete_tree', origin=origin, kind='created',
+                           what={'key': one.what_key, 'name': one.name},
+                           target={'kind': one.target_kind, 'value': one.target})
+        added += 1
+    return added
 
 
 def _is_item(value: object) -> bool:

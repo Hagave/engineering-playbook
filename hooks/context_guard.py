@@ -1779,6 +1779,22 @@ def _is_tool_error(response: object) -> bool:
     return bool(response.get('error') or response.get('errorMessage'))
 
 
+def _note_created_temporaries(input_data: dict, command: str) -> None:
+    """Keep in Temporary data what a command that ran made and leaves behind
+    (`created_temporaries`), for the person to remove later. The panel is
+    the project's, the folder Claude Code started in, whatever `cd` the
+    command made. A failure here loses a reminder, never the tool's result."""
+    if not _SESSION_ID or not playbook_core.load_prefs(STATE_DIR)['temporary_data']:
+        return
+    response = input_data.get('tool_response')
+    stdout = str(response.get('stdout') or '') if isinstance(response, dict) else ''
+    project = os.environ.get('CLAUDE_PROJECT_DIR') or _CWD or os.getcwd()
+    with contextlib.suppress(OSError, ValueError):
+        made = playbook_core.created_temporaries(command, stdout, _CWD or os.getcwd(),
+                                                 _session_scratchpad())
+        playbook_core.temporary_data_note_created(STATE_DIR, project, made, _SESSION_ID)
+
+
 def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -> None:
     """Arm the deferred gates on the writes that ACTUALLY happened.
 
@@ -1832,6 +1848,7 @@ def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -
 
     if tool_name == 'Bash':
         _note_diff_reads(state, command)
+        _note_created_temporaries(input_data, command)
 
     if playbook_core.is_code_write(
             tool_name, tool_input,

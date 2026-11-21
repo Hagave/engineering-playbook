@@ -861,8 +861,9 @@ class TestDestructiveFalsePositives(unittest.TestCase):
     def test_every_effect_has_dialog_text_in_every_language(self):
         """A missing string would leave the gate nothing to ask with; it denies
         then, but the dialog is the path the user is meant to get."""
-        effects = {effect for _, effect in playbook_core.DESTRUCTIVE_RULES} | {
-            'dynamic', 'script_delete'}
+        effects = {effect for _, effect in
+                   playbook_core.DESTRUCTIVE_RULES + playbook_core.DELETION_TEXT_RULES} | {
+            'script_delete'}
         for effect in sorted(effects):
             for language in playbook_i18n.LANGUAGE_NAMES:
                 with self.subTest(effect=effect, language=language):
@@ -876,7 +877,6 @@ class TestDestructiveFalsePositives(unittest.TestCase):
     def test_each_detection_names_its_effect(self):
         for command, effect in (('rm -rf build', 'delete_tree'),
                                 ('git push --force origin main', 'force_push'),
-                                ('x=$(printf rm); $x -rf build', 'dynamic'),
                                 ('x=rm; $x -rf build', 'delete_tree'),
                                 ('python3 -c "import shutil; shutil.rmtree(\'b\')"', 'script_delete')):
             with self.subTest(command=command):
