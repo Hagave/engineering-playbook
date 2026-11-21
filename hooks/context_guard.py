@@ -271,9 +271,10 @@ def _is_user_prompt(obj: dict) -> bool:
     return False
 
 
-def _skill_uses(obj: dict) -> list[str]:
-    """Skill names invoked in this entry — Skill tool calls and slash commands."""
-    names: list[str] = []
+def _skill_uses(obj: dict) -> list[tuple[str, str]]:
+    """(tool_use id, skill name) for each skill invoked in this entry: Skill
+    tool calls, and slash commands with an empty id."""
+    names: list[tuple[str, str]] = []
     content = obj.get('message', {}).get('content')
     if obj.get('type') == 'assistant' and isinstance(content, list):
         for b in content:
@@ -282,7 +283,7 @@ def _skill_uses(obj: dict) -> list[str]:
                 inp = b.get('input', {})
                 value = inp.get('skill') or inp.get('command') or ''
                 if value:
-                    names.append(str(value))
+                    names.append((str(b.get('id') or ''), str(value)))
     elif obj.get('type') == 'user':
         text = content if isinstance(content, str) else ''
         if isinstance(content, list):
@@ -290,8 +291,17 @@ def _skill_uses(obj: dict) -> list[str]:
                 b.get('text', '') for b in content
                 if isinstance(b, dict) and b.get('type') == 'text'
             )
-        names.extend(COMMAND_NAME_RE.findall(text))
+        names.extend(('', n) for n in COMMAND_NAME_RE.findall(text))
     return names
+
+
+def _tool_results(obj: dict) -> list[tuple[str, bool]]:
+    """(tool_use id, whether it failed) for each tool result in a user entry."""
+    content = obj.get('message', {}).get('content')
+    if obj.get('type') != 'user' or not isinstance(content, list):
+        return []
+    return [(str(b.get('tool_use_id') or ''), bool(b.get('is_error')))
+            for b in content if isinstance(b, dict) and b.get('type') == 'tool_result']
 
 # ─── Context measurement ──────────────────────────────────────────────────────
 
@@ -679,6 +689,8 @@ def _scan_skills(transcript: str | None, state: dict) -> bool:
             offset = 0
             state['gov_loaded'] = False
             state['suspended'] = False
+            state['pending_skills'] = {}
+            state['unpaired_results'] = {}
         with open(transcript, encoding='utf-8', errors='replace') as f:
             f.seek(offset)
             for line in f:
@@ -688,21 +700,54 @@ def _scan_skills(transcript: str | None, state: dict) -> bool:
                     obj = json.loads(line)
                 except Exception:
                     continue
-                for name in _skill_uses(obj):
-                    base = name.rsplit(':', 1)[-1]
-                    if base == SUSPEND_SKILL:
-                        state['suspended'] = True
-                    elif base in RESUME_SKILLS:
-                        state['suspended'] = False
-                    elif base == GOVERNANCE_SKILL:
-                        state['gov_loaded'] = True
-                    if base in REVIEW_SKILLS:
-                        _note_review(state, _line_time(obj))
-                    _note_skill_loaded(state, base)
+                pending = state.get('pending_skills')
+                if not isinstance(pending, dict):
+                    pending = {}
+                results = state.get('unpaired_results')
+                if not isinstance(results, dict):
+                    results = {}
+                for use_id, name in _skill_uses(obj):
+                    if use_id and use_id not in results:
+                        pending[use_id] = [name, _line_time(obj)]
+                    elif not use_id or not results.pop(use_id):
+                        _apply_skill_load(state, name, _line_time(obj))
+                for use_id, failed in _tool_results(obj):
+                    call = pending.pop(use_id, None)
+                    if call is None:
+                        results[use_id] = failed
+                    elif not failed:
+                        _apply_skill_load(state, str(call[0]), float(call[1]))
+                state['pending_skills'] = dict(list(pending.items())[-_PENDING_SKILLS_CAP:])
+                state['unpaired_results'] = dict(list(results.items())[-_PENDING_SKILLS_CAP:])
             state['scan_offset'] = f.tell()
     except Exception:
         pass
     return bool(state.get('suspended'))
+
+
+# A Skill call counts once its result arrives without an error: a call the
+# harness rejects (an unknown skill, a denied permission) loaded no rules, and
+# counting the call alone let a write through the gate with a skill that was
+# never read. A call whose result never reaches the transcript stays pending,
+# which keeps the gate closed. The assistant record carrying a call can reach
+# the transcript after its result, so a result with no call yet waits in
+# unpaired_results. The cap bounds both maps for calls that never resolve. A
+# call with no id (a slash command, a transcript without ids) has no result to
+# pair and counts at once, as before.
+_PENDING_SKILLS_CAP = 32
+
+
+def _apply_skill_load(state: dict, name: str, at: float) -> None:
+    base = name.rsplit(':', 1)[-1]
+    if base == SUSPEND_SKILL:
+        state['suspended'] = True
+    elif base in RESUME_SKILLS:
+        state['suspended'] = False
+    elif base == GOVERNANCE_SKILL:
+        state['gov_loaded'] = True
+    if base in REVIEW_SKILLS:
+        _note_review(state, at)
+    _note_skill_loaded(state, base)
 
 
 # Every engineering-* skill the playbook ships fits under this cap; the skill

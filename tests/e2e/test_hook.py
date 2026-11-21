@@ -129,6 +129,21 @@ def _skill(name: str) -> str:
     return _tool_use('Skill', {'skill': name})
 
 
+def _skill_call(use_id: str, name: str) -> str:
+    """A Skill call as Claude Code records it: with the id its result names."""
+    block = {'type': 'tool_use', 'id': use_id, 'name': 'Skill', 'input': {'skill': name}}
+    return json.dumps({'type': 'assistant', 'message': {'content': [block]}}) + '\n'
+
+
+def _skill_result(use_id: str, name: str, failed: bool) -> str:
+    text = (f'<tool_use_error>Unknown skill: {name}</tool_use_error>' if failed
+            else f'Launching skill: {name}')
+    block = {'type': 'tool_result', 'tool_use_id': use_id, 'content': text}
+    if failed:
+        block['is_error'] = True
+    return json.dumps({'type': 'user', 'message': {'content': [block]}}) + '\n'
+
+
 def _usage(tokens: int) -> str:
     return json.dumps({
         'type': 'assistant',
@@ -454,6 +469,45 @@ class TestSkillGate(_HookTest):
         with open(self.transcript, 'a') as f:   # a transcript only grows
             f.write(_skill('engineering-nestjs'))
         self._assert_allowed(self._pre_in_project(*write))
+
+    def _docker_write(self) -> tuple[str, dict]:
+        return ('Write', {'file_path': os.path.join(self.dir, 'Dockerfile'), 'content': 'FROM node:24'})
+
+    def test_a_skill_call_the_harness_rejected_loads_nothing(self):
+        """Regression: an "Unknown skill" call was counted as loaded, so a write
+        passed the gate with rules that were never read."""
+        name = 'engineering-playbook:engineering-docker'
+        self._write(_ul('add a Dockerfile') + _skill_call('toolu_1', name)
+                    + _skill_result('toolu_1', name, failed=True))
+        self._assert_denied(self._pre_in_project(*self._docker_write()), 'engineering-docker')
+
+    def test_a_skill_call_counts_once_its_result_succeeds(self):
+        name = 'engineering-playbook:engineering-docker'
+        self._write(_ul('add a Dockerfile') + _skill_call('toolu_1', name))
+        self._assert_denied(self._pre_in_project(*self._docker_write()), 'engineering-docker')
+        with open(self.transcript, 'a') as f:   # a transcript only grows
+            f.write(_skill_result('toolu_1', name, failed=False))
+        self._assert_allowed(self._pre_in_project(*self._docker_write()))
+
+    def test_a_result_recorded_before_its_call_still_pairs(self):
+        """The assistant record carrying the call can be flushed after its result."""
+        name = 'engineering-playbook:engineering-docker'
+        self._write(_ul('add a Dockerfile') + _skill_result('toolu_1', name, failed=False)
+                    + _skill_call('toolu_1', name))
+        self._assert_allowed(self._pre_in_project(*self._docker_write()))
+
+    def test_a_failed_result_recorded_before_its_call_still_loads_nothing(self):
+        name = 'engineering-playbook:engineering-docker'
+        self._write(_ul('add a Dockerfile') + _skill_result('toolu_1', name, failed=True)
+                    + _skill_call('toolu_1', name))
+        self._assert_denied(self._pre_in_project(*self._docker_write()), 'engineering-docker')
+
+    def test_a_rejected_governance_call_does_not_open_the_gate(self):
+        name = 'engineering-playbook:engineering-governance'
+        self._write(_skill_call('toolu_1', name) + _skill_result('toolu_1', name, failed=True)
+                    + _ul('go') + _al('[SPEC CONFIRMED] implementing'))
+        r = self._pre('Write', {'file_path': 'src/user.ts', 'content': 'class User {}'})
+        self.assertIn('engineering-governance has not been loaded', _msg(r))
 
     def test_a_topic_import_is_required_in_any_language(self):
         self._write(_READY)
