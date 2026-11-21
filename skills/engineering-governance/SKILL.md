@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines who owns each decision (and so when to ask), prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 6.2.0
+version: 6.2.1
 user-invocable: false
 ---
 
@@ -22,7 +22,7 @@ Before generating the implementation checklist (engineering-implement Step 6), l
 - `engineering-concurrency` — shared state, distributed ops, idempotency, rate limiting
 - `engineering-error-handling` — exception paths, retry, circuit breaker, external calls
 - `engineering-performance` — data access patterns, N+1, unbounded queries, bulk ops
-- the language opt-in for the code you write, when the playbook has one (`engineering-typescript`, `engineering-go`, `engineering-java`, `engineering-kotlin`, `engineering-csharp`, `engineering-rust`, `engineering-ruby`) — type safety, idioms, build and test tooling
+- the language opt-in for the code you write, when the playbook has one: the Language opt-in table of `engineering-playbook` lists them (`engineering-typescript`, `engineering-python`, `engineering-go`, `engineering-java` and the rest), and the skill gate names the one a file needs — type safety, idioms, build and test tooling
 
 Do not wait for a task description to match a keyword before loading these. Load all of them before the checklist step — the checklist is where security, concurrency, and error-handling constraints must appear as explicit items, not as an afterthought during implementation.
 

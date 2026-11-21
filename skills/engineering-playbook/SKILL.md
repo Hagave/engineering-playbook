@@ -1,7 +1,7 @@
 ---
 name: engineering-playbook
-description: "Language-agnostic core engineering governance across TypeScript, Java, Go, Rust, C#, Kotlin, Ruby — invoke automatically at the start of any conversation involving software development, code writing, code review, architecture, or technical implementation. Also activates when the user says activate playbook. Loads non-negotiable rules (no duplication, no hallucination, scope discipline) and the skill routing table. Framework- and language-specific opt-in skills are loaded only when the stack dictates. Active by default unless /playbook-off was invoked this session."
-version: 5.0.0
+description: "Language-agnostic core engineering governance across TypeScript, Python, Java, Go, Rust, C#, C++, Kotlin, Ruby — invoke automatically at the start of any conversation involving software development, code writing, code review, architecture, or technical implementation. Also activates when the user says activate playbook. Loads non-negotiable rules (no duplication, no hallucination, scope discipline) and the skill routing table. Framework- and language-specific opt-in skills are loaded only when the stack dictates. Active by default unless /playbook-off was invoked this session."
+version: 5.1.0
 user-invocable: false
 ---
 
@@ -145,9 +145,11 @@ Load only when the project's implementation language matches the row. The table 
 | When task involves | Invoke |
 |---|---|
 | C# code | `engineering-csharp` |
+| C++ code | `engineering-cpp` |
 | Go code | `engineering-go` |
 | Java code | `engineering-java` |
 | Kotlin code | `engineering-kotlin` |
+| Python code | `engineering-python` |
 | Ruby code | `engineering-ruby` |
 | Rust code | `engineering-rust` |
 | TypeScript code | `engineering-typescript` |

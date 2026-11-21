@@ -1521,19 +1521,15 @@ def sast_notice(cwd: str) -> str:
     )
 
 
-# Marker files that identify a project's implementation language. Only the
-# languages the playbook has an opt-in for are listed, because the notice points
-# the model at engineering-<lang>. Order matters for a shared build tool: a
-# Kotlin Gradle project (.kts) is checked before a Java one (build.gradle).
-_LANGUAGE_MARKERS = (
-    ('typescript', ('tsconfig.json',)),
-    ('rust', ('Cargo.toml',)),
-    ('go', ('go.mod',)),
-    ('csharp', ('*.csproj', '*.fsproj', '*.sln')),
-    ('kotlin', ('build.gradle.kts', 'settings.gradle.kts')),
-    ('java', ('pom.xml', 'build.gradle', 'settings.gradle')),
-    ('ruby', ('Gemfile', '*.gemspec')),
-)
+def _language_markers() -> list[tuple[str, list[str]]]:
+    """(language, marker files) per row of the skill requirements table, in its
+    order: the same rows the write gate maps extensions with, so a language the
+    gate knows is also one the session can name."""
+    languages = skill_requirements().get('languages')
+    if not isinstance(languages, dict):
+        return []
+    return [(name, [str(m) for m in row.get('markers', ())])
+            for name, row in languages.items() if isinstance(row, dict)]
 
 
 def detect_languages(cwd: str) -> list[tuple[str, str]]:
@@ -1543,7 +1539,7 @@ def detect_languages(cwd: str) -> list[tuple[str, str]]:
     repository with no known marker returns []."""
     root = cwd or os.getcwd()
     found: list[tuple[str, str]] = []
-    for lang, markers in _LANGUAGE_MARKERS:
+    for lang, markers in _language_markers():
         for marker in markers:
             if '*' in marker:
                 hit = next((os.path.basename(p)
