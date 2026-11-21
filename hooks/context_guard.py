@@ -898,9 +898,16 @@ def _destructive_verdict(hit: dict, input_data: dict, command: str, prefs: dict)
             'playbook denies it: ask the user to run the command themselves. Nothing typed in '
             'the chat lifts this block.'))}
     language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'))
-    ask = {'ask': True, 'msg': playbook_i18n.text(
+    # The part that destroys stands in for the command only in a longer one:
+    # a single command is shown as typed, quotes and all.
+    part = str(hit.get('part') or '')
+    in_longer = bool(part) and len(playbook_core.shell_segments(command) or ()) > 1
+    message = playbook_i18n.text(
         language, 'destructive_ask', effect=playbook_i18n.text(language, effect_key),
-        command=playbook_core.shown_command(command))}
+        command=playbook_core.shown_command(part if in_longer else command))
+    if in_longer:
+        message += ' ' + playbook_i18n.text(language, 'destructive_part')
+    ask = {'ask': True, 'msg': message}
     if not _SESSION_ID:
         return ask
     try:

@@ -190,6 +190,39 @@ DESTRUCTIVE = [
     # A heredoc that is data quotes a one-liner; it does not run it.
     ("gh pr create --body-file - <<'EOF'\nCloses `node -e \"fs.rmSync(dir, opts)\"`.\nEOF", False),
     ("bash <<'EOF'\nnode -e \"fs.rmSync(dir, opts)\"\nEOF", True),
+    # `rm -r` read from tokens (2026-11-21). The text pattern matched the `rm`
+    # of `docker run --rm` and took a later flag's `r` (`-proc`) for `-r`.
+    ("docker run --rm -v \"$PWD\":/w img sh -c 'javac -proc:none A.java'", False),
+    ('docker run --rm alpine true', False),
+    ('podman run --rm -it img bash', False),
+    ('ls | xargs docker run --rm img', False),
+    ('echo rm -rf build', False),
+    ("git commit -m 'rm -rf the old build dir'", False),
+    ('rm -i -v file.txt', False),
+    # What the text pattern caught by accident must stay caught: the `rm` as
+    # the program after wrappers, as an argument of another program, inside
+    # a shell's `-c` script, as `eval`'s arguments and in an interpreter
+    # one-liner (rows above), and its options in any position.
+    ('rm build -rf', True),
+    ('rm --recursive build', True),
+    ('rm -fR build', True),
+    ('sudo rm -rf build', True),
+    ('timeout 5 rm -rf build', True),
+    ('nice -n 5 rm -rf build', True),
+    ('/bin/rm -rf build', True),
+    ('find . -name dist -exec rm -r {} \\;', True),
+    ('find . -execdir rm -rf {} +', True),
+    ('watch rm -rf build', True),
+    ('flock /tmp/l rm -rf build', True),
+    ('docker exec db rm -rf /var/lib/data', True),
+    ('docker run --rm -v "$PWD":/w alpine rm -rf /w/build', True),
+    ("sh -c 'cd x && rm -rf build'", True),
+    ("bash -lc 'rm -rf build'", True),
+    ('eval rm -rf build', True),
+    ("python3 -c \"import subprocess; subprocess.run('rm -rf build', shell=True)\"", True),
+    ('ls | xargs rm', True),
+    ('ls | xargs -0 /bin/rm -f', True),
+    ("sh -c 'rm -rf build; echo \"unterminated'", True),
 ]
 
 # Commands that write source through something other than Write/Edit, `>`,
@@ -348,6 +381,16 @@ class TestDestructiveCorpus(unittest.TestCase):
     def test_a_literal_command_variable_is_read_as_the_literal(self):
         result = playbook_core.check_destructive('x=rm; $x -rf build')
         self.assertEqual(result['effect'], 'delete_tree')
+
+    def test_the_part_shown_is_the_simple_command_that_destroys(self):
+        result = playbook_core.check_destructive("ls && rm -rf 'my build' && make")
+        self.assertEqual(result['part'], "rm -rf 'my build'")
+
+    def test_a_deletion_inside_an_interpreter_script_shows_no_part(self):
+        """The line is the script's, not the command's: the dialog shows the command."""
+        command = "cd x && python3 -c \"import os; os.system('rm -rf build')\""
+        runnable = playbook_core.strip_inline_payloads(command)
+        self.assertEqual(playbook_core.check_destructive(runnable, command)['part'], '')
 
     def test_every_heredoc_with_the_same_delimiter_is_stripped(self):
         command = "cat > a <<EOF\nrm -rf one\nEOF\ncat > b <<EOF\nrm -rf two\nEOF"

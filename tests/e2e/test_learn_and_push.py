@@ -1273,6 +1273,16 @@ class TestDestructiveConsentByDialog(_Base):
             'permissionDecisionReason': self._ask_reason('en', 'delete_tree', self.DESTRUCTIVE),
         }})
 
+    def test_the_dialog_shows_the_part_that_destroys_not_the_start(self):
+        """Cut at 300 characters, the dialog showed a `git diff --stat` and hid
+        the `git checkout --` after it."""
+        command = ('git diff --stat ' + 'docs/module/notes.md ' * 20
+                   + "&& git stash drop 'stash@{1}' && npm test")
+        reason = self._reason(self._bash(command, 'default'))
+        self.assertIn("`git stash drop 'stash@{1}'`", reason)
+        self.assertNotIn('git diff --stat', reason)
+        self.assertIn(playbook_i18n.text('en', 'destructive_part'), reason)
+
     def test_auto_denies_and_queues_without_a_dialog(self):
         result = self._bash(self.DESTRUCTIVE, 'auto')
         self.assertEqual(self._decision(result), 'deny')
