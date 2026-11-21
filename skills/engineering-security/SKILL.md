@@ -1,7 +1,7 @@
 ---
 name: engineering-security
 description: "Security rules for input validation, injection prevention, secrets management, auth, and HTTP. Use when handling user input, writing queries, managing credentials, implementing authentication or authorization, or configuring HTTP endpoints; also when code fetches URLs from input, handles files or uploads, parses untrusted data, uses cryptography, exposes GraphQL, edits CI/CD pipelines or dependencies, or calls an LLM. Holds per-vulnerability fiches in references/."
-version: 2.6.0
+version: 3.1.0
 user-invocable: false
 ---
 
@@ -88,7 +88,14 @@ Before implementing authentication, determine who consumes the token — this de
 - Never expose stack traces, internal error messages, or implementation details to clients.
 - Use HTTPS everywhere. Never serve credentials or tokens over HTTP.
 - A WAF is not a control. It reduces noise in front of the application; the fix for a vulnerability lives in the code, and a finding is not closed because a WAF rule blocks its payload.
-- Behind a reverse proxy, trust `X-Forwarded-*` only from the proxy's address (Express `trust proxy` set to that hop, not `true`). The proxy and the application must agree on how a request is framed: reject requests carrying both `Content-Length` and `Transfer-Encoding`, and keep the proxy from passing ambiguous requests through (request smuggling, CWE-444).
+- Behind a reverse proxy, take the client address from `Forwarded` / `X-Forwarded-*` only through the hops you name: the proxy's address or CIDR, or the exact number of proxies in front of the application. A hop count is safe only when the application cannot be reached except through those proxies. Never use a setting that trusts every hop, however the framework spells it. That includes:
+  - a `true` flag;
+  - an all-addresses range (`0.0.0.0/0`, `::/0`);
+  - an emptied list of known proxies;
+  - a default that trusts every hop until configured. Set the value explicitly.
+
+  With any of these, a client picks its own IP by sending the header, which defeats per-IP rate limits, lockouts and audit records. Without a proxy, ignore the headers.
+- The proxy and the application must agree on how a request is framed: reject requests carrying both `Content-Length` and `Transfer-Encoding`, and keep the proxy from passing ambiguous requests through (request smuggling, CWE-444).
 
 ---
 

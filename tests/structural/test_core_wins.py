@@ -15,19 +15,57 @@ import unittest
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _SKILLS = os.path.join(_ROOT, 'skills')
 
+# The core states each rule once, for every stack. A row is one way a stack
+# spells the forbidden setting, so a stack with its own spelling is one more
+# row under the same core text. Each sample holds two occurrences.
+_TRUST_EVERY_HOP = ('engineering-security/SKILL.md', 'Never use a setting that trusts every hop')
+_UNSAFE_SCRIPTS = ('engineering-security/references/xss.md',
+                   'CSP without `unsafe-inline` and `unsafe-eval` for scripts')
+
 _CORE_FORBIDS = [
     {
-        'name': 'trusting every proxy hop',
-        'core': ('engineering-security/SKILL.md', 'set to that hop, not `true`'),
+        'name': 'trusting every proxy hop: a true flag',
+        'core': _TRUST_EVERY_HOP,
         'pattern': re.compile(r"""trustProxy\s*:\s*true\b|['"]trust proxy['"]\s*,\s*true\b"""),
         'sample': "new FastifyAdapter({ trustProxy: true })\napp.set('trust proxy', true);",
+        'safe': "new FastifyAdapter({ trustProxy: readTrustProxy() })\napp.set('trust proxy', 1);",
     },
     {
-        'name': "'unsafe-inline' or 'unsafe-eval' for scripts",
-        'core': ('engineering-security/references/xss.md',
-                 'CSP without `unsafe-inline` and `unsafe-eval` for scripts'),
+        'name': 'trusting every proxy hop: an all-addresses range',
+        'core': _TRUST_EVERY_HOP,
+        'pattern': re.compile(r"""(?i)(?:trust|prox|forward)[^\n]*?(?:0\.0\.0\.0/0|::/0)"""),
+        'sample': ('router.SetTrustedProxies([]string{"0.0.0.0/0"})\n'
+                   'config.action_dispatch.trusted_proxies = [IPAddr.new("::/0")]'),
+        'safe': ('router.SetTrustedProxies([]string{"10.0.0.0/8"})\n'
+                 'allow 0.0.0.0/0;  # a firewall rule, not proxy trust'),
+    },
+    {
+        'name': 'trusting every proxy hop: an emptied list of known proxies',
+        'core': _TRUST_EVERY_HOP,
+        'pattern': re.compile(r"""\bKnown(?:Proxies|Networks|IPNetworks)\.Clear\(\)"""
+                              r"""|^[ \t]*(?:server\.tomcat\.remoteip\.)?internal-proxies[ \t]*[=:][ \t]*(?:""|'')?[ \t]*$""",
+                              re.MULTILINE),
+        'sample': ('options.KnownIPNetworks.Clear();\n'
+                   'server.tomcat.remoteip.internal-proxies=\n'),
+        'safe': ('options.KnownIPNetworks.Add(new(IPAddress.Parse("10.0.0.0"), 8));\n'
+                 'server.tomcat.remoteip.internal-proxies=10\\.0\\.0\\.1\n'),
+    },
+    {
+        'name': "'unsafe-inline' or 'unsafe-eval' for scripts: a header or a directive key",
+        'core': _UNSAFE_SCRIPTS,
         'pattern': re.compile(r"""(?i)script-?src\b[^;\n\]]*unsafe-(?:inline|eval)"""),
         'sample': "scriptSrc: [`'self'`, `'unsafe-inline'`],\n\"script-src 'self' 'unsafe-eval'\"",
+        'safe': "scriptSrc: [`'self'`],\n\"script-src 'self'; style-src 'self' 'unsafe-inline'\"",
+    },
+    {
+        'name': "'unsafe-inline' or 'unsafe-eval' for scripts: a policy DSL",
+        'core': _UNSAFE_SCRIPTS,
+        'pattern': re.compile(r"""\bscript_src\b[^\n]*:unsafe_(?:inline|eval)\b"""
+                              r"""|\bScriptSources\([^\n;]*?\.Unsafe(?:Inline|Eval)\(\)"""),
+        'sample': ('policy.script_src :self, :unsafe_inline\n'
+                   '.ScriptSources(s => s.Self().UnsafeEval())'),
+        'safe': ('policy.script_src :self\npolicy.style_src :self, :unsafe_inline\n'
+                 '.ScriptSources(s => s.Self())\n.StyleSources(s => s.Self().UnsafeInline())'),
     },
 ]
 
@@ -87,6 +125,11 @@ class TestCoreWins(unittest.TestCase):
         for row in _CORE_FORBIDS:
             with self.subTest(rule=row['name']):
                 self.assertEqual(len(row['pattern'].findall(row['sample'])), 2)
+
+    def test_no_pattern_flags_the_correct_form(self) -> None:
+        for row in _CORE_FORBIDS:
+            with self.subTest(rule=row['name']):
+                self.assertEqual(row['pattern'].findall(row['safe']), [])
 
     def test_no_opt_in_template_contradicts_the_core(self) -> None:
         for skill in _opt_in_skills():
