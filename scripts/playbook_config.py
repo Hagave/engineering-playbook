@@ -51,8 +51,11 @@ HARNESSES = ('claude', 'codex', 'antigravity')
 #   model writes the menu itself, in the language the user writes in.
 # - reports: queued by the Stop hook from the deviation blocks it records, and
 #   only Claude Code's Stop hook records them.
+# - temporary_data: the panel is a Claude Code mod, and only its auto mode
+#   queues destructive commands for an answer.
 HARNESS_SETTINGS = {
-    'claude': ('prose', 'watch', 'claude_md_budget', 'context_budget', 'language', 'reports'),
+    'claude': ('prose', 'watch', 'temporary_data', 'claude_md_budget', 'context_budget',
+               'language', 'reports'),
     'codex': ('prose',),
     'antigravity': ('prose',),
 }
@@ -64,12 +67,14 @@ DESCRIPTIONS = {
     'context_budget': 'context tokens past which to wrap up and /clear (0 = off)',
     'language': 'language of the settings menu (auto | en | pt-br | es)',
     'reports': 'send deviation reports to the playbook maintainer (on | off)',
+    'temporary_data': 'keep declined deletions in the Temporary data panel (on | off)',
 }
 
 # Settings the panel lists under one row of the main screen, which opens a
 # screen of their own: the digits 1-9 hold five setting rows.
 GROUPS: dict[str, tuple[str, ...]] = {
     'budgets': ('claude_md_budget', 'context_budget'),
+    'reminders': ('watch', 'temporary_data'),
 }
 
 
@@ -84,7 +89,7 @@ def effect_note(key: str, value: object, language: str = 'en') -> str:
     say = playbook_i18n.text
     if key == 'prose':
         return say(language, 'effect_prose')
-    if key in ('watch', 'reports'):
+    if key in playbook_core.PREF_FLAGS:
         return say(language, f'effect_{key}_on' if value else f'effect_{key}_off')
     if key in ('claude_md_budget', 'context_budget'):
         if not value:
@@ -106,6 +111,7 @@ CHOICES: dict[str, list[tuple[str, str]]] = {
     'context_budget': [('0', 'off'), ('550000', '550k'), ('650000', '650k'), ('850000', '850k')],
     'language': list(playbook_i18n.LANGUAGE_LABELS.items()),
     'reports': [('on', 'on'), ('off', 'off')],
+    'temporary_data': [('on', 'on'), ('off', 'off')],
 }
 
 _TRANSLATED_CHOICES = ('on', 'off')
