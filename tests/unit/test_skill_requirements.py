@@ -58,7 +58,7 @@ class _ProjectTest(unittest.TestCase):
 class TestCompanionsAndLanguage(_ProjectTest):
 
     def test_every_source_write_needs_the_companions(self) -> None:
-        self.assertEqual(self._skills('src/a.py', 'x = 1'), _COMPANIONS)
+        self.assertEqual(self._skills('src/a.sh', 'x=1'), _COMPANIONS)
 
     def test_each_language_extension_needs_its_opt_in(self) -> None:
         for language, row in _TABLE['languages'].items():
@@ -69,9 +69,31 @@ class TestCompanionsAndLanguage(_ProjectTest):
                     self.assertIn(row['skill'], skills)
 
     def test_a_language_without_opt_in_needs_only_the_companions(self) -> None:
-        for rel in ('tool.py', 'core.cpp', 'run.sh', 'index.js'):
+        for rel in ('main.c', 'core.h', 'index.php', 'run.sh', 'index.js'):
             with self.subTest(rel=rel):
                 self.assertEqual(self._skills(rel, ''), _COMPANIONS)
+
+    def test_every_source_extension_is_a_language_or_listed_as_uncovered(self) -> None:
+        """A language is never dropped by omission: each extension the gate
+        treats as source maps to an opt-in or is named in uncovered_extensions,
+        and the two sets do not overlap."""
+        covered = {ext for row in _TABLE['languages'].values() for ext in row['extensions']}
+        uncovered = set(_TABLE['uncovered_extensions'])
+        self.assertFalse(covered & uncovered)
+        alternation = playbook_core._CODE_EXT.split('(?:', 1)[1].split(')', 1)[0]
+        source = {ext for ext in alternation.split('|')}
+        self.assertEqual({e.lstrip('.') for e in covered | uncovered}, source)
+
+    def test_every_language_row_names_an_existing_skill_and_markers(self) -> None:
+        for language, row in _TABLE['languages'].items():
+            with self.subTest(language=language):
+                self.assertTrue(row['markers'])
+                self.assertTrue(os.path.isfile(os.path.join(
+                    _ROOT, 'skills', row['skill'], 'SKILL.md')))
+
+    def test_python_and_cpp_files_need_their_opt_in(self) -> None:
+        self.assertIn('engineering-python', self._skills('tool.py', ''))
+        self.assertIn('engineering-cpp', self._skills('core.cpp', ''))
 
     def test_the_file_decides_the_language_not_the_project_root(self) -> None:
         """A polyglot repository: a Python hook next to a tsconfig.json."""

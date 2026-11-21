@@ -55,6 +55,8 @@
     "./skills/engineering-rust",
     "./skills/engineering-csharp",
     "./skills/engineering-kotlin",
-    "./skills/engineering-ruby"
+    "./skills/engineering-ruby",
+    "./skills/engineering-python",
+    "./skills/engineering-cpp"
   ]
 }

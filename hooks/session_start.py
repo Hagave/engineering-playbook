@@ -176,9 +176,11 @@ class LspPlugin(NamedTuple):
 
 # From the table in https://code.claude.com/docs/en/plugins/code-intelligence.md,
 # cross-checked against the official marketplace's manifest. Only the languages
-# playbook_core.detect_languages knows are listed: the docs also cover C/C++,
-# Python, PHP, Lua, Swift and Liquid, which get no hint until the detector does.
+# playbook_core.detect_languages knows are listed: the docs also cover PHP, Lua,
+# Swift and Liquid, which get no hint until the detector does.
 LSP_PLUGINS: dict[str, LspPlugin] = {
+    'python': LspPlugin('pyright-lsp', 'pyright-langserver', 'Python'),
+    'cpp': LspPlugin('clangd-lsp', 'clangd', 'C++'),
     'typescript': LspPlugin('typescript-lsp', 'typescript-language-server', 'TypeScript'),
     'rust': LspPlugin('rust-analyzer-lsp', 'rust-analyzer', 'Rust'),
     'go': LspPlugin('gopls-lsp', 'gopls', 'Go'),

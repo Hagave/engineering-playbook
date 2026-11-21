@@ -969,7 +969,8 @@ class TestSubagentIsolation(_HookTest):
         denied = self._agent_pre(*write)
         self._assert_denied(denied, 'engineering-security')
         for name in ('engineering-security', 'engineering-concurrency',
-                     'engineering-error-handling', 'engineering-performance'):
+                     'engineering-error-handling', 'engineering-performance',
+                     'engineering-python'):
             self._agent_skill(f'engineering-playbook:{name}', {'success': True})
         self._assert_allowed(self._agent_pre(*write))
 

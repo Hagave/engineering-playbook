@@ -1241,7 +1241,8 @@ language-agnostic.
 - `engineering-typescript` — listed above under code quality
 - `engineering-java`, `engineering-kotlin` — JVM ecosystem, build tools, ORMs,
   idiomatic layering
-- `engineering-go`, `engineering-rust`, `engineering-csharp`, `engineering-ruby`
+- `engineering-go`, `engineering-rust`, `engineering-csharp`, `engineering-ruby`,
+  `engineering-python`, `engineering-cpp`
   — each language's frameworks, data access, test runner and idioms
 
 ### Concurrency and reliability

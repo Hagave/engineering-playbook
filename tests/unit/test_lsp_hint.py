@@ -112,7 +112,7 @@ class TestHintShown(_Base):
         self.assertTrue(any('rust-analyzer-lsp' in line for line in lines))
 
     def test_every_language_the_detector_knows_has_a_plugin(self) -> None:
-        detected = {lang for lang, _ in playbook_core._LANGUAGE_MARKERS}
+        detected = {lang for lang, _ in playbook_core._language_markers()}
         self.assertEqual(detected, set(ss.LSP_PLUGINS))
 
 
