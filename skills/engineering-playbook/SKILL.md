@@ -1,7 +1,7 @@
 ---
 name: engineering-playbook
 description: "Language-agnostic core engineering governance across TypeScript, Java, Go, Rust, C#, Kotlin, Ruby — invoke automatically at the start of any conversation involving software development, code writing, code review, architecture, or technical implementation. Also activates when the user says activate playbook. Loads non-negotiable rules (no duplication, no hallucination, scope discipline) and the skill routing table. Framework- and language-specific opt-in skills are loaded only when the stack dictates. Active by default unless /playbook-off was invoked this session."
-version: 4.0.1
+version: 4.1.0
 user-invocable: false
 ---
 
@@ -96,6 +96,8 @@ See the Session configuration block in `playbook-config` for session scope and c
 Load specific skills when the task requires them. Use the Skill tool to invoke them on demand. Load only what the current task requires — never pre-load all skills.
 
 The playbook core is language-agnostic. Framework, language, and driver opt-in skills are loaded only when the stack dictates.
+
+**The core wins.** An opt-in skill specializes the core for one stack; it never relaxes it. When a rule or a code template in an opt-in skill contradicts a core skill, follow the core, and report the opt-in rule in a `[PLAYBOOK-DEVIATION]` block (`action: deviated`, the opt-in as `skill`, the core rule in `why`). Never copy the contradicting template into the project because it is the more specific of the two.
 
 ### Core governance
 

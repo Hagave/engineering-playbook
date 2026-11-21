@@ -1,7 +1,7 @@
 ---
 name: engineering-nestjs
 description: "**Opt-in for NestJS:** load only when NestJS is the chosen framework. NestJS-specific rules: module structure, controllers, dependency injection, DTOs, configuration, and logging. Use when working on a NestJS project: creating modules, controllers, services, guards, interceptors, or configuring the framework."
-version: 2.1.0
+version: 2.1.1
 user-invocable: false
 ---
 
@@ -135,8 +135,9 @@ Remove deleted files from `app.module.ts` (controllers and providers arrays).
 # Logger: nestjs-pino
 <pm> add nestjs-pino pino-http && <pm> add -D pino-pretty
 
-# Swagger (always)
+# Swagger (always); on Fastify the UI is served by @fastify/static, and the app exits at boot without it
 <pm> add @nestjs/swagger
+<pm> add @fastify/static   # Fastify only
 
 # Redis
 # cache-manager-ioredis-yet: verify maintenance status before use — check npm for recent activity
