@@ -220,6 +220,82 @@ class TestGovernanceChanges(unittest.TestCase):
         self.assertIn('single-line fix', m.group(1))
 
 
+class TestDecisionOwnership(unittest.TestCase):
+    """One rule decides when to ask: who owns the decision. It replaced a list of
+    stop triggers repeated in every skill, which made a model stop for
+    confirmation even when the request delegated the decisions, and never told it
+    that a delegation does not cover changing what the request fixed."""
+
+    def setUp(self):
+        self.governance = read_skill('engineering-governance')
+        m = re.search(r'## Decision ownership(.*?)(?=\n## |\Z)', self.governance, re.DOTALL)
+        self.section = m.group(1) if m else ''
+
+    def test_governance_owns_the_rule(self):
+        self.assertTrue(self.section, 'engineering-governance has no "## Decision ownership"')
+        self.assertNotIn('## When to stop and ask', self.governance)
+
+    def test_every_decision_has_one_of_three_owners(self):
+        for owner in ('**Fixed:**', '**Delegated:**', '**Open:**'):
+            self.assertIn(owner, self.section)
+
+    def test_delegation_is_the_confirmation(self):
+        self.assertIn('the delegation is that confirmation', self.section)
+
+    def test_delegation_never_covers_a_fixed_decision(self):
+        self.assertIn('Changing it is never your decision, whatever the request delegates', self.section)
+        self.assertIn('never a fixed one', self.section)
+
+    def test_delegation_never_lifts_a_hook_gate(self):
+        self.assertIn('A delegation never lifts a hook gate', self.section)
+
+    def test_rule_governs_every_skill_stop_step(self):
+        self.assertIn('Any step in a skill that stops to ask or waits for confirmation', self.section)
+
+    def test_spec_gate_accepts_delegated_decisions(self):
+        m = re.search(r'## Spec gate(.*?)(?=\n## |\Z)', self.governance, re.DOTALL)
+        self.assertIn('[SPEC CONFIRMED] — decisions delegated by the request.', m.group(1))
+
+    def test_shared_blocks_point_to_the_rule(self):
+        for path in all_skill_files():
+            with open(path) as f:
+                content = f.read()
+            for block_name in ('RULE-ANCHOR', 'OUTPUT-DISCIPLINE'):
+                block = extract_block(content, block_name)
+                if not block:
+                    continue
+                with self.subTest(skill=skill_name(path), block=block_name):
+                    self.assertNotIn('stop and confirm', block)
+                    self.assertNotIn('When ambiguous: stop', block)
+                    self.assertIn('delegat', block)
+
+    def test_no_skill_keeps_an_unconditional_stop_trigger(self):
+        retired = ('When ambiguous: stop', 'Stop and ask when ambiguous', 'stop-and-ask protocol',
+                   'UNTIL THE USER HAS ANSWERED ALL 13', 'mark it explicitly and ask before acting on it')
+        for path in all_skill_files():
+            with open(path) as f:
+                content = f.read()
+            for phrase in retired:
+                with self.subTest(skill=skill_name(path), phrase=phrase):
+                    self.assertNotIn(phrase, content)
+
+    def test_implement_and_scaffold_gates_accept_a_delegation(self):
+        implement = read_skill('engineering-implement')
+        stop = re.search(r'## STOP — Spec confirmation required(.*?)(?=\n## |\Z)', implement, re.DOTALL)
+        self.assertIn('A delegation is permission the user stated', stop.group(1))
+        scaffold = read_skill('engineering-scaffold')
+        self.assertIn('ALL 13 ROWS HAVE AN ANSWER FROM THEIR OWNER', scaffold)
+        self.assertIn('When no row is open, show the filled table and proceed', scaffold)
+
+    def test_antigravity_adapter_carries_the_rule(self):
+        path = os.path.join(_ROOT, 'adapters', 'antigravity', 'AGENTS.template.md')
+        with open(path) as f:
+            template = f.read()
+        self.assertIn('**Decision ownership.**', template)
+        self.assertNotIn('Stop and ask when ambiguous', template)
+        self.assertNotIn('state it and ask before acting.', template)
+
+
 # ── 5. engineering-implement changes ──────────────────────────────────────────
 
 class TestNoCompactRecommendation(unittest.TestCase):
@@ -255,9 +331,9 @@ class TestImplementChanges(unittest.TestCase):
 
     def test_ambiguities_resolved_before_stop(self):
         """F2 fix: ambiguity identification (Step 3) must come before the STOP gate."""
-        ambiguities = self.content.find('## Step 3 — Identify ambiguities')
+        ambiguities = self.content.find('## Step 3 — Settle who owns each decision')
         stop = self.content.find('## STOP')
-        self.assertGreater(ambiguities, -1, 'Step 3 — Identify ambiguities not found')
+        self.assertGreater(ambiguities, -1, 'Step 3 — Settle who owns each decision not found')
         self.assertGreater(stop, ambiguities, 'STOP must come after ambiguity resolution')
 
     def test_step2_anchors_companion_skills_before_step3(self):

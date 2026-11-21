@@ -1,14 +1,14 @@
 ---
 name: engineering-governance
-description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines when to stop and ask, prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 5.3.0
+description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines who owns each decision (and so when to ask), prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
+version: 6.0.0
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -36,12 +36,13 @@ Before any Write or Edit of a source file — any language the project is writte
 
 **When to emit:**
 - After the user confirms the implementation checklist (engineering-implement STOP step).
+- When every decision the task needs is fixed or delegated (see Decision ownership), with no confirmation to wait for: emit as `[SPEC CONFIRMED] — decisions delegated by the request.` and record the decisions you took.
 - For trivial single-line fixes where the spec is self-evident: emit immediately as `[SPEC CONFIRMED] — unambiguous single-line fix.`
 - For bug fixes with no ambiguity: emit as `[SPEC CONFIRMED] — fix is scoped and unambiguous.`
 
 **When not to emit:**
 - Do not emit preemptively before reading context and extracting requirements.
-- Do not emit while ambiguities remain unresolved.
+- Do not emit while an open decision is unanswered.
 
 **Token scope — per task, per turn:** the hook accepts the token only if it appears in assistant text emitted after the latest user message. Emit it, then write code in the same turn. A token emitted before an intervening user message no longer satisfies the gate — re-emit it when the user grants continuation of the same task.
 
@@ -77,19 +78,19 @@ The context-guard hook is the **single source of truth** for context health. It 
 
 ---
 
-## When to stop and ask
+## Decision ownership
 
-Stop and ask before implementing when any of the following is true:
+Every decision a task needs has one owner, and you act only on the decisions you own. Settle the owner before acting:
 
-- A requirement is ambiguous.
-- Required information is absent from the request, the code, or the registries.
-- The scope of the change is unclear.
-- The task touches a Public Contract artifact — verify compatibility before proceeding.
-- Two valid implementation paths exist with meaningfully different trade-offs.
+- **Fixed:** the request, the repository or a loaded skill already decides it. A requirement the user stated, a public contract or a convention the code already has, a skill rule. Implement it as it stands. Changing it is never your decision, whatever the request delegates: ask the user, or, for a skill rule, report a `[PLAYBOOK-DEVIATION]` block. When nobody can be asked, keep it and say in your final message why you believe it is wrong.
+- **Delegated:** the request hands it to you, in general ("decide on your own and record it", "use your judgment", "don't ask me") or for an area ("pick the database"). Decide it, record the decision and its reason where the request says or in your final message, and carry on. Do not ask, and do not ask for confirmation of a plan or checklist that holds only fixed and delegated decisions: the delegation is that confirmation.
+- **Open:** neither fixed nor delegated. It is the user's. Ask before acting on it.
 
-Send all questions in a single message. Never send multiple rounds of one question each.
+An ambiguous requirement, missing information, an unclear scope, and two valid paths with different trade-offs are open decisions, unless the request delegated them. A delegation covers what it names, and a general one covers every open decision, never a fixed one. A delegation never lifts a hook gate.
 
-After receiving answers: summarize your understanding before starting implementation. Confirm before proceeding.
+Any step in a skill that stops to ask or waits for confirmation (the implementation checklist, the scaffold table, a refactor phase) applies this rule: its open decisions go to the user, and its delegated ones are yours to decide and record.
+
+When you ask, put every open decision in a single message, never one question per round. After the answers, say in a few lines how you read them and proceed. Ask again only when an answer opens a new decision.
 
 ---
 
@@ -127,7 +128,7 @@ why: the reason, and the evidence for it
 
 If a simpler approach exists, surface it explicitly before starting. Push back when the requested approach is more complex than the problem warrants. Do not silently implement the complex path.
 
-If multiple valid interpretations of the task exist, present them — do not pick one silently.
+Choosing between valid interpretations of the task is an open decision unless the request delegated it (Decision ownership): present them, or, under a delegation, pick one and record why. Never pick one silently.
 
 For tasks with more than one step, state the plan first:
 
@@ -137,7 +138,7 @@ For tasks with more than one step, state the plan first:
 3. [Step] → verify: [check]
 ```
 
-Confirm the plan before proceeding. Weak success criteria ("make it work") require clarification before implementation begins.
+Confirm the plan with the user unless the request delegated it. Weak success criteria ("make it work") are an open decision too.
 
 ---
 
@@ -160,12 +161,11 @@ If the project has no formatter or autofix wired, so that a layout failure reach
 
 ## Prohibited behaviors
 
-- Assuming requirements not stated.
+- Taking a decision you do not own (Decision ownership): assuming a requirement the request did not state, or changing one it fixed.
 - Inventing behavior not requested.
 - Creating features outside the stated scope.
 - Modifying artifacts not referenced in the task.
 - Making architecture decisions without justification.
-- Implementing before clarifying ambiguities.
 - Silently choosing the complex path when a simpler one exists.
 - Recommending `/clear` without a `[playbook:context]` signal from the hook in the current turn.
 - Recommending `/compact`, for any reason.
@@ -180,7 +180,7 @@ If the project has no formatter or autofix wired, so that a layout failure reach
 Run before every response. Every item must be checked explicitly.
 
 - [ ] All stated requirements were addressed.
-- [ ] All ambiguities were resolved before implementation — none were assumed.
+- [ ] Every decision was taken by its owner: fixed ones as they stand, delegated ones decided and recorded, open ones answered by the user.
 - [ ] No hypothesis was acted on without confirmation.
 - [ ] No skill rule was violated.
 - [ ] No Public Contract was modified without compatibility analysis.
@@ -199,10 +199,10 @@ Run before every response. Every item must be checked explicitly.
 - [ ] No new public method or use case path was left without test coverage.
 - [ ] If the project is NestJS: every public endpoint added or modified has Swagger decorators (rule owned by `engineering-nestjs`).
 
-If a checklist item cannot pass due to missing information or unresolved ambiguity: stop, report what is blocking, and ask. Do not deliver a partial response as if it were complete.
+If a checklist item cannot pass because an open decision is unanswered: stop, report what is blocking, and ask. Do not deliver a partial response as if it were complete.
 
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

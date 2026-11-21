@@ -55,7 +55,8 @@ run_prompt() {
 
     # Check for anti-patterns (defined in prompts)
     local anti_section
-    anti_section="$(sed -n '/^Anti-pattern to detect/,$ p' "$file")"
+    # Each section runs to the next blank line, so one file can hold both.
+    anti_section="$(sed -n '/^Anti-pattern to detect/,/^$/ p' "$file")"
 
     if [[ -n "$anti_section" ]]; then
         local had_antipattern=false
@@ -80,7 +81,7 @@ run_prompt() {
     # every line must match somewhere in the response. Used by the review
     # fixtures (06+), one per engineering-security fiche.
     local must_section
-    must_section="$(sed -n '/^Must mention/,$ p' "$file")"
+    must_section="$(sed -n '/^Must mention/,/^$/ p' "$file")"
     if [[ -n "$must_section" ]]; then
         local missed=false
         while IFS= read -r line; do
@@ -111,12 +112,15 @@ run_prompt() {
             fi
             ;;
         02)
-            if echo "$response" | grep -q 'STOP'; then
-                echo "PASS: STOP step present before implementation"
-                PASS=$((PASS + 1))
-            else
-                echo "FAIL: no STOP step — model may have gone straight to code"
+            # The request leaves decisions open and delegates none, so the model
+            # stops before code. The token is the proof it did not: the word
+            # "STOP" in the reply is not, since asking needs no such heading.
+            if echo "$response" | grep -q 'SPEC CONFIRMED'; then
+                echo "FAIL: [SPEC CONFIRMED] emitted with open decisions — went straight to code"
                 FAIL=$((FAIL + 1))
+            else
+                echo "PASS: stopped before implementation"
+                PASS=$((PASS + 1))
             fi
             ;;
         03)

@@ -1,14 +1,14 @@
 ---
 name: playbook-config
 description: "The playbook's settings menu: response prose level, known-failure warnings, cost budgets, menu language, session status, learning from past failures and the red-lab-playbook (security scans of the user's own app in an isolated local copy). Use when the user says /playbook-config, asks for the playbook's settings, status or configuration, wants shorter or longer answers, wants warnings about past mistakes on or off, asks the playbook to learn from this project's failures, or a prompt names a red-lab-playbook step."
-version: 3.4.0
+version: 3.4.1
 user-invocable: true
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -178,5 +178,5 @@ Fill each field from the choices made in this session; `—` where a field does 
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

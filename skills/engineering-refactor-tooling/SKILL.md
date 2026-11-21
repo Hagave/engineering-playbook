@@ -1,14 +1,14 @@
 ---
 name: engineering-refactor-tooling
 description: "Phase 1 of the engineering-refactor workflow. Loaded by the refactor orchestrator when Phase 1 begins. Establishes the strictest linting baseline: TypeScript strict flags, Biome + ESLint audit, path alias configuration. Produces the violation list that Phase 2 uses as its structural backlog."
-version: 2.0.0
+version: 2.0.1
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -83,10 +83,10 @@ The handoff block must end with:
 **Reply "continue" to begin Phase 2 — [first sub-phase name], or ask questions before proceeding.**
 ```
 
-**Stop here.** Do not load any Phase 2 skill, do not describe Phase 2 steps, do not continue. Wait for the user's reply. Only after they reply: load the first Phase 2 skill per the sub-phase table in `engineering-refactor`.
+**Stop here.** Do not load any Phase 2 skill, do not describe Phase 2 steps, do not continue. Wait for the user's reply, unless the request delegated going on (Decision ownership in `engineering-governance`). Only after they reply: load the first Phase 2 skill per the sub-phase table in `engineering-refactor`.
 
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

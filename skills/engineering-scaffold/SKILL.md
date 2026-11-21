@@ -1,26 +1,26 @@
 ---
 name: engineering-scaffold
-description: "BLOCK HERE. For ANY greenfield request (CRUD, API, REST, scaffold-from-scratch, 'crie um X em Y'), this skill MUST load first — BEFORE the language opt-in. Present the 13-row canonical checklist below IN ORDER. Do NOT write code, do NOT load the language opt-in (engineering-go etc.) for stack answers, and do NOT ask informal questions like 'what storage?' until the user has answered all 13. Stack questions only — entity/field modeling comes after the stack is decided. If the language is named, filter the language-specific rows from the matching `engineering-{lang}` opt-in; if not, ask first. Default for an empty project: **none** for framework/runtime, **no** for every yes/no row. Do NOT pick Database=X + Database access=none. No informal shortcuts."
-version: 2.0.1
+description: "BLOCK HERE. For ANY greenfield request (CRUD, API, REST, scaffold-from-scratch, 'crie um X em Y'), this skill MUST load first — BEFORE the language opt-in. Present the 13-row canonical checklist below IN ORDER. Do NOT write code, do NOT load the language opt-in (engineering-go etc.) for stack answers, and do NOT ask informal questions like 'what storage?' until all 13 rows have an answer from their owner (engineering-governance, Decision ownership): a row the request fixes is filled from it, a row it delegates you fill and record, every other row the user answers. Stack questions only — entity/field modeling comes after the stack is decided. If the language is named, filter the language-specific rows from the matching `engineering-{lang}` opt-in; if not, ask first. Default for an empty project: **none** for framework/runtime, **no** for every yes/no row. Do NOT pick Database=X + Database access=none. No informal shortcuts."
+version: 3.0.0
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 <!-- CANONICAL-CHECKLIST -->
 The questions in the table below are the **only** valid pre-scaffold checklist for this skill. When this skill is loaded for a request that fits a backend scaffold:
 1. THIS SKILL MUST BE LOADED FIRST. Load it BEFORE any language opt-in (engineering-go, engineering-java, etc.). It is the canonical entry point for any greenfield scaffold/CRUD/API request. If it is not loaded, the rest of the playbook cannot enforce the stack contract.
-2. DO NOT START SCAFFOLDING OR ASKING INFORMAL QUESTIONS UNTIL THE USER HAS ANSWERED ALL 13 ROWS. Showing a table of 13 questions and receiving answers is the gate. Any code or shell command run before the user has answered all 13 is a violation of this skill.
+2. DO NOT START SCAFFOLDING OR ASKING INFORMAL QUESTIONS UNTIL ALL 13 ROWS HAVE AN ANSWER FROM THEIR OWNER (Decision ownership in `engineering-governance`). A row the request fixes ("in NestJS with Postgres") is filled from the request. A row the request delegates ("decide the rest yourself") you fill, marked as your decision with its reason. Every other row is the user's to answer. Showing the table with those answers is the gate: any code or shell command run while a row is still open is a violation of this skill. When no row is open, show the filled table and proceed in the same turn.
 3. The 13 questions are about the STACK, not the domain. Do NOT ask about entity names, field names, or domain modeling at this stage (e.g. "what resource does the CRUD manage?" is not a stack question). The domain model is iterated after the stack is decided.
 4. Detect the implementation language from the user's prompt. Load the matching language opt-in skill (e.g. `engineering-go` for Go) and use its options for the language-specific rows (Package manager, Framework / runtime, Database access). The reference table below is a fallback when no language opt-in is loaded.
 5. If no language is identifiable, present the canonical full-merge table below and ask the language as the first conversational question. Block here until the user names the language.
 6. Present every question in the table, in order, with the exact option sets listed. Do not skip rows. Do not add rows that are not in the table (no "Persistence", "Entity", or other invented categories — "Framework / runtime" is a canonical row before Architecture, which has the options hexagonal / modular / MVC).
 7. Do not paraphrase the questions or options. The user is expected to answer in terms of the option labels exactly as written.
-8. If the user request fits the playbook (backend, chosen framework/runtime, chosen architecture, persistent state), present the table as-is and stop.
+8. If the user request fits the playbook (backend, chosen framework/runtime, chosen architecture, persistent state), present the table as-is and stop for the rows that are still open.
 9. If the user request does NOT fit (frontend-only, no backend involved), say so explicitly: "this skill does not apply — request is not a backend scaffold" — and stop. Do not silently reframe the request to fit the table.
 10. If a row has a sensible default that the user is unlikely to care about (e.g. Global interceptors = no for a simple CRUD), mention the default in parentheses next to the question rather than dropping the row.
 <!-- /CANONICAL-CHECKLIST -->
@@ -30,12 +30,12 @@ The questions in the table below are the **only** valid pre-scaffold checklist f
 STOP. If the user asked for a greenfield CRUD/API/REST/scaffold-from-scratch, you MUST:
 
 1. Present the 13-row canonical checklist below IN ORDER, as a numbered table.
-2. WAIT for the user to answer every row.
+2. WAIT for the user to answer every open row: one the request neither fixed nor delegated to you (item 2 above).
 3. Only THEN scaffold.
 
 The 13 rows cover the STACK, not the domain. Do NOT ask about entity names, field names, or domain modeling. The domain model is iterated after the stack is decided.
 
-If you skip any row, ask an informal question instead ("what storage?" / "what entity?"), or write code before the user has answered, you are violating this skill. The harness-level spec gate does not enforce the 13-row gate — only this skill does. Default for an empty project: **none** for framework/runtime, **no** for every yes/no row (DDD?, Docker?, Logger?, HTTP security?, Global interceptors?). Database and Database access must both be set — never Database=X + Database access=none.
+If you skip any row, ask an informal question instead ("what storage?" / "what entity?"), or write code while a row is still open, you are violating this skill. The harness-level spec gate does not enforce the 13-row gate — only this skill does. Default for an empty project: **none** for framework/runtime, **no** for every yes/no row (DDD?, Docker?, Logger?, HTTP security?, Global interceptors?). Database and Database access must both be set — never Database=X + Database access=none.
 
 # Project Scaffold Checklist
 
@@ -93,7 +93,7 @@ If the user has already answered some of these in their request, only ask for wh
 - If `Global interceptors?` = no, no trace-id, no response-transform, no exception filter middleware.
 - The chosen architecture's directory tree shows what files exist when FULLY built — it is NOT a checklist of files to create for a minimal CRUD. A hexagonal project with `Message broker = none` and `Cache = none` does NOT need the full `infrastructure/broker/` and `infrastructure/cache/` trees.
 
-After receiving answers: summarize the full stack before proceeding. Confirm before running any command.
+After receiving answers: summarize the full stack, marking the rows you decided under a delegation, and proceed. Ask again only when an answer opens a new decision.
 
 ---
 
@@ -167,5 +167,5 @@ Framework routing is **step 8** of the initialization sequence above. Do not tre
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->
