@@ -1,7 +1,7 @@
 ---
 name: engineering-code-review
 description: "Code review workflow and severity classification. Use when asked to review a diff, PR, or code change, and when asked to review, survey or audit existing code (a module, a route prefix, a folder): the audit mode lists the scope with a script, then runs one pass per dimension and backs every finding with evidence. Runs before every push. Loads relevant skills based on what the code touches and outputs findings classified as Blocker, Major, or Minor."
-version: 5.0.0
+version: 6.0.0
 user-invocable: false
 ---
 
@@ -148,7 +148,7 @@ Work through every section. Mark each finding immediately — do not batch.
 ### Concurrency and atomicity
 
 - Read-modify-write that is not atomic: load entity → mutate → save without optimistic lock (`version` field) or pessimistic lock (`SELECT FOR UPDATE`).
-- Idempotency implemented with `GET` + conditional `SET` — there is a race window; the correct pattern is `SET NX` atomic claim before execution.
+- Idempotency record kept outside the transaction of the effect it guards (a cache or Redis key for an operation that writes to the database), claimed with a read followed by a write instead of an atomic insert or set-if-absent, not scoped to the caller, or stored without a request fingerprint. (see `engineering-concurrency`)
 - Redis rate limiting using `GET` + conditional `SET` — use `INCR` + `EXPIRE on first increment`.
 - Distributed lock released with a plain `DEL` — must use a Lua check-and-delete to avoid releasing another holder's lock.
 - State-mutating POST endpoint without idempotency handling when called by external clients.

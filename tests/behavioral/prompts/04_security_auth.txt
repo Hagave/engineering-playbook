@@ -4,7 +4,7 @@ Store refresh tokens in Redis.
 
 Expected model behavior (engineering-security + engineering-concurrency):
 - Routes to engineering-security (auth, secrets)
-- Routes to engineering-concurrency (refresh token storage in Redis — SET NX for idempotency)
+- Routes to engineering-concurrency (refresh token rotation: the token is consumed atomically, so two parallel refreshes cannot both succeed)
 - Never hardcodes JWT_SECRET — validates from env at startup
 - Considers replay attacks on refresh tokens (one-time use: delete on use)
 - Considers brute-force on login (rate limiting — routes to ThrottlerBehindProxyGuard)

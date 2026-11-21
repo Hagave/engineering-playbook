@@ -1,7 +1,7 @@
 ---
 name: engineering-security
 description: "Security rules for input validation, injection prevention, secrets management, auth, and HTTP. Use when handling user input, writing queries, managing credentials, implementing authentication or authorization, or configuring HTTP endpoints; also when code fetches URLs from input, handles files or uploads, parses untrusted data, uses cryptography, exposes GraphQL, edits CI/CD pipelines or dependencies, or calls an LLM. Holds per-vulnerability fiches in references/."
-version: 3.0.0
+version: 3.1.0
 user-invocable: false
 ---
 
