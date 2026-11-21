@@ -1061,7 +1061,12 @@ someone who installed before the setting existed stays off.
 The hook denies `Bash` commands matching these patterns and requires explicit
 user confirmation before proceeding:
 
-- `rm -r*` / `rm --recursive` (any recursive remove)
+- `rm -r*` / `rm --recursive` (any recursive remove), read from the words of
+  each command: `rm` must be the program or run as an argument of one
+  (`find -exec rm -r`, `watch rm -rf`, `docker exec db rm -rf`, a `sh -c` or
+  `eval` script), and the flag must be that `rm`'s, in any position
+  (`rm dir -rf`). `docker run --rm` is not an `rm`, and neither is a later
+  flag holding an `r` (`javac -proc:none`)
 - `git push --force` / `git push -f` / force-push refspec (`git push origin +main`)
 - `git reset --hard`, forced branch deletion (`-D`, `-df`, `--delete --force`), `git clean -f*`
 - `git checkout --` / `git restore <path>` (except `--staged` alone)
@@ -1074,7 +1079,9 @@ The patterns also run on the command as the shell reads it — quotes around the
 command word removed (`'rm' -rf`), wrappers dropped (`command`, `env`, `sudo`),
 git's global options dropped (`git -C . reset --hard`), and each `$(...)` read
 as a command of its own — so respelling a command does not get it past the
-check. Two more cases are denied the same way:
+check. When a command has several parts, the dialog shows the part that
+destroys, not the start of the command, and says that approving runs all of
+it. Two more cases are denied the same way:
 
 - a command whose **program is decided at run time** (`$x -rf build`,
   `eval "$CMD"`, `bash -c "$CMD"`): nothing can read what it runs. A variable

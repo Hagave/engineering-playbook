@@ -257,8 +257,16 @@ def is_code_write(tool_name: str, tool_input: dict, command: str = '', cwd: str 
     base = cwd or os.getcwd()
     return any(not is_throwaway_write(t, base) for t in targets)
 
-DESTRUCTIVE_RULES = [
+# `rm -r` and `xargs rm` are read from the tokens of each simple command
+# (`token_deletion`): as text, `\brm` matched the `rm` of `docker run --rm` and
+# the `r` of a later flag (`javac -proc`) read as `-r`. These patterns are the
+# fallback for text that does not tokenize, where failing closed is the point.
+DELETION_TEXT_RULES = [
     (r'\brm\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[rR]|--recursive\b)', 'delete_tree'),
+    (r'\bxargs\b[^\n]*\brm\b', 'mass_delete'),
+]
+
+DESTRUCTIVE_RULES = [
     (r'\bgit\s+push\b[^\n]*(?:\s-f\b|\s--force\b|\s\+\S+)', 'force_push'),
     (r'\bgit\s+reset\s+--hard\b', 'reset_hard'),
     # Forced branch deletion in every spelling: -D, a -df/-fd cluster, and the
@@ -287,7 +295,6 @@ DESTRUCTIVE_RULES = [
     (r'\bshred\s', 'shred'),
     (r'\btruncate\s+[^\n;&|]*(?:-s\s*0+\b|--size(?:=|\s+)0+\b)', 'truncate'),
     (r'\bfind\s+[^\n]*-delete\b', 'mass_delete'),
-    (r'\bxargs\b[^\n]*\brm\b', 'mass_delete'),
     (r'\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?[`"\[]?\w', 'sql'),
     (r'\bTRUNCATE\s+(?:TABLE\s+|ONLY\s+)?[`"\[]?\w+[`"\]]?\s*(?:;|$|\s+(?:CASCADE|RESTART))', 'sql'),
     (r'(?s)\bDELETE\s+FROM\b(?!.*\bWHERE\b)', 'sql'),
@@ -1309,10 +1316,12 @@ def _nested_scripts(words: list[str]) -> list[str]:
     return scripts
 
 
-def _simple_commands(command: str) -> tuple[list[list[str]], list[str]] | None:
-    """The command words of every simple command in `command`, with the
-    scripts it hands to a shell (see `_nested_scripts`) read as commands of
-    their own; plus those nested scripts that do not tokenize, as text.
+def _raw_simple_commands(command: str
+                         ) -> tuple[list[tuple[list[str], bool]], list[str]] | None:
+    """Every simple command of `command` as written, wrappers kept (`xargs rm`
+    is a mass delete because of its wrapper), with the scripts it hands to a
+    shell (see `_nested_scripts`) read as commands of their own and flagged
+    as nested; plus those nested scripts that do not tokenize, as text.
 
     A nested script that does not tokenize is returned for a text check and
     leaves the commands around it standing: dropping the whole command for it
@@ -1321,21 +1330,29 @@ def _simple_commands(command: str) -> tuple[list[list[str]], list[str]] | None:
     segments = shell_segments(command)
     if segments is None:
         return None
-    commands: list[list[str]] = []
+    found: list[tuple[list[str], bool]] = []
     opaque: list[str] = []
     for segment in segments:
+        found.append((segment, False))
         words = command_words(segment)
-        if not words:
-            continue
-        commands.append(words)
-        for script in _nested_scripts(words):
-            nested = _simple_commands(script)
+        for script in _nested_scripts(words) if words else ():
+            nested = _raw_simple_commands(script)
             if nested is None:
                 opaque.append(script)
             else:
-                commands += nested[0]
+                found += [(inner, True) for inner, _ in nested[0]]
                 opaque += nested[1]
-    return commands, opaque
+    return found, opaque
+
+
+def _simple_commands(command: str) -> tuple[list[list[str]], list[str]] | None:
+    """`_raw_simple_commands` with each command reduced to its command words
+    (wrappers and assignments dropped), and assignment-only ones left out."""
+    read = _raw_simple_commands(command)
+    if read is None:
+        return None
+    commands = [words for words in (command_words(segment) for segment, _ in read[0]) if words]
+    return commands, read[1]
 
 
 def _read_commands(command: str) -> tuple[list[list[str]], list[str]]:
@@ -2096,11 +2113,67 @@ AUTHORIZATION_HINT = (
 )
 
 
-def _destructive_block(reason: str, effect: str) -> dict:
+def _destructive_block(reason: str, effect: str, part: str = '') -> dict:
     """`effect` names what the command destroys, for the text the user reads
-    (playbook_i18n `destroys_<effect>`)."""
-    return {'block': True, 'effect': effect,
+    (playbook_i18n `destroys_<effect>`); `part` is the simple command that
+    does it, shown to the user instead of the start of a longer command."""
+    return {'block': True, 'effect': effect, 'part': part,
             'msg': f'[playbook:safety] {reason} {AUTHORIZATION_HINT}'}
+
+
+_RECURSIVE_RM_OPTION_RE = re.compile(r'-[a-zA-Z]*[rR][a-zA-Z]*')
+# Where the words of an `rm` run as an argument end: `find -exec rm -r {} ;`.
+_ARGUMENT_COMMAND_END = frozenset({';', '+', '--'})
+
+
+def _recursive_rm(words: list[str]) -> str:
+    """The `rm -r` in a simple command, as the words from `rm` on; '' when
+    there is none. The `rm` may be the program or run as an argument of it
+    (`find -exec`, `watch`, `flock f`, `docker exec ctr`), and only its own
+    options count: GNU rm reads them anywhere before `--`, so `rm dir -rf`
+    is recursive. A program that only prints or searches runs nothing."""
+    if words[0].rsplit('/', 1)[-1] in _TEXT_ONLY_WORDS:
+        return ''
+    for at, word in enumerate(words):
+        if word.rsplit('/', 1)[-1] != 'rm':
+            continue
+        for option in words[at + 1:]:
+            if option in _ARGUMENT_COMMAND_END:
+                break
+            if option == '--recursive' or _RECURSIVE_RM_OPTION_RE.fullmatch(option):
+                return shlex.join(words[at:])
+    return ''
+
+
+def token_deletion(command: str, disposable_root: str = '') -> tuple[str, str] | None:
+    """`(part, effect)` for a recursive `rm` or an `xargs rm` in `command`,
+    read per simple command, scripts handed to a shell (`sh -c`, `eval`)
+    included; None when there is none. Text that does not tokenize, the whole
+    command or a nested script, is read with DELETION_TEXT_RULES instead. An
+    `rm` inside `disposable_root` is left out: see `removes_only_under`."""
+    read = _raw_simple_commands(command)
+    texts = [command] if read is None else read[1]
+    for text in texts:
+        for pattern, effect in DELETION_TEXT_RULES:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(0).strip(), effect
+    if read is None:
+        return None
+    for segment, nested in read[0]:
+        words = command_words(segment)
+        if not words or words[0].rsplit('/', 1)[-1] in _TEXT_ONLY_WORDS:
+            continue
+        if (not nested and words == segment
+                and removes_only_under(segment, disposable_root)):
+            continue
+        bases = [word.rsplit('/', 1)[-1] for word in segment]
+        if 'xargs' in bases and 'rm' in bases[bases.index('xargs') + 1:]:
+            return shlex.join(segment), 'mass_delete'
+        part = _recursive_rm(words)
+        if part:
+            return part, 'delete_tree'
+    return None
 
 
 # Commands whose arguments are text being searched for, never a command: a
@@ -2142,24 +2215,24 @@ def removes_only_under(words: list[str], root: str) -> bool:
     return bool(operands)
 
 
-def _pattern_lines(command: str, disposable_root: str = '') -> list[str]:
-    """What the destructive patterns read: each simple command on a line of
-    its own, quotes removed, search tools left out; once as written (`xargs
-    rm` is a mass delete because of its wrapper) and once with wrappers and
-    git's global options dropped (`sudo git -C . reset --hard`). Read as one
-    line, `grep "find .*-exec"; grep "push --delete"` matched `find ...
-    -delete` across two commands' arguments. The raw text when the command
-    does not tokenize. An `rm` inside `disposable_root` is left out: see
-    `removes_only_under`."""
+def _pattern_lines(command: str) -> list[tuple[str, str]]:
+    """What the destructive patterns read, each with the simple command it
+    came from as the user is shown it: each simple command on a line of its
+    own, quotes removed, search tools left out; once as written and once with
+    wrappers and git's global options dropped (`sudo git -C . reset --hard`).
+    Read as one line, `grep "find .*-exec"; grep "push --delete"` matched
+    `find ... -delete` across two commands' arguments. The raw text when the
+    command does not tokenize."""
     segments = shell_segments(command)
     if segments is None:
-        return [command]
+        return [(command, command)]
     lines = []
     for segment in segments:
         words = command_words(segment)
-        if (words and not _searches_only(words)
-                and not (segment == words and removes_only_under(words, disposable_root))):
-            lines += [' '.join(segment), _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(words))]
+        if words and not _searches_only(words):
+            shown = shlex.join(segment)
+            lines += [(shown, ' '.join(segment)),
+                      (shown, _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(words)))]
     return lines
 
 
@@ -2192,13 +2265,19 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
     does)."""
     command = strip_heredoc_bodies(command)
     expanded = resolve_literal_commands(command) if _depth == 0 else command
-    for line in _pattern_lines(expanded, disposable_root):
+    for shown, line in _pattern_lines(expanded):
         for pattern, effect in DESTRUCTIVE_RULES:
             match = re.search(pattern, line, re.IGNORECASE)
             if match:
                 return _destructive_block(
                     f'Destructive operation detected (`{match.group(0).strip()}`). Show the '
-                    'user the exact command and what it destroys.', effect)
+                    'user the exact command and what it destroys.', effect, shown)
+    deletion = token_deletion(expanded, disposable_root)
+    if deletion:
+        part, effect = deletion
+        return _destructive_block(
+            f'Destructive operation detected (`{part[:120]}`). Show the user the exact '
+            'command and what it destroys.', effect, part)
     unknown = unattestable_command(expanded) if _depth == 0 else ''
     if unknown:
         return _destructive_block(
@@ -2218,7 +2297,9 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
         for line in interpreter_shell_commands(raw or command, cwd):
             inner = check_destructive(strip_heredoc_bodies(line), line, cwd, _SCRIPT_MAX_DEPTH)
             if inner:
-                return {**inner, 'msg': inner['msg'].replace(
+                # The part is a line of the script, not of the command the
+                # user is asked about: the dialog shows that command instead.
+                return {**inner, 'part': '', 'msg': inner['msg'].replace(
                     '[playbook:safety] ', '[playbook:safety] In a command an interpreter script '
                     'runs: ', 1)}
     sources = script_sources(raw or command, cwd, untracked_only=True)
@@ -2234,7 +2315,7 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
             text = _shell_script_text(source.text)
             inner = check_destructive(strip_inline_payloads(text), text, cwd, _depth + 1)
             if inner:
-                return {**inner, 'msg': inner['msg'].replace(
+                return {**inner, 'part': '', 'msg': inner['msg'].replace(
                     '[playbook:safety] ', f'[playbook:safety] In the script `{source.origin}`: ', 1)}
             continue
         call = _recursive_delete_call(source)

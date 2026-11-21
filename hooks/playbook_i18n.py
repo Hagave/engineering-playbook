@@ -332,6 +332,11 @@ STRINGS: dict[str, dict[str, str]] = {
                'ejecute exactamente esto. Donde nadie puede responder esta solicitud, se '
                'deniega: ejecuta el comando tú mismo.'),
     },
+    'destructive_part': {
+        'en': 'That is one part of a longer command: approving runs the whole command.',
+        'pt-br': 'Esse é um trecho de um comando maior: aprovar roda o comando inteiro.',
+        'es': 'Es una parte de un comando más largo: aprobarlo ejecuta el comando entero.',
+    },
     'destroys_delete_tree': {
         'en': 'deletes files and directories recursively',
         'pt-br': 'apaga arquivos e diretórios recursivamente',
