@@ -1,7 +1,7 @@
 ---
 name: engineering-architecture
 description: "Layer rules, forbidden patterns, and compatibility governance. Use for architecture decisions, when code crosses layer boundaries, when modifying a shared or public-contract artifact, or when asked about system design. Includes impact classification and breaking change strategy."
-version: 2.0.1
+version: 2.1.0
 user-invocable: false
 ---
 
@@ -30,10 +30,11 @@ Import direction is never inverted. `presentation/` never imports `infrastructur
 
 ## Domain rules (`domain/`)
 
-- Zero external dependencies — no framework, no ORM, no libraries. Native runtime utilities are not external dependencies and are permitted (Node example: `node:*` modules; nuance owned by `engineering-ddd`).
+- Zero external dependencies — no framework, no ORM, no libraries. Native runtime utilities are not external dependencies and are permitted (Node example: `node:*` modules; nuance owned by `engineering-ddd`), except to read a value the logic decides on that varies between runs (below).
 - Entities enforce their own invariants; violations throw domain exceptions co-located with the feature. Entity mechanics (private constructor, semantic static factories, value object rules) are owned by `engineering-ddd` — load it for the full pattern.
 - Entities never reference DTOs, persistence models, HTTP types, or framework annotations.
 - Repository interfaces live in `domain/repositories/` and return domain types only — never persistence models.
+- A value the logic decides on that varies between runs (the current time, randomness that drives a branch, the environment, a remote answer) enters as an input: a parameter or a port, such as a clock. A value only stored or passed on (a generated id, an `updatedAt` stamp) may come from the native runtime. The same holds in the application layer. Proof and owner: Obligations in `engineering-governance`.
 
 ## Application layer rules (`application/`)
 

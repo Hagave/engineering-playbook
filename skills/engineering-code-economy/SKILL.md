@@ -1,7 +1,7 @@
 ---
 name: engineering-code-economy
 description: "Rules for avoiding duplication and keeping changes minimal. Use when creating any new artifact (service, utility, class, function, DTO, interface), when asked to add a feature, or when editing existing code. Enforces reuse-first protocol and surgical change discipline."
-version: 2.0.1
+version: 2.1.0
 user-invocable: false
 ---
 
@@ -41,6 +41,7 @@ Write the minimum code that solves the stated problem. Nothing more.
 - No flexibility or configurability that was not requested.
 - No error handling for scenarios that cannot happen — trust framework and internal guarantees.
 - No design for hypothetical future requirements. Three similar lines beat a premature abstraction.
+- Nothing declared without a consumer in the same change: a dependency in the manifest, an export, a config key, a parameter, a port method. A package installed "for later" is removed (Obligations in `engineering-governance`).
 
 **Carve-out — playbook-mandated patterns are never over-engineering:** security headers and practices (e.g., Helmet, CORS, HSTS), idempotency keys, rate limiting (see `engineering-concurrency`), retry, circuit breaker (see `engineering-error-handling`), domain exception hierarchy, and distributed system patterns mandated by the playbook are baseline requirements. Never skip them citing "minimum code" — the mandate overrides this rule.
 
