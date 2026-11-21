@@ -39,7 +39,7 @@ SPEC_TOKEN = '[SPEC CONFIRMED]'
 # language-agnostic, so the gates must be too — an extension missing here silently
 # disables the skill gate, the spec gate and the validation gate for that language.
 _CODE_EXT = (
-    r'\.(?:tsx|ts|jsx|js|mjs|cjs|vue|svelte'
+    r'\.(?:tsx|ts|mts|cts|jsx|js|mjs|cjs|vue|svelte'
     r'|pyi|py|rb|php|go|java|kts|kt|scala|sc|swift|dart|rs|cs|fs'
     r'|exs|ex|erl|clj|cljs|hs|lua|zig|sh|bash|zsh'
     r'|cpp|cxx|cc|hpp|hxx|mm|c|h|m)\b'
@@ -738,6 +738,7 @@ _NO_SCRIPT_FILE_OPTS = frozenset({'-c', '-e', '-E', '-m', '-r', '-p', '-', '--ev
 _INTERPRETER_VALUE_OPTS = frozenset({'-W', '-X', '--require', '-I', '--import', '--loader'})
 _SCRIPT_EXT_LANGUAGE = {
     '.py': 'python', '.js': 'other', '.mjs': 'other', '.cjs': 'other', '.ts': 'other',
+    '.mts': 'other', '.cts': 'other',
     '.rb': 'other', '.pl': 'other', '.php': 'other', '.sh': 'shell', '.bash': 'shell',
 }
 _PY_RECURSIVE_DELETE_CALLS = frozenset({'rmtree', 'remove_tree'})
