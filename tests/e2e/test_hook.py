@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.parse
 import uuid
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,6 +30,47 @@ import context_guard  # noqa: E402  -- constants only; the hook runs as a subpro
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+# Deviation reports (hooks/deviation_report.py) read the user's real preference
+# and may start `gh`: every hook this module runs gets its own report store and
+# a `gh` that only fails, so no test can send a report or spend the one-time
+# notice that reports exist.
+_REPORT_SANDBOX = tempfile.mkdtemp(prefix='pb_report_sandbox_')
+
+
+def _fake_gh(bin_dir: str, log: str, issues: str = '[]', exit_code: int = 0) -> None:
+    """A `gh` on PATH that records each call (argv, and the body file's text)
+    in `log` and answers as gh documents: JSON for `issue list --json`, the
+    issue URL for `issue create`."""
+    os.makedirs(bin_dir, exist_ok=True)
+    script = os.path.join(bin_dir, 'gh')
+    with open(script, 'w') as f:
+        f.write(f"""#!{_PYTHON}
+import json, sys
+argv = sys.argv[1:]
+body = ''
+if '--body-file' in argv:
+    body = open(argv[argv.index('--body-file') + 1], encoding='utf-8').read()
+with open({log!r}, 'a') as out:
+    out.write(json.dumps({{'argv': argv, 'body': body}}) + '\\n')
+if {exit_code}:
+    sys.stderr.write('error connecting to api.github.com')
+    sys.exit({exit_code})
+if argv[:2] == ['issue', 'list']:
+    print({issues!r})
+elif argv[:2] == ['issue', 'create']:
+    print('https://github.com/o/r/issues/77')
+""")
+    os.chmod(script, 0o755)
+
+
+_fake_gh(os.path.join(_REPORT_SANDBOX, 'bin'), os.path.join(_REPORT_SANDBOX, 'gh.log'), exit_code=1)
+_HOOK_ENV = {
+    'PLAYBOOK_CONTEXT_LIMIT': '200000',
+    'PLAYBOOK_REPORT_STORE': os.path.join(_REPORT_SANDBOX, 'reports.json'),
+    'PLAYBOOK_REPORT_REPO': 'o/r',
+    'PATH': os.path.join(_REPORT_SANDBOX, 'bin') + os.pathsep + os.environ.get('PATH', ''),
+}
 
 def _state_path(session_id: str) -> str:
     return os.path.expanduser(f'~/.claude/hooks/.state-{session_id}.json')
@@ -50,7 +92,7 @@ def _call(session_id: str, transcript: str, tool_name: str, tool_input: dict,
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        env={**os.environ, 'PLAYBOOK_CONTEXT_LIMIT': '200000'},
+        env={**os.environ, **_HOOK_ENV},
     )
 
 
@@ -737,6 +779,131 @@ class TestDeviationJournal(_HookTest):
         r = self._final_stop(self._BLOCK)
         self.assertNotIn('systemMessage', _out(r))
         self.assertEqual(self._records(), [])
+
+
+class TestDeviationReports(unittest.TestCase):
+    """With `reports` on, the Stop hook queues a reportable deviation and the
+    detached drain sends it through `gh`; without gh the user gets a link; with
+    `reports` off nothing leaves and the user is told once that reports exist.
+    HOME is isolated: the preference, the store and the journal are this test's."""
+
+    _QUOTE = 'The same key with another fingerprint is refused with `422`, with no effect'
+    _PRIVATE = ('/srv/acme-bank/ledger', 'AcmeLedgerService', 'transfer-v2 flow')
+    _DRAIN_TIMEOUT_S = 20.0
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix='pb_reports_')
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        self.state_dir = os.path.join(self.home, '.claude', 'hooks')
+        os.makedirs(self.state_dir)
+        self.store = os.path.join(self.state_dir, '.deviation-reports.json')
+        self.gh_log = os.path.join(self.home, 'gh.log')
+        self.bin = os.path.join(self.home, 'bin')
+        os.makedirs(self.bin)
+        os.symlink(shutil.which('git') or '/usr/bin/git', os.path.join(self.bin, 'git'))
+        self.transcript = os.path.join(self.home, 'session.jsonl')
+        self.session_id = f'pbtest-{uuid.uuid4().hex[:12]}'
+
+    def _prefs(self, **values: object) -> None:
+        with open(os.path.join(self.state_dir, '.playbook-prefs.json'), 'w') as f:
+            json.dump(values, f)
+
+    def _block(self, rule: str) -> str:
+        return ('[PLAYBOOK-DEVIATION]\n'
+                f'skill: engineering-concurrency\nrule: Idempotency — {rule}\naction: deviated\n'
+                f'instead: a cache key inside {self._PRIVATE[1]}\n'
+                f'why: the {self._PRIVATE[2]} at {self._PRIVATE[0]} needs it\n'
+                '[/PLAYBOOK-DEVIATION]')
+
+    def _env(self, with_gh: bool) -> dict[str, str]:
+        if with_gh:
+            _fake_gh(self.bin, self.gh_log)
+        env = {k: v for k, v in os.environ.items() if not k.startswith('PLAYBOOK_REPORT')}
+        env.update({'HOME': self.home, 'PATH': self.bin, 'PLAYBOOK_CONTEXT_LIMIT': '200000',
+                    'PLAYBOOK_REPORT_REPO': 'o/r', 'CLAUDE_CODE_SESSION_ATTENDED': '1',
+                    'PLAYBOOK_DEVIATION_JOURNAL': os.path.join(self.home, 'deviations.jsonl')})
+        return env
+
+    def _stop(self, message: str, with_gh: bool = True) -> dict:
+        with open(self.transcript, 'a') as f:
+            f.write(_ul('add idempotency'))
+            f.write(json.dumps({'type': 'assistant', 'message': {
+                'model': 'claude-opus-5-5', 'content': [{'type': 'text', 'text': message}]}}) + '\n')
+        payload = {'session_id': self.session_id, 'transcript_path': self.transcript,
+                   'hook_event_name': 'Stop', 'stop_hook_active': False,
+                   'last_assistant_message': message, 'cwd': self._PRIVATE[0]}
+        r = subprocess.run([_PYTHON, _HOOK], input=json.dumps(payload), capture_output=True,
+                           text=True, env=self._env(with_gh))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return _out(r)
+
+    def _gh_calls(self, until: str = '') -> list[dict]:
+        deadline = time.monotonic() + (self._DRAIN_TIMEOUT_S if until else 0)
+        while True:
+            calls = []
+            if os.path.exists(self.gh_log):
+                with open(self.gh_log) as f:
+                    calls = [json.loads(line) for line in f]
+            if not until or any(c['argv'][:2] == until.split() for c in calls) or time.monotonic() > deadline:
+                return calls
+            time.sleep(0.2)
+
+    def test_on_with_gh_the_drain_opens_an_issue_with_no_project_data(self):
+        self._prefs(reports=True)
+        notice = self._stop('Done.\n\n' + self._block(self._QUOTE)).get('systemMessage', '')
+        self.assertIn('[playbook:deviation]', notice)
+        calls = self._gh_calls(until='issue create')
+        create = next((c for c in calls if c['argv'][:2] == ['issue', 'create']), None)
+        self.assertIsNotNone(create, f'the detached drain never created the issue: {calls}')
+        self.assertEqual(create['argv'][create['argv'].index('--repo') + 1], 'o/r')
+        sent = json.dumps(calls)
+        self.assertIn('The same key with another fingerprint is refused with 422', create['body'])
+        self.assertIn('claude-opus-5-5', create['body'])
+        for value in (*self._PRIVATE, 'cache key', self.session_id, self.home):
+            with self.subTest(value=value):
+                self.assertNotIn(value, sent)
+
+    def test_on_without_gh_the_notice_carries_a_prefilled_link(self):
+        self._prefs(reports=True)
+        notice = self._stop(self._block(self._QUOTE), with_gh=False).get('systemMessage', '')
+        self.assertIn('https://github.com/o/r/issues/new?', notice)
+        self.assertIn('deviation-report', urllib.parse.unquote_plus(notice))
+        for value in (*self._PRIVATE, 'cache key'):
+            with self.subTest(value=value):
+                self.assertNotIn(value, urllib.parse.unquote_plus(notice))
+        self.assertEqual(self._gh_calls(), [])
+
+    def test_a_paraphrased_rule_is_recorded_but_never_sent(self):
+        self._prefs(reports=True)
+        notice = self._stop(self._block('keys must not be reused with a different body')).get('systemMessage', '')
+        self.assertIn('[playbook:deviation]', notice)
+        self.assertNotIn('issues/new', notice)
+        time.sleep(1)
+        self.assertEqual(self._gh_calls(), [])
+        self.assertFalse(os.path.exists(self.store) and json.load(open(self.store)).get('pending'))
+
+    def test_off_by_default_nothing_leaves_and_the_user_is_told_once(self):
+        first = self._stop(self._block(self._QUOTE)).get('systemMessage', '')
+        self.assertIn('/playbook-config can turn them on', first)
+        second = self._stop(self._block(self._QUOTE + '.')).get('systemMessage', '')
+        self.assertNotIn('/playbook-config can turn them on', second)
+        time.sleep(1)
+        self.assertEqual(self._gh_calls(), [])
+
+    def test_session_start_shows_the_links_gh_could_not_send_once(self):
+        self._prefs(reports=True)
+        import deviation_report
+        report = deviation_report.build_report(
+            {'skill': 'engineering-concurrency', 'rule': self._QUOTE, 'action': 'deviated', 'why': 'x'},
+            '4.0.0', 'claude-opus-5-5', 'claude', '4.1.0')
+        with deviation_report._locked(self.store) as store:
+            store['needs_link'] = [report]
+        start = os.path.join(_ROOT, 'hooks', 'session_start.py')
+        payload = json.dumps({'session_id': self.session_id, 'source': 'startup', 'cwd': self.home})
+        runs = [subprocess.run([_PYTHON, start], input=payload, capture_output=True, text=True,
+                               env=self._env(with_gh=True)) for _ in range(2)]
+        self.assertIn('https://github.com/o/r/issues/new?', _out(runs[0]).get('systemMessage', ''))
+        self.assertNotIn('issues/new', _out(runs[1]).get('systemMessage', ''))
 
 
 class TestSubagentIsolation(_HookTest):

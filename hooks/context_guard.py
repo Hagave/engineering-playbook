@@ -1296,11 +1296,13 @@ def _capture_deviations(state: dict, transcript: str | None) -> str:
     loaded = state.get('skills') if isinstance(state.get('skills'), list) else []
     journal = playbook_core.deviation_journal_path(STATE_DIR)
     lines: list[str] = []
+    new: list[playbook_core.Deviation] = []
     for deviation in deviations:
         digest = hashlib.sha256(deviation.block.encode('utf-8')).hexdigest()[:16]
         if digest in seen:
             continue
         seen.append(digest)
+        new.append(deviation)
         fields = deviation.fields
         skill = fields.get('skill', '')
         version = playbook_core.skill_version(skill)
@@ -1320,8 +1322,54 @@ def _capture_deviations(state: dict, transcript: str | None) -> str:
     if not lines:
         return ''
     who = f' (subagent {_AGENT_ID})' if _AGENT_ID else ''
-    return (f'[playbook:deviation] The model reported {len(lines)} deviation(s) from a playbook '
-            f'rule{who}, recorded in {journal}:\n' + '\n'.join(lines))
+    notice = (f'[playbook:deviation] The model reported {len(lines)} deviation(s) from a playbook '
+              f'rule{who}, recorded in {journal}:\n' + '\n'.join(lines))
+    return notice + _report_deviations(new, transcript)
+
+
+def _turn_model(transcript: str | None) -> str:
+    """The model of the turn's last assistant message, '' when none is found."""
+    if not transcript or not os.path.exists(transcript):
+        return ''
+    for line in reversed(_read_tail_lines(transcript)):
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get('type') == 'assistant' and isinstance(obj.get('message'), dict):
+            return str(obj['message'].get('model') or '')
+    return ''
+
+
+def _report_deviations(deviations: list[playbook_core.Deviation], transcript: str | None) -> str:
+    """With the `reports` setting on, queue the new deviations for the maintainer
+    (hooks/deviation_report.py) and return what the user must see: the links of
+    reports gh cannot send. With it off, the one-time line that it exists.
+    Sending runs detached; this never waits on the network."""
+    try:
+        import deviation_report
+        store = deviation_report.store_path(STATE_DIR)
+        if not playbook_core.load_prefs(STATE_DIR).get('reports'):
+            if deviation_report.hint_once(store):
+                return ('\nDeviation reports to the playbook maintainer are off; '
+                        '/playbook-config can turn them on.')
+            return ''
+        model, version = _turn_model(transcript), deviation_report.playbook_version()
+        reports = [r for r in (deviation_report.build_report(
+            d.fields, playbook_core.skill_version(d.fields.get('skill', '')), model, 'claude', version)
+            for d in deviations if not d.incomplete) if r]
+        if not reports:
+            return ''
+        has_gh = deviation_report.gh_available()
+        shown = deviation_report.enqueue(store, reports, has_gh)
+        if has_gh:
+            deviation_report.start_drain(STATE_DIR)
+        if not shown:
+            return ''
+        return ('\nReports to the playbook maintainer that gh cannot send now: open each link to send it.\n'
+                + '\n'.join(deviation_report.link_lines(shown)))
+    except Exception:  # noqa: BLE001 -- a report must never block a turn from ending
+        return ''
 
 
 def _refresh_carryover(state: dict, transcript: str | None) -> None:

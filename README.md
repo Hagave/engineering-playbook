@@ -354,6 +354,8 @@ rows at the end.
 | **Opt-in:** the NestJS security templates, taken from the skill's own code blocks, compile under `strict` against the release of every package a new project installs today (the stable `latest` tag, else the newest stable release), keep a forged `X-Forwarded-For` out of the rate limit, refuse `TRUST_PROXY=true`, and serve a strict CSP on every API route. The `template-latest` workflow runs every template test weekly and opens an issue when a release breaks one | `PLAYBOOK_TEMPLATE_IT=1 python3 -m unittest tests.e2e.test_nest_security_template -v` | node and npm with network access, about a minute |
 | **Opt-in:** the Docker templates for Node (`engineering-docker/references/node.md` and the core compose), taken from the skill's own code blocks, build and run a minimal Prisma app: the `migrate` service applies the migration and exits 0 before the app starts, the production command runs no migration, the app answers as a non-root user, and `docker compose stop` ends it through SIGTERM. The base image is the newest Node.js LTS line, and the prisma CLI and adapter are installed at the client's version | `PLAYBOOK_TEMPLATE_IT=1 python3 -m unittest tests.e2e.test_docker_node_template -v` | Docker with Compose, npm and network access, a few minutes |
 | **Opt-in:** the NestJS environment validation templates (`engineering-nestjs` Configuration and `engineering-arch-hexagonal` Env validation), taken from the skills' code blocks, compile under the playbook's strict flags and boot beside the machine's own variables; a missing or invalid variable stops the boot with every missing one named, and an undeclared one is not served | `PLAYBOOK_TEMPLATE_IT=1 python3 -m unittest tests.e2e.test_nest_config_template -v` | node and npm with network access, under a minute |
+| A deviation report carries only the skill's own words and fixed fields (project data put in every field the model writes never reaches the report, the issue or the link), is queued once, opens at most five issues a day, turns into a +1 on a rule already reported, retries with backoff and gives a link when gh has no login | `python3 -m unittest tests.unit.test_deviation_report tests.e2e.test_hook.TestDeviationReports -v` | Python 3.10+ (a stand-in `gh`) |
+| **Opt-in:** a deviation report through the real `gh`: the issue is opened, found by its fingerprint, and a second report becomes a +1; the issue is closed at the end | `PLAYBOOK_REPORT_IT=1 PLAYBOOK_REPORT_REPO=<owner>/<repo> python3 -m unittest tests.e2e.test_report_gh -v` | `gh` logged in, a repository of yours (never the playbook's) |
 | **Opt-in:** a real lab run against a throwaway app scans it and leaves no container, network or volume behind | `python3 lab/run.py --setup`, then `PLAYBOOK_LAB_IT=1 python3 -m unittest tests.e2e.test_lab_integration -v` | Docker with Compose 2.20+, the ZAP image (about 1.2 GB), a few minutes |
 | **Opt-in:** a review of 13 intentionally vulnerable diffs (one per fiche) names the findings each one expects | `bash tests/behavioral/run_behavioral.sh 06` (one fixture; `06` to `18`), or `bash tests/behavioral/run_behavioral.sh` for every prompt | the `claude` CLI, an API key, the plugin at `~/.engineering-playbook`; spends tokens, and results are probabilistic (a miss in most of 10 runs is a regression) |
 
@@ -995,7 +997,7 @@ wrong, reports it in a block of its response text (format in
 ```
 [PLAYBOOK-DEVIATION]
 skill: engineering-concurrency
-rule: the rule as the skill states it
+rule: the rule quoted word for word from the skill, then its section
 action: deviated | followed
 instead: what it did in its place
 why: the reason
@@ -1010,6 +1012,30 @@ that skill was loaded in the session. The user sees one line per block, and
 the line is also shown on a turn a gate blocks. `PLAYBOOK_DEVIATION_JOURNAL`
 moves the file. It is a record, not a gate. It holds only what the model chose
 to report: a rule broken in silence is not in it.
+
+#### Deviation reports to the maintainer (opt-in)
+
+Off by default, Claude Code only, turned on with `reports` in
+`/playbook-config` (or in the guided setup). Nothing turns it on for the user:
+someone who installed before the setting existed stays off.
+
+- **What is sent.** The skill, its version and section, the rule only as a
+  quote the hook finds word for word in the installed skill's text, the action,
+  the playbook version, the harness and the model; for a deviation whose `why`
+  starts with `version <name>@<version>:`, that pair. A paraphrased rule stays
+  in the local journal. The project folder, code, session, `instead` and the
+  rest of `why` are never read into the report.
+- **How.** The Stop hook queues the report and starts
+  `hooks/deviation_report.py drain` detached, so the turn never waits on the
+  network. The drain searches the playbook's issues for the report's
+  fingerprint (skill + version + quote): a match gets a +1 reaction, otherwise
+  `gh issue create` opens one, **with the user's own GitHub account**. At most
+  five issues a day; a failure is retried with backoff.
+- **Without gh**, or without a login, the user is shown a pre-filled
+  `issues/new` link instead, at that Stop or at the next session start.
+- `~/.claude/hooks/.deviation-reports.json` holds the queue and the
+  fingerprints already sent. `PLAYBOOK_REPORT_STORE` moves it;
+  `PLAYBOOK_REPORT_REPO` points the reports at another repository (tests).
 
 #### Destructive operations
 
@@ -1268,7 +1294,7 @@ language-agnostic.
 | --- | --- |
 | `/playbook-off` | Suspends all governance rules for the session (prototyping, exploration) |
 | `/playbook-on` | Re-activates rules after a suspension |
-| `/playbook-config` | Settings menu: prose level, known-failure warnings, cost budgets; session status; Learn (mines this project's failures and writes rules to `CLAUDE.md`). In Claude Code, typing it opens a numbered menu above the prompt (`hooks/config_panel.tsx`): type a number and Enter (0 goes back or exits). Settings change with no model call; Status and Learn hand the request to the model, since both need the session's context. |
+| `/playbook-config` | Settings menu: prose level, known-failure warnings, cost budgets, menu language, deviation reports to the maintainer (off by default); session status; Learn (mines this project's failures and writes rules to `CLAUDE.md`). In Claude Code, typing it opens a numbered menu above the prompt (`hooks/config_panel.tsx`): type a number and Enter (0 goes back or exits). Settings change with no model call; Status and Learn hand the request to the model, since both need the session's context. |
 
 Codex CLI does not expose slash commands for installed skills — invoke the
 corresponding skill by name in the prompt or via the Codex skill surface.

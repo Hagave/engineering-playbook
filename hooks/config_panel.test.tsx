@@ -56,6 +56,7 @@ const SNAPSHOT = {
         { value: 'high', label: 'high' },
       ],
       custom: false,
+      group: '',
     },
     {
       key: 'watch',
@@ -69,8 +70,10 @@ const SNAPSHOT = {
         { value: 'off', label: 'off' },
       ],
       custom: false,
+      group: '',
     },
   ],
+  groups: [] as { key: string; label: string; help: string }[],
 }
 
 const BUDGET = {
@@ -87,6 +90,7 @@ const BUDGET = {
     { value: '850000', label: '850k' },
   ],
   custom: true,
+  group: '',
 }
 
 // What the engine would stamp on a command the person typed.
@@ -442,6 +446,66 @@ test('a prompt the menu hands the model asks for the answer in the person langua
   await $.prompt.submit(sent('4'))
   expect(toModel.at(-1)).toContain('engineering-learn')
   expect(toModel.at(-1)).toContain('Answer in Brazilian Portuguese.')
+})
+
+const GROUPED = {
+  ...SNAPSHOT,
+  settings: [
+    ...SNAPSHOT.settings,
+    { ...BUDGET, group: 'budgets' },
+    { ...BUDGET, key: 'claude_md_budget', label: 'CLAUDE.md budget', custom: false, group: 'budgets' },
+    {
+      ...SNAPSHOT.settings[1],
+      key: 'reports',
+      label: 'Deviation reports to the maintainer',
+      group: '',
+    },
+  ],
+  groups: [{ key: 'budgets', label: 'Cost budgets', help: 'The CLAUDE.md size and the context size.' }],
+}
+
+test('a group of settings is one main row that opens a screen of its own', async ($, on) => {
+  const sets: string[][] = []
+  on('process.run', (_, e) => {
+    if (e.argv.includes('set')) {
+      sets.push(e.argv.slice(-2))
+      return exited(0, `[playbook:config] done\n${EFFECT}`)
+    }
+    return exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(GROUPED))
+  })
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Button', key: 'entry-3' }))?.props.label).toBe('Cost budgets')
+  expect((await band.find({ type: 'Button', key: 'entry-4' }))?.props.label).toBe(
+    'Deviation reports to the maintainer: off',
+  )
+  expect((await band.find({ type: 'Button', key: 'entry-5' }))?.props.label).toBe('Status')
+  await band.unmount()
+
+  await $.prompt.submit(sent('3'))
+  const group = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await group.find({ type: 'Text', text: /Cost budgets/ }))?.text).toBeTruthy()
+  expect((await group.find({ type: 'Button', key: 'entry-1' }))?.props.label).toContain('Context budget')
+  expect((await group.find({ type: 'Button', key: 'entry-2' }))?.props.label).toContain('CLAUDE.md budget')
+  expect((await group.find({ type: 'Button', key: 'entry-0' }))?.props.label).toBe('Back')
+  await group.unmount()
+
+  await $.prompt.submit(sent('2'))
+  await $.prompt.submit(sent('1'))
+  expect(sets.at(-1)).toEqual(['claude_md_budget', '0'])
+})
+
+test('0 on a group screen goes back to the main menu', async ($, on) => {
+  on('process.run', (_, e) => exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(GROUPED)))
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('3'))
+  await $.prompt.submit(sent('0'))
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Button', key: 'entry-1' }))?.props.label).toContain('Prose level')
 })
 
 test('settings the script cannot read leave the request to the skill', async ($, on) => {

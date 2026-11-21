@@ -303,6 +303,21 @@ def _carryover(input_data: dict, source: str) -> str:
         return ''
 
 
+def _report_links() -> str:
+    """With deviation reports on: start the detached drain of what earlier
+    sessions queued, and return the links of the reports gh could not send
+    (no login, or retries spent), shown once."""
+    if not playbook_core.load_prefs(STATE_DIR).get('reports'):
+        return ''
+    import deviation_report
+    deviation_report.start_drain(STATE_DIR)
+    links = deviation_report.take_links(deviation_report.store_path(STATE_DIR))
+    if not links:
+        return ''
+    return ('[playbook] Deviation reports gh could not send (no login, or the network failed): '
+            'open each link to send it.\n' + '\n'.join(deviation_report.link_lines(links)))
+
+
 def main() -> None:
     try:
         input_data = json.load(sys.stdin)
@@ -377,6 +392,12 @@ def main() -> None:
             hint = ''  # fail-open: a suggestion is never worth losing the session context
         if hint:
             output['systemMessage'] = hint
+        try:
+            links = _report_links()
+        except Exception:
+            links = ''  # fail-open: a report is never worth losing the session context
+        if links:
+            output['systemMessage'] = '\n\n'.join(filter(None, (str(output.get('systemMessage') or ''), links)))
 
     sys.stdout.write(json.dumps(output, separators=(',', ':')))
     sys.exit(0)
