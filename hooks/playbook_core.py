@@ -603,7 +603,9 @@ def shell_segments(command: str) -> list[list[str]] | None:
     return segments
 
 
-def _tokenize_segments(command: str) -> list[list[str]] | None:
+def _statements(command: str) -> list[tuple[str, list[str]]] | None:
+    """Simple commands of `command` (substitutions already lifted), each with
+    the separator token that comes before it ('' for the first)."""
     text = _unquoted_newlines_as_separators(command)
     lexer = shlex.shlex(text, posix=True, punctuation_chars=_SHELL_PUNCT)
     lexer.whitespace_split = True
@@ -612,18 +614,120 @@ def _tokenize_segments(command: str) -> list[list[str]] | None:
         tokens = list(lexer)
     except ValueError:
         return None
-    segments: list[list[str]] = []
+    statements: list[tuple[str, list[str]]] = []
     current: list[str] = []
+    separator = ''
     for token in tokens:
-        if token and all(ch in _SHELL_PUNCT for ch in token):
+        # Inside `[[ ... ]]`, `&&`, `||` and parentheses are operators of the
+        # test, not command separators: split there, `[[ "$t" > a && "$t" < b ]]`
+        # made `$t < b ]]` a command whose program was decided at run time.
+        in_test = bool(current) and current[0] == '[[' and current[-1] != ']]'
+        if token and all(ch in _SHELL_PUNCT for ch in token) and not in_test:
             if current:
-                segments.append(current)
+                statements.append((separator, current))
             current = []
+            separator = token
         else:
             current.append(token)
     if current:
-        segments.append(current)
-    return segments
+        statements.append((separator, current))
+    return statements
+
+
+def _tokenize_segments(command: str) -> list[list[str]] | None:
+    statements = _statements(command)
+    return None if statements is None else [words for _, words in statements]
+
+
+_BLOCK_OPENERS = frozenset({'if', 'for', 'while', 'until', 'case', 'select', 'function'})
+_BLOCK_CLOSERS = frozenset({'fi', 'done', 'esac'})
+# Statements that can assign a variable of the running shell where the text
+# does not show it.
+_CURRENT_SHELL_RUNNERS = frozenset({'source', '.', 'eval'})
+# Changes how the shell splits an expanded value into words: `IFS=x; P=rmx-rf;
+# $P /` runs `rm -rf /`.
+_WORD_SPLITTING_RE = re.compile(r'\bIFS\b')
+_VAR_REF_RE = re.compile(r'\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))')
+# A value with any of these is not one fixed command once the shell expands it.
+_NON_LITERAL_VALUE_CHARS = frozenset(';&|<>()*?[`$')
+
+
+def _literal_value(value: str, bound: dict[str, str]) -> str | None:
+    """`value` with its references to names already bound expanded, or None
+    when the shell would compute it at run time."""
+    parts: list[str] = []
+    position = 0
+    for match in _VAR_REF_RE.finditer(value):
+        name = match.group(1) or match.group(2)
+        if name not in bound:
+            return None
+        parts += [value[position:match.start()], bound[name]]
+        position = match.end()
+    text = ''.join(parts) + value[position:]
+    if not text.strip() or any(ch in _NON_LITERAL_VALUE_CHARS for ch in text):
+        return None
+    return text
+
+
+def _assigned_once(name: str, command: str) -> bool:
+    """Whether `name` appears in `command` once outside `$name` / `${name}`
+    references: its one assignment. Any other appearance (`for name`, `read
+    name`, a second assignment, `unset name`) may change it."""
+    return len(re.findall(rf'(?<![\w${{]){re.escape(name)}(?!\w)', command)) == 1
+
+
+def resolve_literal_commands(command: str) -> str:
+    """`command` with each command word that is a variable bound to a literal
+    command earlier in it (`P="docker exec db psql"; $P -c "select 1"`)
+    replaced by that literal, one simple command per line; `command` itself
+    when it has none.
+
+    A binding counts only where it always runs before the use: a statement of
+    assignments alone, at the top level (not inside `if`, a loop, `case`, a
+    brace group or a subshell), after the start of the command or a `;` (not
+    after `&&`, `||`, `|` or `&`), its value literal (no substitution, no
+    reference to a name not bound the same way, no glob, never empty), the name
+    assigned nowhere else in the command, and no `source`, `.`, `eval` or `IFS`
+    anywhere in it. Anything else leaves the command word decided at run time.
+    Commands inside substitutions are kept as they are."""
+    if _WORD_SPLITTING_RE.search(command):
+        return command
+    outer, inner = _lift_substitutions(command.replace('\\\n', ' '))
+    statements = _statements(outer)
+    if not statements:
+        return command
+    if any(words[0] in _CURRENT_SHELL_RUNNERS for words in
+           (command_words(words) or words for _, words in statements)):
+        return command
+    bound: dict[str, str] = {}
+    depth = 0
+    resolved: list[list[str]] = []
+    changed = False
+    for separator, words in statements:
+        depth += separator.count('(') - separator.count(')')
+        if (depth == 0 and separator in ('', ';')
+                and all(_ENV_ASSIGN_RE.match(word) for word in words)):
+            for word in words:
+                name, value = word.split('=', 1)
+                literal = _literal_value(value, bound)
+                if literal is not None and _assigned_once(name, command):
+                    bound[name] = literal
+        effective = command_words(words)
+        reference = _VAR_REF_RE.fullmatch(effective[0]) if effective else None
+        name = (reference.group(1) or reference.group(2)) if reference else ''
+        if name in bound:
+            words = words[:len(words) - len(effective)] + bound[name].split() + effective[1:]
+            changed = True
+        resolved.append(words)
+        depth += words.count('{') - words.count('}')
+        if words and words[0] in _BLOCK_OPENERS:
+            depth += 1
+        elif words and words[0] in _BLOCK_CLOSERS:
+            depth -= 1
+    if not changed:
+        return command
+    return '\n'.join([' '.join(shlex.quote(word) for word in words) for words in resolved]
+                     + inner)
 
 
 def command_words(segment: list[str]) -> list[str]:
@@ -971,15 +1075,76 @@ def _python_source_paths(tree: ast.AST) -> list[str]:
             and _CODE_PATH_WORD_RE.fullmatch(node.value)]
 
 
+# A name bound once to a directory the script itself creates as temporary:
+# `const dir = fs.mkdtempSync(...)`, `let d = await mkdtemp(...)`.
+_TEXT_TEMP_DIR_RE = re.compile(
+    r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:[\w$]+\s*\.\s*)*'
+    r'mkdtemp(?:Sync)?\s*\(')
+_FIRST_ARGUMENT_NAME_RE = re.compile(r'\(\s*([A-Za-z_$][\w$]*)\s*[,)]')
+
+
+def _text_temp_dirs(text: str) -> set[str]:
+    """Names a script binds to a temporary directory it creates and never
+    rebinds: deleting one removes only what the script made. A name that is
+    also assigned again, a parameter (`(dir) =>`, `function f(dir)`), a loop
+    variable or a `catch` binding is left out: the text does not show scope."""
+    names = set()
+    for name in _TEXT_TEMP_DIR_RE.findall(text):
+        word = re.escape(name)
+        rebound = (len(re.findall(rf'(?<![\w$.]){word}\s*=(?![=>])', text)) != 1
+                   or re.search(rf'\([^()]*(?<![\w$.]){word}(?![\w$])[^()]*\)\s*(?:=>|\{{)', text)
+                   or re.search(rf'(?<![\w$.]){word}\s*=>', text)
+                   or re.search(rf'\bfor\s*\([^)]*(?<![\w$.]){word}(?![\w$])', text)
+                   or re.search(rf'\bcatch\s*\(\s*{word}\b', text))
+        if not rebound:
+            names.add(name)
+    return names
+
+
+def _recursive_delete_in_text(text: str) -> str:
+    """The first recursive-deletion call of a script read as text, other than
+    one on a temporary directory the script created; '' when there is none."""
+    temp_dirs = _text_temp_dirs(text)
+    for match in _RECURSIVE_DELETE_API_RE.finditer(text):
+        argument = _FIRST_ARGUMENT_NAME_RE.search(text, match.start(), match.end() + 120)
+        if argument and argument.start() < match.end() and argument.group(1) in temp_dirs:
+            continue
+        return match.group(0).strip()
+    return ''
+
+
+def _python_temp_dirs(tree: ast.AST) -> set[str]:
+    """Names a Python script binds once, and only, to `tempfile.mkdtemp()`:
+    any other binding of the name (a loop target, `with ... as`, `:=`, a second
+    assignment, a parameter) leaves it out."""
+    stores: dict[str, int] = {}
+    parameters: set[str] = set()
+    temp: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            stores[node.id] = stores.get(node.id, 0) + 1
+        elif isinstance(node, ast.arg):
+            parameters.add(node.arg)
+        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call)
+              and _call_name(node.value.func) == 'mkdtemp'):
+            temp.add(node.targets[0].id)
+    return {name for name in temp if stores.get(name) == 1 and name not in parameters}
+
+
 def _recursive_delete_call(source: ScriptSource) -> str:
     """The recursive-deletion call a python/other script makes, as text; ''
-    when it makes none."""
+    when it makes none. A call on a temporary directory the script itself
+    created (`mkdtemp`) deletes only what the script made, and is not one."""
     if source.language != 'python':
-        match = _RECURSIVE_DELETE_API_RE.search(source.text)
-        return match.group(0).strip() if match else ''
+        return _recursive_delete_in_text(source.text)
     tree = _python_tree(source.text)
+    temp_dirs = _python_temp_dirs(tree) if tree is not None else set()
     for node in ast.walk(tree) if tree is not None else ():
         if isinstance(node, ast.Call) and _call_name(node.func) in _PY_RECURSIVE_DELETE_CALLS:
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Name) and first.id in temp_dirs:
+                continue
             return (ast.get_source_segment(source.text, node) or _call_name(node.func))[:120]
     return ''
 
@@ -2026,14 +2191,15 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
     (decided by the user for 4.0.0; a build directory or node_modules still
     does)."""
     command = strip_heredoc_bodies(command)
-    for line in _pattern_lines(command, disposable_root):
+    expanded = resolve_literal_commands(command) if _depth == 0 else command
+    for line in _pattern_lines(expanded, disposable_root):
         for pattern, effect in DESTRUCTIVE_RULES:
             match = re.search(pattern, line, re.IGNORECASE)
             if match:
                 return _destructive_block(
                     f'Destructive operation detected (`{match.group(0).strip()}`). Show the '
                     'user the exact command and what it destroys.', effect)
-    unknown = unattestable_command(command) if _depth == 0 else ''
+    unknown = unattestable_command(expanded) if _depth == 0 else ''
     if unknown:
         return _destructive_block(
             f'Command decided at run time (`{unknown[:120]}`): its program comes from a '
@@ -2043,10 +2209,10 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
     # Heredoc bodies that are data (a PR body, a doc) are left out: one quoting
     # `node -e "fs.rmSync(dir, opts)"` is text. A heredoc fed to a shell stays.
     for payload in inline_payloads(strip_heredoc_bodies(raw or command)):
-        match = _RECURSIVE_DELETE_API_RE.search(payload)
-        if match:
+        call = _recursive_delete_in_text(payload)
+        if call:
             return _destructive_block(
-                f'Recursive deletion in an interpreter script (`{match.group(0).strip()}`). '
+                f'Recursive deletion in an interpreter script (`{call}`). '
                 'Show the user what it deletes.', 'script_delete')
     if _depth == 0:
         for line in interpreter_shell_commands(raw or command, cwd):
@@ -2055,7 +2221,13 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
                 return {**inner, 'msg': inner['msg'].replace(
                     '[playbook:safety] ', '[playbook:safety] In a command an interpreter script '
                     'runs: ', 1)}
-    for source in script_sources(raw or command, cwd, untracked_only=True):
+    sources = script_sources(raw or command, cwd, untracked_only=True)
+    if expanded != command:
+        # `S=./clean.sh; $S` runs the script the literal names: read it too.
+        seen = {source.origin for source in sources}
+        sources += [source for source in script_sources(expanded, cwd, untracked_only=True)
+                    if source.origin not in seen]
+    for source in sources:
         if source.language == 'shell':
             if _depth >= _SCRIPT_MAX_DEPTH:
                 continue
@@ -3283,6 +3455,227 @@ def typed_words(prompt: str) -> str:
     if NON_PROMPT_RE.match(prompt):
         return ''
     return _PASTED_BLOCK_RE.sub(' ', prompt)
+
+
+# ─── Consent in the chat (auto mode) ─────────────────────────────────────────
+#
+# In auto mode a destructive command is denied without a dialog and queued
+# here, per session; the model goes on with the rest of the work and asks the
+# user in its message. The user's own words, read from the UserPromptSubmit
+# payload (never the transcript), approve it, and the model then runs the
+# exact command once.
+
+CONSENT_PENDING_MAX = 20
+_CONSENT_MAX_AGE_S = 7 * 24 * 3600
+_CONSENT_COMMAND_KEPT = 2000
+
+_DELETE_INFINITIVE = r'(?:apagar|remover|deletar|excluir|tirar|limpar|borrar|eliminar|quitar)'
+_DELETE_IMPERATIVE = (r'(?:apag(?:a|ue)|remov[ae]|delet[ae]|exclu[ai]|tir[ae]|limp[ae]'
+                      r'|borr[ae]|elimin[ae]|quit[ae])')
+_DELETE_EN = r'(?:delete|remove|erase|wipe|drop)'
+_OBJECT_WORD = (r'(?:isso|isto|ele|ela|eles|elas|ess[ea]s?|est[ea]s?|aquilo|tudo|os\s+dois|as\s+duas'
+                r'|tod[oa]s|it|them|that|those|this|these|both|all|eso|esto|todo)')
+# A consent names the deletion: "pode apagar", "apaga isso", "yes, delete it".
+# A bare verb is not one: "remova o import" while a removal is queued is an
+# instruction about code, not an answer to the queue.
+CONSENT_RE = re.compile(
+    rf'\bpode[ms]?\s+(?:sim\s+)?(?:j[áa]\s+)?{_DELETE_INFINITIVE}\b'
+    rf'|\bpuedes?\s+(?:s[ií]\s+)?{_DELETE_INFINITIVE}\b'
+    rf'|\b{_DELETE_IMPERATIVE}\s+{_OBJECT_WORD}\b'
+    rf'|\bsim[,!.]?\s+(?:pode\s+)?{_DELETE_IMPERATIVE}\b'
+    rf'|\b(?:you\s+)?(?:can|may)\s+{_DELETE_EN}\b'
+    rf'|\byes[,!.]?\s+(?:please\s+)?{_DELETE_EN}\b'
+    rf'|\b{_DELETE_EN}\s+{_OBJECT_WORD}\b',
+    re.IGNORECASE)
+# A negation just before the consent words turns them into a refusal.
+_CONSENT_NEGATION_RE = re.compile(
+    r"\b(?:n[ãa]o|nem|nunca|jamais|no|not|never|don'?t|do\s+not)\b[^.!?\n]{0,25}$",
+    re.IGNORECASE)
+_CONSENT_ID_RE = re.compile(r'#(\d{1,4})\b')
+
+
+class ConsentReading(NamedTuple):
+    approves: bool
+    refuses: bool
+    ids: frozenset[int]
+
+
+def read_consent(text: str) -> ConsentReading:
+    """What the user's own words say about the queued removals: an approval,
+    a refusal (a negated consent), both, or neither; and the `#n` numbers they
+    name, which narrow an approval to those."""
+    approves = refuses = False
+    for match in CONSENT_RE.finditer(text):
+        if text[match.end():match.end() + 2].lstrip().startswith('?'):
+            continue  # "pode apagar?" asks, it does not answer
+        if _CONSENT_NEGATION_RE.search(text[:match.start()]):
+            refuses = True
+        else:
+            approves = True
+    return ConsentReading(approves, refuses,
+                          frozenset(int(n) for n in _CONSENT_ID_RE.findall(text)))
+
+
+_CONSENT_FILE_PREFIX = '.consent-'
+COMMAND_SHOWN_CHARS = 300
+
+
+def shown_command(command: str) -> str:
+    """A command as the user is shown it: cut, with an ellipsis, past
+    COMMAND_SHOWN_CHARS."""
+    if len(command) <= COMMAND_SHOWN_CHARS:
+        return command
+    return command[:COMMAND_SHOWN_CHARS] + '…'
+
+
+def consent_path(state_dir: str, session_id: str) -> str:
+    return os.path.join(state_dir, f'{_CONSENT_FILE_PREFIX}{session_id}.json')
+
+
+def touches_consent_queue(tool_name: str, tool_input: dict) -> bool:
+    """Whether a tool call names the consent queue's files. The queue is the
+    user's answer; the model reading or writing it could approve itself. A
+    path the shell computes (`.con"sent"-`) is not seen: a known gap."""
+    if tool_name == 'Bash':
+        return _CONSENT_FILE_PREFIX in str(tool_input.get('command') or '')
+    path = tool_input.get('file_path') or tool_input.get('notebook_path') or ''
+    return os.path.basename(str(path)).startswith(_CONSENT_FILE_PREFIX)
+
+
+@contextlib.contextmanager
+def _file_lock(path: str):
+    """An exclusive lock on `path`.lock where the platform has flock: the gate
+    queuing a command and the prompt hook approving it may run at once."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    with open(path + '.lock', 'a') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _command_key(command: str) -> str:
+    return hashlib.sha256(command.encode('utf-8', 'replace')).hexdigest()
+
+
+def _prune_consent_files(state_dir: str) -> None:
+    cutoff = time.time() - _CONSENT_MAX_AGE_S
+    for path in glob.glob(os.path.join(glob.escape(state_dir), f'{_CONSENT_FILE_PREFIX}*.json')):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                if os.path.exists(path + '.lock'):
+                    os.remove(path + '.lock')
+        except OSError:
+            continue
+
+
+def _consent_entries(data: dict, key: str) -> list[dict]:
+    entries = data.get(key)
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+
+
+def consent_request(state_dir: str, session_id: str, command: str, effect: str) -> int:
+    """Queue `command` for the user's approval and return its number; the same
+    command queued again keeps its number."""
+    os.makedirs(state_dir, exist_ok=True)
+    _prune_consent_files(state_dir)
+    path = consent_path(state_dir, session_id)
+    key = _command_key(command)
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        for entry in pending:
+            if entry.get('key') == key:
+                return _consent_number(entry)
+        next_id = data.get('next_id')
+        number = next_id if isinstance(next_id, int) and next_id > 0 else 1
+        pending.append({'id': number, 'key': key, 'command': command[:_CONSENT_COMMAND_KEPT],
+                        'effect': effect, 'ts': time.time()})
+        data['pending'] = pending[-CONSENT_PENDING_MAX:]
+        data['next_id'] = number + 1
+        save_state(path, data)
+    return number
+
+
+def consent_take(state_dir: str, session_id: str, command: str, use: bool = True) -> bool:
+    """Whether the user approved `command` in the chat. With `use`, the
+    approval is used up by this call, so the command runs once; without it
+    the approval is only looked at, for a caller that may still deny."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return False
+    key = _command_key(command)
+    with _file_lock(path):
+        data = load_state(path)
+        approved = _consent_entries(data, 'approved')
+        if not any(entry.get('key') == key for entry in approved):
+            return False
+        if use:
+            data['approved'] = [entry for entry in approved if entry.get('key') != key]
+            save_state(path, data)
+    return True
+
+
+def consent_mark_turn_end(state_dir: str, session_id: str) -> None:
+    """Record that a turn of the main session ended: what was queued before it
+    is what the model could have listed to the user in that turn's messages."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return
+    with _file_lock(path):
+        data = load_state(path)
+        data['turn_end'] = time.time()
+        save_state(path, data)
+
+
+def _consent_number(entry: dict) -> int:
+    value = entry.get('id')
+    return value if isinstance(value, int) else 0
+
+
+class ConsentAnswer(NamedTuple):
+    approved: list[dict]
+    still_pending: list[dict]
+    ambiguous: bool
+
+
+def consent_answer(state_dir: str, session_id: str, text: str) -> ConsentAnswer:
+    """Apply what the user wrote (`text`, their own words) to the queue: an
+    approval moves the queued commands it covers to approved — all of those
+    queued before the last turn ended (the ones the model could have shown the
+    user), or the `#n` named among them. A message that both approves and
+    refuses, or names a number not among them, approves nothing."""
+    path = consent_path(state_dir, session_id)
+    if not text or not os.path.exists(path):
+        return ConsentAnswer([], [], False)
+    reading = read_consent(text)
+    if not reading.approves:
+        return ConsentAnswer([], [], False)
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        if not pending:
+            return ConsentAnswer([], [], False)
+        turn_end = data.get('turn_end')
+        shown = [entry for entry in pending if isinstance(turn_end, (int, float))
+                 and isinstance(entry.get('ts'), (int, float)) and entry['ts'] <= turn_end]
+        if reading.refuses or not shown:
+            return ConsentAnswer([], pending, True)
+        chosen = [entry for entry in shown
+                  if not reading.ids or _consent_number(entry) in reading.ids]
+        if not chosen or (reading.ids - {_consent_number(entry) for entry in shown}):
+            return ConsentAnswer([], pending, True)
+        chosen_ids = {entry.get('id') for entry in chosen}
+        data['pending'] = [entry for entry in pending if entry.get('id') not in chosen_ids]
+        data['approved'] = (_consent_entries(data, 'approved') + chosen)[-CONSENT_PENDING_MAX:]
+        save_state(path, data)
+    return ConsentAnswer(chosen, data['pending'], False)
 
 
 GIT_PUSH_RE = re.compile(_GIT_PREFIX + r'push\b', re.IGNORECASE)

@@ -36,6 +36,7 @@ last write (the runner agent exists to run it cheaply), read from the
 subagent's state file; nothing ever writes another agent's state.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -839,8 +840,6 @@ def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
 # acceptEdits (which auto-approves `rm`) and plan are not documented for it.
 _DIALOG_MODES = frozenset({'default', 'auto'})
 
-_COMMAND_SHOWN_CHARS = 300
-
 
 def _no_dialog_reason(input_data: dict) -> str:
     """Why a permission dialog for this call cannot be trusted to reach the
@@ -862,11 +861,33 @@ def _no_dialog_reason(input_data: dict) -> str:
     return ''
 
 
+def _consent_queued_msg(hit: dict, number: int) -> str:
+    return hit['msg'].replace(playbook_core.AUTHORIZATION_HINT, (
+        f"It is queued for the user's approval as #{number}. Do not stop or wait for it: "
+        'carry on with the rest of the work the user approved. In your next message to the '
+        f'user, say in plain words what #{number} removes, why it has to go, and what '
+        'happens if it is kept, and ask whether it may run. The user approves it by writing '
+        'so ("pode apagar", "pode remover", "yes, delete it"); the hook then tells you, and '
+        'you run this exact command again, once. Nothing else lifts this block, and you '
+        'cannot approve it yourself.'))
+
+
 def _destructive_verdict(hit: dict, input_data: dict, command: str, prefs: dict) -> dict:
-    """A permission dialog for `hit` (a check_destructive block), worded for
-    the user in their language, where the dialog reaches them; otherwise a deny
-    telling the model to hand the command to the user. An effect with no text
-    to show is denied too: a crash here would let the command run."""
+    """What the gate answers for `hit` (a check_destructive block):
+
+    - `consented`: the user approved this exact command in the chat;
+    - `queue`: auto mode, the command is to be queued for that approval and
+      denied, so the run never stops on a dialog (`fallback` is the dialog,
+      should the queue be unwritable);
+    - `ask`: a permission dialog, worded for the user in their language
+      (Manual);
+    - a deny telling the model to hand the command to the user, where no
+      dialog can be trusted to reach them. An effect with no text to show is
+      denied too: a crash here would let the command run.
+
+    The first three are settled by the caller after every other gate: a deny
+    among them wins, so neither an approval nor a queued request carries a
+    command past a gate it does not mention."""
     why = _no_dialog_reason(input_data)
     effect_key = f"destroys_{hit.get('effect')}"
     if not why and effect_key not in playbook_i18n.STRINGS:
@@ -877,9 +898,32 @@ def _destructive_verdict(hit: dict, input_data: dict, command: str, prefs: dict)
             'playbook denies it: ask the user to run the command themselves. Nothing typed in '
             'the chat lifts this block.'))}
     language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'))
-    shown = command if len(command) <= _COMMAND_SHOWN_CHARS else command[:_COMMAND_SHOWN_CHARS] + '…'
-    return {'ask': True, 'msg': playbook_i18n.text(
-        language, 'destructive_ask', effect=playbook_i18n.text(language, effect_key), command=shown)}
+    ask = {'ask': True, 'msg': playbook_i18n.text(
+        language, 'destructive_ask', effect=playbook_i18n.text(language, effect_key),
+        command=playbook_core.shown_command(command))}
+    if not _SESSION_ID:
+        return ask
+    try:
+        if playbook_core.consent_take(STATE_DIR, _SESSION_ID, command, use=False):
+            return {'consented': True}
+    except OSError:
+        pass  # an approval that cannot be read is none: the user is asked again
+    if input_data.get('permission_mode') == 'auto':
+        return {'queue': True, 'hit': hit, 'fallback': ask}
+    return ask
+
+
+def _queue_for_consent(queued: dict, command: str) -> dict:
+    """Queue the command for the user's approval and return the deny that says
+    so; the dialog instead when the queue cannot be written, since then no
+    answer in the chat could ever approve it."""
+    hit = queued['hit']
+    try:
+        number = playbook_core.consent_request(
+            STATE_DIR, _SESSION_ID, command, str(hit.get('effect') or ''))
+    except OSError:
+        return queued['fallback']
+    return {**hit, 'msg': _consent_queued_msg(hit, number)}
 
 
 _FINDING_RE = re.compile(r'^\s*[-*]\s+`?[^`\n]+?:\d+`?\s*[—-]', re.MULTILINE)
@@ -1484,6 +1528,10 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
         _save_state(state)
         sys.exit(0)
 
+    if not _AGENT_ID and _SESSION_ID:
+        with contextlib.suppress(OSError):
+            playbook_core.consent_mark_turn_end(STATE_DIR, _SESSION_ID)
+
     # Before any gate can exit: a turn blocked by a gate below ends on a Stop that
     # carries stop_hook_active, which returns early -- the handoff written in the
     # blocked response would never be saved.
@@ -1586,10 +1634,19 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
     if not notice:
         notice = _check_budget(int(pct * limit) if pct is not None else None, state, prefs)
     result = notice if notice and notice.get('block') else None
-    # A destructive command the user can approve in a dialog. It is the weakest
-    # verdict: every other gate still runs, and any deny among them wins, so an
-    # approval never carries a command past a gate the dialog does not mention.
+    if not result and playbook_core.touches_consent_queue(tool_name, tool_input):
+        result = {'block': True, 'msg': (
+            '[playbook:safety] This call names the queue of destructive commands waiting for '
+            "the user's approval. That queue holds the user's answer: you may not read or "
+            'change it. Ask the user in your message instead.')}
+    # A destructive command the user can approve in a dialog, has approved in
+    # the chat, or is to be queued for that approval (auto mode). Each is the
+    # weakest verdict: every other gate still runs, and any deny among them
+    # wins, so an approval never carries a command past a gate it does not
+    # mention, and nothing is queued that another gate would deny anyway.
     ask = None
+    consented = False
+    queued = None
 
     if not result and tool_name == 'Bash':
         # What a heredoc writes is data, not commands about to run: a commit
@@ -1607,6 +1664,10 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
             destructive = _destructive_verdict(destructive, input_data, command, prefs)
             if destructive.get('ask'):
                 ask, destructive = destructive, None
+            elif destructive.get('consented'):
+                consented, destructive = True, None
+            elif destructive.get('queue'):
+                queued, destructive = destructive, None
         is_push = playbook_core.is_git_push(runnable)
         # Attribution and secrets before review: a push carrying either is
         # denied whether or not it was reviewed, and the review would not fix it.
@@ -1676,6 +1737,19 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
         state['shell_edit_noted'] = True
 
     _save_state(state)
+
+    blocked = bool(result and result.get('block'))
+    if queued and not blocked:
+        verdict = _queue_for_consent(queued, command)
+        if verdict.get('ask'):
+            ask = verdict
+        else:
+            result = {**verdict, 'msg': verdict['msg'] + (f"\n\n{result['msg']}" if result else '')}
+    if consented and not blocked:
+        try:
+            playbook_core.consent_take(STATE_DIR, _SESSION_ID, command)
+        except OSError:
+            pass  # the approval stays: the user approved this command, it may run again once
 
     if ask and not (result and result.get('block')):
         _emit_ask(ask, result)
