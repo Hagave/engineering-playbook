@@ -9,6 +9,12 @@ config, the throttler guard), not from a copy, so the test proves the text the
 model reads. A minimal AppModule around them is the only code written here. The
 app is compiled under `strict` and started, and every claim the skill makes
 about the proxy trust and the CSP is checked over HTTP.
+
+Every package is installed at its latest version, as the skills' own install
+commands do (`<pm> add <name>`, no version): the playbook follows latest, and
+this run is how a release that breaks a template is found. The resolved
+versions are printed, so a failure names the release that caused it. The
+scheduled workflow `.github/workflows/template-latest.yml` runs it weekly.
 """
 import json
 import os
@@ -16,6 +22,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -28,28 +35,20 @@ _FENCE_RE = re.compile(r'^```typescript\n(.*?)^```', re.DOTALL | re.MULTILINE)
 _BOOT_TIMEOUT_S = 30.0
 _THROTTLE_LIMIT = 30  # ThrottlerModule.forRoot in the skill's AppModule additions
 
+# What engineering-nestjs (Fastify, Swagger, nestjs-pino, validation, config)
+# and engineering-nestjs-security tell a new project to install.
+_DEPENDENCIES = (
+    '@fastify/helmet', '@fastify/static', '@nestjs/common', '@nestjs/config', '@nestjs/core',
+    '@nestjs/platform-fastify', '@nestjs/swagger', '@nestjs/throttler', 'class-transformer',
+    'class-validator', 'joi', 'nestjs-pino', 'pino-http', 'reflect-metadata', 'rxjs',
+)
+_DEV_DEPENDENCIES = ('@types/node', 'typescript')
+
 _PACKAGE = {
     'name': 'nest-security-template-it',
     'private': True,
-    'dependencies': {
-        '@fastify/helmet': '^13.0.0',
-        '@fastify/static': '^10.1.2',
-        '@nestjs/common': '^11.0.0',
-        '@nestjs/config': '^4.0.0',
-        '@nestjs/core': '^11.0.0',
-        '@nestjs/platform-fastify': '^11.0.0',
-        '@nestjs/swagger': '^11.0.0',
-        '@nestjs/throttler': '^6.0.0',
-        'class-transformer': '^0.5.0',
-        'class-validator': '^0.14.0',
-        'joi': '^17.0.0',
-        'nestjs-pino': '^4.0.0',
-        'pino': '^9.0.0',
-        'pino-http': '^10.0.0',
-        'reflect-metadata': '^0.2.0',
-        'rxjs': '^7.8.0',
-    },
-    'devDependencies': {'@types/node': '^22.0.0', 'typescript': '^5.6.0'},
+    'dependencies': dict.fromkeys(_DEPENDENCIES, 'latest'),
+    'devDependencies': dict.fromkeys(_DEV_DEPENDENCIES, 'latest'),
 }
 
 _TSCONFIG = {
@@ -88,8 +87,7 @@ class EchoController {
         PORT: Joi.number().default(3000),
         CORS_ORIGIN: Joi.string().default(''),
         TRUST_PROXY: trustProxyEnvSchema,
-      }),
-      validationOptions: { allowUnknown: true, abortEarly: false },
+      }).unknown(true),
     }),
     LoggerModule.forRoot({ pinoHttp: { level: 'warn' } }),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 30 }]),
@@ -146,12 +144,18 @@ class TestNestSecurityTemplate(unittest.TestCase):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
-        for command in (['npm', 'install', '--no-audit', '--no-fund', '--loglevel=error'],
-                        ['npx', 'tsc', '-p', 'tsconfig.json']):
-            done = subprocess.run(command, cwd=cls.app_dir, capture_output=True, text=True,
-                                  timeout=600, check=False)
-            if done.returncode != 0:
-                raise AssertionError(f'{" ".join(command)} failed:\n{done.stdout}\n{done.stderr}')
+        cls._run(['npm', 'install', '--no-audit', '--no-fund', '--loglevel=error'])
+        installed = subprocess.run(['npm', 'ls', '--depth=0'], cwd=cls.app_dir, capture_output=True,
+                                   text=True, timeout=60, check=False)
+        sys.stderr.write(f'\nInstalled versions:\n{installed.stdout}\n')
+        cls._run(['npx', 'tsc', '-p', 'tsconfig.json'])
+
+    @classmethod
+    def _run(cls, command: list[str]) -> None:
+        done = subprocess.run(command, cwd=cls.app_dir, capture_output=True, text=True,
+                              timeout=600, check=False)
+        if done.returncode != 0:
+            raise AssertionError(f'{" ".join(command)} failed:\n{done.stdout}\n{done.stderr}')
 
     @classmethod
     def tearDownClass(cls) -> None:
