@@ -70,45 +70,30 @@ DESTRUCTIVE = [
     ('shred -u file', True),
     ('truncate -s 0 db.sqlite', True),
     ('truncate --size=0 db.sqlite', True),
-    # Program decided at run time.
-    ('$(echo rm) -rf build', True),
+    # A variable command word is read as every literal value the command gives
+    # it, wherever and in whatever order it is assigned (2026-11-21). A program
+    # the command never shows is not flagged: see KNOWN_GAPS.
     ('x=rm; $x -rf build', True),
-    ('`echo rm` -rf build', True),
-    ('eval "$CMD"', True),
-    ('bash -c "$CMD"', True),
-    ('ash -c "$CMD"', True),  # a second, shorter shell list once dropped `ash`
-    ('sudo $TOOL --wipe', True),
-    ('env -i $TOOL --wipe', True),
-    ('sudo -u app $TOOL --wipe', True),
-    ('nice -n 5 $TOOL --wipe', True),
-    # A variable bound to a literal command earlier in the command is read as
-    # that literal (2026-11-19). One that may hold anything else at run time
-    # stays decided at run time.
     ('R="rm -rf"; $R build', True),
     ('S=/tmp/x; G="git -C $S"; $G reset --hard', True),
-    ('$P -rf build; P=echo', True),
-    ('true && P=echo; $P -rf build', True),
-    ('false || P=echo; $P -rf build', True),
-    ('if true; then P=echo; fi; $P -rf build', True),
-    ('case x in x) P=echo;; esac; $P -rf build', True),
-    ('{ P=echo; }; $P -rf build', True),
-    ('(P=echo); $P -rf build', True),
-    ('P=echo; P=$(cat f); $P -rf build', True),
     ('P=echo; for P in rm; do $P -rf build; done', True),
-    ('P=echo; read P; $P -rf build', True),
-    ('P=echo; source ./env.sh; $P -rf build', True),
-    ('P=echo; . ./env.sh; $P -rf build', True),
-    ('P=echo $P -rf build', True),
-    ('P=/bin/r*; $P -rf build', True),
-    ('P=$HOME/bin/x; $P -rf build', True),
-    ('P=echo; x=$($P -rf build)', True),
     ('P=; $P rm -rf build', True),
     ('P=(rm -rf); $P build', True),
-    ('sleep 1 & P=echo; $P -rf build', True),
     ('IFS=x; P=rmx-rf; $P build', True),
     ('P=rmx-rf; IFS=x $P build', True),
-    ('function f {\nP=echo\n}\n$P -rf build', True),
-    ('f() {\nP=echo\n}\n$P -rf build', True),
+    ('ok && P="rm -rf" || P=echo; $P build', True),
+    ('if true; then P="rm -rf"; fi; $P build', True),
+    ('$P build; P="rm -rf"', True),
+    ('P="rm -rf"; source ./env.sh; $P build', True),
+    ('for t in echo rm; do $t -rf build; done', True),
+    ('export P="git reset"; $P --hard', True),
+    ('A=rm; B="$A -rf"; $B build', True),
+    ('B="$A -rf"; A=rm; $B build', True),
+    # The everyday commands this used to ask about: every value is literal and
+    # none of them destroys anything.
+    ('ls mvnw && M=./mvnw || M=mvn; nice -n 10 $M -q test', False),
+    ('for p in /opt/venv/bin/python /usr/bin/python3; do $p -c "import PIL"; done', False),
+    ('P="docker exec db psql -At -c"; $P "select 1"; source ./lib.sh; $P "select 2"', False),
     # Recursive deletion through an interpreter one-liner.
     ("python3 -c \"import shutil; shutil.rmtree('build')\"", True),
     ("node -e \"require('fs').rmSync('build',{recursive:true})\"", True),
@@ -139,9 +124,7 @@ DESTRUCTIVE = [
     ('J=/opt/jdk/bin/javap; $J -cp lib.jar Foo', False),
     ('[[ "$t" > "12:31" && "$t" < "12:58" ]] || continue', False),
     ('for f in a b; do [[ -f "$f" && -s "$f" ]] && cat "$f"; done', False),
-    ('for f in a b; do $f -rf build; done', True),
     ('if true; then rm -rf build; fi', True),
-    ('/usr/bin/$TOOL -rf build', True),
     # Real commands from transcripts that the first version of these checks
     # blocked by mistake (replayed 2026-11-16 over 5075 recorded commands).
     ('git diff $(git merge-base origin/develop $B) $B --stat', False),
@@ -364,7 +347,43 @@ KNOWN_GAPS = [
      'a shell function from the user\'s own environment (`reset_tools`) could rebind a '
      'variable the command bound to a literal; the text cannot show it, and a function '
      'the user defined is theirs'),
-]
+] + [(command, 'destructive',
+      'a program the command never shows (a substitution, `eval`/`sh -c` of a variable, a '
+      'variable with no literal value or one from `read`/`source`/the environment) is not '
+      'asked about: only what is shown to be destructive asks (decided by the user, '
+      '2026-11-21); every literal value the text does hold is still checked')
+     for command in (
+         '$(echo rm) -rf build',
+         '`echo rm` -rf build',
+         'eval "$CMD"',
+         'bash -c "$CMD"',
+         'ash -c "$CMD"',
+         'sudo $TOOL --wipe',
+         'env -i $TOOL --wipe',
+         'sudo -u app $TOOL --wipe',
+         'nice -n 5 $TOOL --wipe',
+         '/usr/bin/$TOOL -rf build',
+         '$P -rf build; P=echo',
+         'true && P=echo; $P -rf build',
+         'false || P=echo; $P -rf build',
+         'if true; then P=echo; fi; $P -rf build',
+         'case x in x) P=echo;; esac; $P -rf build',
+         '{ P=echo; }; $P -rf build',
+         '(P=echo); $P -rf build',
+         'P=echo; P=$(cat f); $P -rf build',
+         'P=echo; read P; $P -rf build',
+         'P=echo; source ./env.sh; $P -rf build',
+         'P=echo; . ./env.sh; $P -rf build',
+         'P=echo $P -rf build',
+         'P=/bin/r*; $P -rf build',
+         'P=$HOME/bin/x; $P -rf build',
+         'P=echo; x=$($P -rf build)',
+         'sleep 1 & P=echo; $P -rf build',
+         'function f {\nP=echo\n}\n$P -rf build',
+         'f() {\nP=echo\n}\n$P -rf build',
+         'for f in a b; do $f -rf build; done',
+         'eval "$(sed -n 2,99p probe.sh)"',
+     )]
 
 
 class TestDestructiveCorpus(unittest.TestCase):
@@ -374,9 +393,13 @@ class TestDestructiveCorpus(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(_destructive(command), must_block)
 
-    def test_message_tells_why_a_dynamic_command_is_blocked(self):
-        result = playbook_core.check_destructive('x=$(printf rm); $x -rf build')
-        self.assertIn('decided at run time', result['msg'])
+    def test_a_program_the_command_never_shows_is_not_asked_about(self):
+        self.assertIsNone(playbook_core.check_destructive('x=$(printf rm); $x -rf build'))
+
+    def test_each_literal_value_is_a_line_of_its_own(self):
+        resolved = playbook_core.resolve_literal_commands('ok && P="rm -rf" || P=echo; $P build')
+        self.assertIn('rm -rf build', resolved.splitlines())
+        self.assertIn('echo build', resolved.splitlines())
 
     def test_a_literal_command_variable_is_read_as_the_literal(self):
         result = playbook_core.check_destructive('x=rm; $x -rf build')

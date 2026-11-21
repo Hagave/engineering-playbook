@@ -1387,8 +1387,7 @@ class TestDestructiveConsentByDialog(_Base):
         for command, effect in (('git reset --hard HEAD~1', 'reset_hard'),
                                 ('git clean -fdx', 'clean'),
                                 ('git stash drop', 'stash_drop'),
-                                ('psql -c "DROP TABLE users;"', 'sql'),
-                                ('x=$(printf rm); $x -rf build', 'dynamic')):
+                                ('psql -c "DROP TABLE users;"', 'sql')):
             with self.subTest(command=command):
                 self.assertEqual(self._reason(self._bash(command, 'default')),
                                  self._ask_reason('en', effect, command))

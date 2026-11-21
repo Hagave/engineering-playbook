@@ -1092,19 +1092,18 @@ git's global options dropped (`git -C . reset --hard`), and each `$(...)` read
 as a command of its own — so respelling a command does not get it past the
 check. When a command has several parts, the dialog shows the part that
 destroys, not the start of the command, and says that approving runs all of
-it. Two more cases are denied the same way:
+it.
 
-- a command whose **program is decided at run time** (`$x -rf build`,
-  `eval "$CMD"`, `bash -c "$CMD"`): nothing can read what it runs. A variable
-  directory with a literal program (`$JAVA_HOME/bin/java`) is fine, and so is a
-  variable the same command binds to a literal command before it uses it
-  (`P="docker exec db psql"; $P -c "select 1"`): it is read as that literal.
-  The binding counts only when it always runs first and nothing can change it:
-  at the top level, after `;` or the start (not `&&`, `||`, `|`, `&`), not in
-  `if`, a loop, `case`, a group or a subshell, a literal value (no
-  substitution, glob or unbound reference), the name assigned nowhere else, and
-  no `source`, `.` or `eval` in the command. The test operators inside
-  `[[ ... ]]` (`&&`, `||`) no longer split it into commands.
+A **variable as the program** (`P="docker exec db psql"; $P -c "select 1"`) is
+read as every literal value the command gives it, wherever and in whatever order
+it is assigned, in a `for` list too, and split by any `IFS` the command sets:
+`ok && P="rm -rf" || P=echo; $P build` asks, `ls mvnw && M=./mvnw || M=mvn; $M
+test` does not. A program the command never shows (`$(...)`, `eval "$CMD"`,
+`bash -c "$CMD"`, a variable from `read`, `source` or the environment) is not
+asked about: only what is shown to be destructive asks. That is a decision, and
+a gap an adversarial command could use; every literal value the text holds is
+still checked. One more case is denied the same way:
+
 - **recursive deletion in an interpreter one-liner** (`shutil.rmtree(`,
   `fs.rmSync(..., {recursive: true})`, `FileUtils.rm_rf`, `rmtree(`), except on
   a temporary directory the same script created and never rebinds

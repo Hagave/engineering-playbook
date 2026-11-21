@@ -540,11 +540,6 @@ STRINGS: dict[str, dict[str, str]] = {
         'pt-br': 'apaga dados de um banco de dados',
         'es': 'borra datos de una base de datos',
     },
-    'destroys_dynamic': {
-        'en': 'runs a program decided only at run time, which the playbook cannot read',
-        'pt-br': 'roda um programa decidido só na hora de executar, que o playbook não consegue ler',
-        'es': 'ejecuta un programa decidido solo al ejecutarse, que el playbook no puede leer',
-    },
     'destroys_script_delete': {
         'en': 'deletes files recursively from inside a script',
         'pt-br': 'apaga arquivos recursivamente de dentro de um script',
