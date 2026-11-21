@@ -47,6 +47,9 @@ Concurrency tests run the requests truly in parallel (`Promise.all`, a thread po
 | `price` / `total` / `discount` in the request body | ignored; the server value is charged |
 | calling step 3 of a workflow before step 2 | 409, no effect |
 | the same request replayed with the same idempotency key | same response, one effect |
+| the same idempotency key sent by another user | handled as a new key; the first user's response is never returned |
+| the same idempotency key with a different body | 422, no effect |
+| the operation fails after its write (fault injected before the commit) | the write and the key roll back together; the retry takes effect once |
 
 ## Dynamic proof
 
@@ -57,3 +60,4 @@ Not provable in the lab: the passive baseline sends no request bursts. The concu
 - A `find` followed by a `save` of the same row with a condition checked in application code between them.
 - A monetary or permission value read from the request.
 - An endpoint of a multi-step flow that does not read the current state before acting.
+- An idempotency key kept in a cache or a second store for an operation that writes to the database, or not scoped to the caller.

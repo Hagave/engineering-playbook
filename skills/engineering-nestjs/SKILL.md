@@ -1,7 +1,7 @@
 ---
 name: engineering-nestjs
 description: "**Opt-in for NestJS:** load only when NestJS is the chosen framework. NestJS-specific rules: module structure, controllers, dependency injection, DTOs, configuration, and logging. Use when working on a NestJS project: creating modules, controllers, services, guards, interceptors, or configuring the framework."
-version: 2.1.1
+version: 3.0.0
 user-invocable: false
 ---
 
@@ -252,7 +252,7 @@ Always prefer `@nestjs/*` packages over third-party alternatives.
 | Env validation | `@nestjs/config` + Joi | Zod, dotenv-safe, custom parsers |
 | Request validation | `class-validator` + `class-transformer` + `ValidationPipe` | Zod, Yup, Joi for request bodies |
 | HTTP client | `@nestjs/axios` | raw `axios`, `node-fetch`, `undici` |
-| Caching | `@nestjs/cache-manager` | direct `ioredis` for caching logic — **exception:** distributed locks, idempotency keys, and rate limiting counters require atomic Redis primitives not exposed by `@nestjs/cache-manager`; for those, use `ioredis` directly as specified in `engineering-concurrency` |
+| Caching | `@nestjs/cache-manager` | direct `ioredis` for caching logic — **exception:** distributed locks, rate limiting counters, and the idempotency claims of operations with no database effect require atomic Redis primitives not exposed by `@nestjs/cache-manager`; for those, use `ioredis` directly as specified in `engineering-concurrency`. The idempotency record of an operation that writes to the database is a row in that database, never a Redis key |
 | Rate limiting | `@nestjs/throttler` | custom middleware, `express-rate-limit` |
 | Scheduling | `@nestjs/schedule` | `node-cron`, `bull` for simple scheduling |
 | JWT | `@nestjs/jwt` + `@nestjs/passport` | raw `jsonwebtoken` |
