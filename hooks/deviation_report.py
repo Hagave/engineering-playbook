@@ -53,6 +53,10 @@ DAILY_CREATE_CAP = 5
 MAX_PENDING = 50
 MAX_ATTEMPTS = 5
 RETRY_BASE_S = 600
+# A drain that dies after `gh issue create` and before recording it leaves the
+# report leased; past the lease it is sent again, and the fingerprint search
+# turns it into a +1 only once GitHub has indexed the first issue. Accepted: a
+# rare duplicate issue costs less than a report lost to a crash.
 LEASE_S = 300
 GH_TIMEOUT_S = 20
 GH_EXIT_AUTH = 4

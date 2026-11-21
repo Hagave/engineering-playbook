@@ -2,8 +2,9 @@
 Real run of the deviation report against GitHub through the real `gh`.
 
 Opt-in: set PLAYBOOK_REPORT_IT=1 and PLAYBOOK_REPORT_REPO=<owner>/<repo>, a
-repository you own and may fill with a test issue (never the playbook's own).
-It needs `gh` logged in with access to that repository. It is skipped
+repository where a test issue may be opened and closed (the playbook's own
+works: the issue's skill version is `0.0.0-it.*`, so no real report matches
+it). It needs `gh` logged in with access to that repository. It is skipped
 otherwise.
 
 The unit tests feed the drain a stand-in for `gh`; this proves gh itself
