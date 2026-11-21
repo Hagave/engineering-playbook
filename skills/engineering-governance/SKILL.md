@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines who owns each decision (and so when to ask), prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 6.0.0
+version: 6.1.0
 user-invocable: false
 ---
 
@@ -139,6 +139,20 @@ For tasks with more than one step, state the plan first:
 ```
 
 Confirm the plan with the user unless the request delegated it. Weak success criteria ("make it work") are an open decision too.
+
+---
+
+## Obligations
+
+Before the first write of a change, post its obligations: what the change must keep true, and the test that proves it. The checklist of `engineering-implement` opens with this table; a change without that checklist posts the table alone. One row per item the change touches:
+
+| The change | Obligation | Proof |
+|---|---|---|
+| writes a stored state (a row, a counter, a balance, a status) | the invariants of that state, and every writer of it in the codebase, existing and new, enforcing all of them in the same atomic step as its write | a test that runs the writers interleaved and asserts the invariants afterwards |
+| accepts an input (a field, a parameter, a message, a file) | its valid domain as an allowlist: type, range, size, and its relation to now and to the state it refers to. Everything outside it is rejected. A domain defined outside the project (a document number, a plate, a currency or protocol code) is read from its current source, never from memory | a test on each boundary of the domain, on both sides |
+
+- **Invariants belong to the state, not to the flow.** A limit one flow checks binds every flow that writes the same state, so find the writers by searching the codebase for writes to that state, not by the flows the task names. A limit on one operation bounds an aggregate (per holder, per period); its window is a domain decision (Decision ownership).
+- **A row without its proof is not done.** The proof is a test in the change. `engineering-code-review` checks the same obligations against the diff.
 
 ---
 

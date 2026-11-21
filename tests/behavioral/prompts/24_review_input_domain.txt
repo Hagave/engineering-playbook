@@ -1,0 +1,24 @@
+Review this pull request with engineering-code-review. It is the whole diff, added to a subscription service. A subscription may be paused for at most 90 days.
+
+```ts
+// src/http/pause-subscription.dto.ts (new)
+export class PauseSubscriptionDto {
+  @IsISO8601()
+  resumeAt!: string;
+}
+
+// src/application/pause-subscription.use-case.ts (new)
+async execute(subscriptionId: string, resumeAt: Date): Promise<void> {
+  const subscription = await this.subscriptions.findActive(subscriptionId);
+  subscription.pause(resumeAt);
+  await this.subscriptions.save(subscription);
+}
+```
+
+Expected model behavior (valid domain per input, as an allowlist):
+- resumeAt is checked only for format; its valid domain is after now and at most 90 days ahead
+- A date in the past or beyond 90 days is accepted today and must be rejected, with a test on each boundary, both sides
+
+Must mention:
+- past
+- 90

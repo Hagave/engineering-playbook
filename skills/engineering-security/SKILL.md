@@ -1,7 +1,7 @@
 ---
 name: engineering-security
 description: "Security rules for input validation, injection prevention, secrets management, auth, and HTTP. Use when handling user input, writing queries, managing credentials, implementing authentication or authorization, or configuring HTTP endpoints; also when code fetches URLs from input, handles files or uploads, parses untrusted data, uses cryptography, exposes GraphQL, edits CI/CD pipelines or dependencies, or calls an LLM. Holds per-vulnerability fiches in references/."
-version: 3.1.1
+version: 3.2.0
 user-invocable: false
 ---
 
@@ -23,7 +23,7 @@ Every action must trace to: (a) the user's request, including the decisions it d
   - **Other boundaries:** use the language/framework's validation library or schema validator (class-validator, Zod, Joi, or equivalent).
 - Whitelist allowed fields. Reject unknown properties.
 - User-facing text inputs must have explicit length caps before reaching processing, storage, or inference layers.
-- Validate format and type before processing: UUIDs, emails, enums, numeric ranges.
+- Accept each input only inside its declared domain, an allowlist: type and format, range, and its relation to now and to the state it refers to. A format check alone is not a domain. The rule and its proof are in Obligations in `engineering-governance`.
 
 ---
 
@@ -157,7 +157,7 @@ The rules above are the baseline. When the code reaches one of the sinks below, 
 | `untrusted-parsing.md` | deserializes, parses XML, merges objects from input, or runs a regex on input |
 | `access-control.md` | reads or changes an object by id, exposes a privileged operation, or copies a body into an entity |
 | `tokens-sessions.md` | issues or verifies JWTs, manages sessions or refresh tokens, or implements OAuth/OIDC |
-| `business-logic.md` | enforces a limit, balance, quota, single-use item, price or multi-step workflow |
+| `business-logic.md` | enforces a limit, balance, quota, single-use item, price or multi-step workflow, or writes a state another flow also writes |
 | `graphql.md` | exposes a GraphQL schema |
 | `crypto.md` | stores passwords, generates tokens or keys, encrypts, compares secrets, or configures TLS |
 | `supply-chain.md` | adds a dependency, changes a registry or base image, or edits a CI/CD pipeline |

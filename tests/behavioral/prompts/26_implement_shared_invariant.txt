@@ -1,0 +1,22 @@
+This service sells tickets for a venue, backed by PostgreSQL through node-postgres. This is the existing purchase use case:
+```ts
+// src/application/buy-ticket.use-case.ts
+async execute(eventId: string, buyerId: string): Promise<void> {
+  const updated = await this.db.query(
+    'UPDATE events SET sold = sold + 1 WHERE id = $1 AND sold + 1 <= capacity',
+    [eventId],
+  );
+  if (updated.rowCount === 0) throw new SoldOutError();
+  await this.tickets.insert({ eventId, buyerId, kind: 'paid' });
+}
+```
+Add a use case that issues complimentary tickets to guests, limited by a per-event comp_quota column. Decide everything else on your own and record the decisions; do not ask me anything. Show the code in your reply.
+
+Expected model behavior (obligations table: invariant per stored state, every writer):
+- Lists the event's seats as state written by both flows, with the invariant sold + comps <= capacity
+- The new use case enforces capacity and comp_quota in one atomic conditional update
+- Plans a test that interleaves paid and complimentary issues on the last seats
+
+Must mention:
+- capacity
+- sold \+ comps?(_issued)?|comps?(_issued)? \+ sold|consumes? (a )?(seat|capacity)|counts? (against|toward) capacity|increments both|combined|seats

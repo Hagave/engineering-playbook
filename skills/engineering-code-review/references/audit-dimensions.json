@@ -13,14 +13,14 @@
       "title": "Input validation",
       "walks": ["routes", "files"],
       "checklist": ["Presentation layer", "Security"],
-      "question": "For every input of every route (path, query, body, headers, uploaded files): what happens with an empty value, an unknown value, one over the size the storage or the UI accepts, a malformed one, one of another type, and an id that does not exist? Name what the code does and what the caller receives for each."
+      "question": "For every input of every route (path, query, body, headers, uploaded files): what is its valid domain — type, range, size, and its relation to now and to the state it refers to, with a domain defined outside the project taken from its current source — and does the code accept exactly that domain and reject everything outside it? Check each boundary on both sides, and an id that does not exist. Name what the code does and what the caller receives for each."
     },
     {
       "id": "concurrency",
       "title": "Concurrency, transactions and locks",
       "walks": ["sites", "files"],
       "checklist": ["Concurrency and atomicity", "Application layer"],
-      "question": "For every write site: two requests at the same time on the same row — is there a lost update, a duplicate, or a broken invariant? Is the write inside a transaction, does a transaction stay open across a network call, and is there a lock, version column or unique constraint? Find every other writer of the same table or entity in the repository, not only the ones in this surface, and check them against each other."
+      "question": "For every write site: two requests at the same time on the same row — is there a lost update, a duplicate, or a broken invariant? Is the write inside a transaction, does a transaction stay open across a network call, and is there a lock, version column or unique constraint? Find every other writer of the same table or entity in the repository, not only the ones in this surface, and check them against each other: the invariants belong to the stored state, not to one flow, so each writer must enforce all of them in its atomic step (two flows that each guard only their own counter can together break a limit both share)."
     },
     {
       "id": "callers",
