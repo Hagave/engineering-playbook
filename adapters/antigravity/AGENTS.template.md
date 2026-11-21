@@ -32,6 +32,7 @@ Reply to the user in the language they write in, and keep that language after th
 - **Governance first.** Before writing source code, read `.agents/skills/engineering-governance.md` and its five mandatory companion skills.
 - **Validate before finishing.** Never end a task with unvalidated source changes — run typecheck, lint, and relevant tests, and report their real output.
 - **Decision ownership.** Act only on the decisions you own. What the request, the code or a skill fixes is implemented as it stands, and changing it is the user's call; what the request delegates ("decide and record") you decide, record and carry on without asking; anything else is the user's, asked in a single message. Never pick an interpretation silently.
+- **Obligations.** Before the first write, list what the change must keep true, each with its test: every stored state it writes, with that state's invariants enforced by every writer in the codebase in its atomic step (proof: the writers interleaved); every input it accepts, with its valid domain as an allowlist, including its relation to now and to the state it refers to (proof: each boundary, both sides).
 - **Scope discipline.** Every changed line traces to the user's request. No adjacent improvements, no unrequested features.
 - **Destructive commands** (recursive deletes, force push, hard reset, `DROP`/`TRUNCATE`/unfiltered `DELETE`) require explicit user confirmation — there is no hook to catch you here.
 

@@ -53,7 +53,7 @@ _SECTION_RE = re.compile(r'(?m)^## .+')
 _KEEP_SECTIONS = {
     'engineering-playbook': ('Non-negotiable rules', 'Skill routing'),
     'engineering-governance': ('Mandatory companion skills', 'Spec gate', 'Decision ownership',
-                               'Validation checklist'),
+                               'Obligations', 'Validation checklist'),
 }
 
 

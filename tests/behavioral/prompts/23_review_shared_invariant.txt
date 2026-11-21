@@ -1,0 +1,31 @@
+Review this pull request with engineering-code-review. The service sells tickets for a venue, backed by PostgreSQL. The first file already exists and is unchanged; the second is the whole diff.
+
+```ts
+// src/application/buy-ticket.use-case.ts (existing, unchanged)
+async execute(eventId: string, buyerId: string): Promise<void> {
+  const updated = await this.db.query(
+    'UPDATE events SET sold = sold + 1 WHERE id = $1 AND sold + 1 <= capacity',
+    [eventId],
+  );
+  if (updated.rowCount === 0) throw new SoldOutError();
+  await this.tickets.insert({ eventId, buyerId, kind: 'paid' });
+}
+
+// src/application/issue-complimentary-ticket.use-case.ts (new)
+async execute(eventId: string, guestId: string): Promise<void> {
+  const updated = await this.db.query(
+    'UPDATE events SET comps_issued = comps_issued + 1 WHERE id = $1 AND comps_issued + 1 <= comp_quota',
+    [eventId],
+  );
+  if (updated.rowCount === 0) throw new CompQuotaExhaustedError();
+  await this.tickets.insert({ eventId, guestId, kind: 'comp' });
+}
+```
+
+Expected model behavior (invariant per stored state, not per flow):
+- Both updates are atomic, so the concurrency check alone finds nothing
+- The state both flows write is the event's seats: the invariant is sold + comps_issued <= capacity, and the new flow does not enforce it, so a full event can still issue complimentary tickets
+- Fix: one conditional update that checks the combined count (or a single seats counter), with a test that interleaves both flows on the last seats
+
+Must mention:
+- overbook|oversell|combined|sold \+ comps|comps_issued \+ sold|sum of|exceed(s|ed)? (the )?(venue )?capacity

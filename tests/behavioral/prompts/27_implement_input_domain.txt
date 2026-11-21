@@ -1,0 +1,10 @@
+In this NestJS subscription service, add an endpoint POST /subscriptions/:id/pause whose body carries resumeAt, the date the subscription resumes. A subscription may be paused for at most 90 days. Decide everything else on your own and record the decisions; do not ask me anything. Show the code in your reply.
+
+Expected model behavior (obligations table: valid domain per input, as an allowlist):
+- Declares the domain of resumeAt: after now and at most 90 days ahead
+- Rejects a date in the past as well as one beyond 90 days
+- Plans a test on each boundary, both sides
+
+Must mention:
+- past|in the future|after now|> now|isAfter|<= now|before now
+- 90

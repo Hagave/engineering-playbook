@@ -296,6 +296,63 @@ class TestDecisionOwnership(unittest.TestCase):
         self.assertNotIn('state it and ask before acting.', template)
 
 
+class TestObligations(unittest.TestCase):
+    """The defects the obligations table targets (a limit shared by two flows,
+    an input checked only for format) were caught by every model when it was
+    asked to review a snippet, and missed while implementing. The table makes
+    the question part of the work: one row per state written and per input
+    accepted, each with its proof."""
+
+    def setUp(self):
+        governance = read_skill('engineering-governance')
+        m = re.search(r'## Obligations(.*?)(?=\n## |\Z)', governance, re.DOTALL)
+        self.section = m.group(1) if m else ''
+
+    def test_governance_owns_the_table(self):
+        self.assertTrue(self.section, 'engineering-governance has no "## Obligations"')
+
+    def test_stored_state_row_requires_every_writer(self):
+        self.assertIn('writes a stored state', self.section)
+        self.assertIn('every writer of it in the codebase, existing and new', self.section)
+        self.assertIn('runs the writers interleaved', self.section)
+
+    def test_input_row_is_an_allowlist_domain(self):
+        self.assertIn('accepts an input', self.section)
+        self.assertIn('valid domain as an allowlist', self.section)
+        self.assertIn('relation to now and to the state it refers to', self.section)
+        self.assertIn('read from its current source, never from memory', self.section)
+        self.assertIn('each boundary of the domain, on both sides', self.section)
+
+    def test_invariants_belong_to_the_state(self):
+        self.assertIn('Invariants belong to the state, not to the flow', self.section)
+
+    def test_every_consumer_points_to_the_table(self):
+        for skill in ('engineering-implement', 'engineering-security', 'engineering-testing',
+                      'engineering-code-review'):
+            with self.subTest(skill=skill):
+                self.assertIn('Obligations in `engineering-governance`'
+                              if skill != 'engineering-implement'
+                              else 'obligations table from `engineering-governance`',
+                              read_skill(skill))
+
+    def test_security_drops_the_format_only_rule(self):
+        security = read_skill('engineering-security')
+        self.assertNotIn('Validate format and type before processing', security)
+        fiche_path = os.path.join(_SKILLS_DIR, 'engineering-security', 'references', 'business-logic.md')
+        with open(fiche_path) as f:
+            fiche = f.read()
+        self.assertNotIn('- Numeric edges:', fiche)
+        self.assertIn('A rule is an invariant of the stored state, not of the flow', fiche)
+
+    def test_audit_validation_asks_for_the_domain(self):
+        import json
+        path = os.path.join(_SKILLS_DIR, 'engineering-code-review', 'references', 'audit-dimensions.json')
+        with open(path) as f:
+            dims = {d['id']: d for d in json.load(f)['dimensions']}
+        self.assertIn('valid domain', dims['validation']['question'])
+        self.assertIn('invariants belong to the stored state', dims['concurrency']['question'])
+
+
 # ── 5. engineering-implement changes ──────────────────────────────────────────
 
 class TestNoCompactRecommendation(unittest.TestCase):

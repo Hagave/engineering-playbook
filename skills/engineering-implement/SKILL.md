@@ -1,7 +1,7 @@
 ---
 name: engineering-implement
 description: "Step-by-step implementation workflow. Use when starting any implementation task: feature, fix, or new artifact. Guides through reading context, extracting requirements, resolving ambiguities, reuse search, implementing, validating, and updating registries."
-version: 4.0.0
+version: 4.1.0
 user-invocable: false
 ---
 
@@ -63,6 +63,8 @@ For every artifact you are about to create, execute the reuse protocol in `engin
 ## Step 6 — Generate implementation checklist
 
 Before writing any code, produce a task-specific checklist and post it as the first item in the response. This checklist guides both user and Claude — nothing in it should be skipped silently.
+
+The checklist opens with the obligations table from `engineering-governance` (Obligations): every state the task writes with its invariants and all its writers, and every input with its valid domain. Each proof in that table is a test item of the checklist.
 
 **Ordering rule:** items must be listed in dependency order — the order you will actually implement them. An artifact that depends on another must come after it. No backtracking allowed: if item N depends on item M, M must appear before N in the list.
 
