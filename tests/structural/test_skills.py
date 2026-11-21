@@ -344,6 +344,30 @@ class TestObligations(unittest.TestCase):
         self.assertNotIn('- Numeric edges:', fiche)
         self.assertIn('A rule is an invariant of the stored state, not of the flow', fiche)
 
+    def test_cost_row_bounds_work_by_the_change(self):
+        self.assertIn('runs work over data', self.section)
+        self.assertIn('never by the total size of a table, an aggregate or a response', self.section)
+        performance = read_skill('engineering-performance')
+        self.assertIn('## Cost bound', performance)
+        self.assertIn('deleting its children and inserting them all again', performance)
+
+    def test_declaration_row_covers_consumers_and_varying_inputs(self):
+        self.assertIn('everything declared has a consumer in the change', self.section)
+        self.assertIn('reaches the domain and application layers as an input', self.section)
+        self.assertIn('may come from the native runtime', self.section)
+        self.assertIn('Nothing declared without a consumer', read_skill('engineering-code-economy'))
+        self.assertIn('enters as an input: a parameter or a port', read_skill('engineering-architecture'))
+
+    def test_review_checks_every_row(self):
+        review = read_skill('engineering-code-review')
+        m = re.search(r'### Obligations(.*?)(?=\n### |\Z)', review, re.DOTALL)
+        self.assertIsNotNone(m)
+        for phrase in ('whose other writers were not found', 'no declared domain',
+                       'cost grows with the total size', 'read directly in the domain or application layer',
+                       'declared with no consumer'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, m.group(1))
+
     def test_audit_validation_asks_for_the_domain(self):
         import json
         path = os.path.join(_SKILLS_DIR, 'engineering-code-review', 'references', 'audit-dimensions.json')

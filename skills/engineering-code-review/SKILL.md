@@ -1,7 +1,7 @@
 ---
 name: engineering-code-review
 description: "Code review workflow and severity classification. Use when asked to review a diff, PR, or code change, and when asked to review, survey or audit existing code (a module, a route prefix, a folder): the audit mode lists the scope with a script, then runs one pass per dimension and backs every finding with evidence. Runs before every push. Loads relevant skills based on what the code touches and outputs findings classified as Blocker, Major, or Minor."
-version: 6.1.0
+version: 6.2.0
 user-invocable: false
 ---
 
@@ -152,7 +152,10 @@ The rows of Obligations in `engineering-governance`, checked against the diff.
 - A state the diff writes whose other writers were not found: search the codebase for every write to that table, column or field. Each writer must enforce all the invariants of the state in its atomic step; a new writer that guards only its own counter breaks the limit the writers share.
 - An input the diff accepts with no declared domain, or checked only for format or type: the domain covers range, size, and the relation to now and to the state it refers to, and everything outside it is rejected.
 - A domain defined outside the project (a document number, a plate, a currency or protocol code) written from memory instead of its current source.
-- An obligation without its proof: no interleaved-writers test for a shared invariant, no test on each side of each domain boundary.
+- Work whose cost grows with the total size of a table, an aggregate or a response instead of with what it changes or returns: a save that deletes and reinserts every child, a page of parents each loaded with its whole relation, a read with no page or cap.
+- A value the logic decides on that varies between runs (the current time, randomness that drives a branch, the environment) read directly in the domain or application layer instead of arriving as a parameter or a port.
+- Something declared with no consumer in the change: a dependency in the manifest, an export, a config key, a parameter, a port method.
+- An obligation without its proof: no interleaved-writers test for a shared invariant, no test on each side of each domain boundary, no test of the cost bound above the page, no fixed clock in the tests of time-dependent logic.
 
 ### Concurrency and atomicity
 

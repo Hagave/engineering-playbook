@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines who owns each decision (and so when to ask), prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 6.1.0
+version: 6.2.0
 user-invocable: false
 ---
 
@@ -150,6 +150,8 @@ Before the first write of a change, post its obligations: what the change must k
 |---|---|---|
 | writes a stored state (a row, a counter, a balance, a status) | the invariants of that state, and every writer of it in the codebase, existing and new, enforcing all of them in the same atomic step as its write | a test that runs the writers interleaved and asserts the invariants afterwards |
 | accepts an input (a field, a parameter, a message, a file) | its valid domain as an allowlist: type, range, size, and its relation to now and to the state it refers to. Everything outside it is rejected. A domain defined outside the project (a document number, a plate, a currency or protocol code) is read from its current source, never from memory | a test on each boundary of the domain, on both sides |
+| runs work over data (a query, a loop, a write of a collection, an external call) | a cost bounded by what the work changes or returns (the page, the batch, the changed children), never by the total size of a table, an aggregate or a response; where input sets the size, a hard cap enforced in code | a test above that size (an aggregate with many children, a table larger than a page) asserting the work stays bounded: rows written, queries issued, items read |
+| declares or uses something (a package, an export, a config key, a port; the clock, randomness, the environment, the network, files) | everything declared has a consumer in the change; a value the logic decides on that varies between runs (the current time, randomness that drives a branch, the environment, a remote answer) reaches the domain and application layers as an input, a parameter or a port. A value only stored or passed on (a generated id, an `updatedAt` stamp) may come from the native runtime | domain and application tests run with a fixed clock and a fake for every port; the project's unused-dependency or unused-export check, when it has one, reports nothing new |
 
 - **Invariants belong to the state, not to the flow.** A limit one flow checks binds every flow that writes the same state, so find the writers by searching the codebase for writes to that state, not by the flows the task names. A limit on one operation bounds an aggregate (per holder, per period); its window is a domain decision (Decision ownership).
 - **A row without its proof is not done.** The proof is a test in the change. `engineering-code-review` checks the same obligations against the diff.

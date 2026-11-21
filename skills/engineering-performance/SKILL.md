@@ -1,7 +1,7 @@
 ---
 name: engineering-performance
 description: "Performance rules for data access, loops, and Node.js event loop. Use when writing queries, iterating over collections, handling bulk operations, or processing large datasets. Detects N+1 patterns, unbounded queries, and algorithmic complexity issues."
-version: 2.0.1
+version: 2.1.0
 user-invocable: false
 ---
 
@@ -13,6 +13,16 @@ Every action must trace to: (a) the user's request, including the decisions it d
 
 
 # Performance
+
+## Cost bound
+
+The cost of any work over data is bounded by what it changes or returns, and the bound is known: the page, the batch, the children that changed. Work whose cost grows with the total size of a table, an aggregate or an external response is rejected, and where input sets the size a hard cap is enforced in code. The obligation and its proof are in Obligations in `engineering-governance`; the sections below are the common ways the bound is lost:
+
+- one query per item of a list (N+1);
+- a read with no page or cap;
+- a nested scan where a lookup map would do;
+- a page of parents, each loaded with its whole relation;
+- saving an aggregate by deleting its children and inserting them all again, instead of writing only the children that changed.
 
 ## N+1 queries
 

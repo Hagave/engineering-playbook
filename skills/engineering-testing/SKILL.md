@@ -1,7 +1,7 @@
 ---
 name: engineering-testing
 description: "Testing rules: test types, what to test, coverage requirements, test doubles, and reusable test data factories. Use when writing unit tests, integration tests, or E2E tests, or when reviewing test files."
-version: 2.3.0
+version: 2.4.0
 user-invocable: false
 ---
 
@@ -159,7 +159,7 @@ For ORMs without a compatible in-memory mode (e.g., Prisma), SQLite-in-memory is
 
 ## What to test
 
-- The proofs of the change's obligations (Obligations in `engineering-governance`): every writer of a shared state run interleaved, with the state's invariants asserted afterwards; each boundary of each input domain, on both sides.
+- The proofs of the change's obligations (Obligations in `engineering-governance`): every writer of a shared state run interleaved, with the state's invariants asserted afterwards; each boundary of each input domain, on both sides; the cost bound, at a size above the page or the change; time-dependent logic under a fixed clock.
 - All public methods of domain entities — verify invariant enforcement and state transitions.
 - Use case: happy path + each distinct error path.
 - Mapper transformations — test that all fields map correctly.
