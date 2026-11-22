@@ -997,6 +997,15 @@ so the gate itself names no language or framework:
 - a framework skill when the nearest manifest above the file declares its
   dependency (`@nestjs/core` in `package.json` → `engineering-nestjs`), so a
   monorepo is read per package;
+- an architecture skill when the directories above the file have the shape
+  that skill draws: `domain/`, `application/` and `infrastructure/` side by
+  side (hexagonal), or `modules/<feature>/` holding layer folders such as
+  `services/` (modular) or flat `<feature>.service.*` files (MVC). Only a file
+  under that structure needs it. Where two structures hold the same file
+  (modules of both shapes, or a `modules/` inside a hexagonal `src/`), the
+  gate requires neither, and the session context names the overlap so the
+  model confirms the architecture with the user. The session context also
+  names each structure it finds (`[playbook:architecture]`);
 - a topic skill when the file itself touches the topic: by file name
   (`Dockerfile`, `compose.yaml`, `*.prisma`, test files), by an import line
   naming a package (`amqplib`, `org.apache.kafka`, `confluent_kafka`), or by a
