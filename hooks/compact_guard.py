@@ -26,7 +26,6 @@ Blocking contract: never blocks. A PreCompact hook that fails or stalls
 interrupts the compaction it was supposed to protect.
 """
 
-import hashlib
 import json
 import os
 import subprocess
@@ -56,16 +55,20 @@ def carryover_path(session_id: str, agent_id: str = '') -> str:
     return path.replace('.state-', '.carryover-').replace('.json', '.md')
 
 
-def _project_key(cwd: str) -> str:
-    return hashlib.sha256(os.path.realpath(cwd).encode()).hexdigest()[:16]
+def _project_dir(cwd: str) -> str:
+    # Not the payload `cwd`: it follows the model's `cd`, while the SessionStart
+    # after a /clear arrives with the launch directory. CLAUDE_PROJECT_DIR is the
+    # launch directory in every Claude Code hook; Codex does not set it and keeps
+    # the cwd key, with the same miss after a `cd`.
+    return os.environ.get('CLAUDE_PROJECT_DIR') or cwd
 
 
 def project_carryover_path(cwd: str) -> str:
-    return os.path.join(STATE_DIR, f'.carryover-project-{_project_key(cwd)}.md')
+    return os.path.join(STATE_DIR, f'.carryover-project-{playbook_core.project_key(_project_dir(cwd))}.md')
 
 
 def handoff_path(cwd: str) -> str:
-    return os.path.join(STATE_DIR, f'.handoff-{_project_key(cwd)}.md')
+    return os.path.join(STATE_DIR, f'.handoff-{playbook_core.project_key(_project_dir(cwd))}.md')
 
 
 def _loads(line: str) -> dict:

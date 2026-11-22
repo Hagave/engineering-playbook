@@ -1,173 +1,82 @@
 ---
 name: engineering-docker
-description: "Docker and docker-compose rules. Invoke when Docker is part of the project setup: creating a Dockerfile, docker-compose, or .dockerignore. Covers multi-stage build structure, production security (non-root user, dumb-init, minimal layers), and compose composition based on project infrastructure choices."
-version: 2.2.0
+description: "Docker and docker-compose rules for any language. Invoke when Docker is part of the project setup: creating a Dockerfile, docker-compose, or .dockerignore. Covers multi-stage builds, production security (non-root user, an init process, minimal images), migrations as their own step, and compose composition based on project infrastructure choices. Per-ecosystem templates live in references/."
+version: 3.0.2
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 # Docker
 
 Never generate Docker files speculatively — only when Docker is selected during project setup.
 
+The rules below hold for every language. How a stage is written (base image, install command, build command) depends on the ecosystem: read the reference for the project's runtime before writing the Dockerfile.
+
+| Runtime | Reference |
+|---|---|
+| Node.js (TypeScript, JavaScript) | `references/node.md` |
+
+For a runtime with no reference, apply the rules with the ecosystem's own build tool and minimal runtime image, and say in the final message that the playbook had no template for it.
+
 | Step | Description | Status |
 |---|---|---|
-| 1 | Dockerfile (multi-stage: base → deps → development → builder → production) | — |
-| 2 | docker-compose.yml (services matching project infra choices) | — |
+| 1 | Dockerfile (multi-stage, per the rules below and the ecosystem reference) | — |
+| 2 | docker-compose.yml (services matching project infra choices; a `migrate` service when the project has migrations) | — |
 | 3 | .dockerignore | — |
-| 4 | docker/entrypoint-development.sh (With Prisma or Without Prisma variant) | — |
+| 4 | Development entrypoint, when the ecosystem reference has one | — |
 
 ---
 
-## Dockerfile — multi-stage structure
+## Dockerfile — rules
 
-Single-stage Dockerfiles are forbidden — they ship devDependencies, source code, and build tooling into the production image.
+Single-stage Dockerfiles are forbidden: they ship development dependencies, source code and build tooling into the production image.
 
 | Stage | Purpose |
 |---|---|
-| `base` | Node version, WORKDIR, system deps, package files only |
-| `deps` | Dependency installation — cached until `package.json` changes |
-| `development` | Local dev: non-root, bind-mount compatible, hot-reload entrypoint |
-| `builder` | Compiles source, prunes devDeps — produces the production artifact |
-| `production` | Minimal runtime: dist + production deps only, no source |
+| dependencies | The dependency manifest and lockfile only, so the layer stays cached until they change |
+| build | The toolchain: compiles or packages the source into the artifact |
+| development | Optional, local only: non-root, works with a bind-mounted source tree |
+| `migrate` | Only when the project has migrations: the migration tool and the migrations, run once per deploy |
+| `production` | A fresh minimal runtime image with the artifact and its runtime dependencies only |
 
-### Stage: base
-
-```dockerfile
-FROM node:22-alpine AS base
-WORKDIR /app
-RUN apk add --no-cache libc6-compat
-COPY package*.json ./
-```
-
-If Prisma is present, also copy config and schema — required for `prisma generate` in builder:
-
-```dockerfile
-COPY prisma.config.ts ./
-COPY src/infrastructure/database/prisma ./src/infrastructure/database/prisma/
-```
-
-- Use `node:<lts>-alpine`. Never `node:latest` or Debian unless a native addon explicitly requires glibc.
-- `libc6-compat` is required on Alpine for Node.js native binaries.
-- Copy only `package*.json` here — `COPY . .` at this stage cache-busts on every file change.
-
-### Stage: deps
-
-```dockerfile
-FROM base AS deps
-RUN npm ci --ignore-scripts
-```
-
-- `npm ci` not `npm install` — reproducible install from lockfile.
-- `--ignore-scripts` — prevents lifecycle scripts from untrusted packages from executing at install time.
-
-### Stage: development
-
-```dockerfile
-FROM base AS development
-RUN mkdir -p /app/dist /app/node_modules /app/src/infrastructure/database/prisma/generated && \
-    chown -R node:node /app
-USER node
-COPY --chown=node:node docker/entrypoint-development.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-EXPOSE 3000
-ENTRYPOINT ["/entrypoint.sh"]
-```
-
-- Create directories and set ownership before switching to non-root (Alpine's `node` user, GID/UID 1000).
-- The entrypoint script handles `npm install`, `prisma generate`, migrations, and `start:dev`. Keep the Dockerfile clean.
-
-### Stage: builder
-
-**With Prisma:**
-
-```dockerfile
-FROM base AS builder
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npx prisma generate
-RUN npm run build
-RUN npm prune --omit=dev
-```
-
-**Without Prisma:**
-
-```dockerfile
-FROM base AS builder
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npm run build
-RUN npm prune --omit=dev
-```
-
-- Copy `node_modules` from `deps` — do not reinstall.
-- `COPY . .` here is correct — this is where source enters.
-- `npm prune --omit=dev` after build removes devDependencies from what gets copied to production.
-- Never include `npx prisma generate` if Prisma is not in the project — it exits non-zero.
-
-### Stage: production
-
-**Common block (always):**
-
-```dockerfile
-FROM node:22-alpine AS production
-ARG ENVIRONMENT=production
-ENV NODE_ENV=${ENVIRONMENT}
-WORKDIR /app
-RUN apk add --no-cache libc6-compat dumb-init
-RUN addgroup -g 1001 nodejs && \
-    adduser -S -u 1001 -G nodejs nestjs
-COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
-COPY --from=builder --chown=nestjs:nodejs /app/package.json ./package.json
-```
-
-**With Prisma — additional COPY + CMD:**
-
-```dockerfile
-COPY --from=builder --chown=nestjs:nodejs /app/prisma.config.ts ./prisma.config.ts
-COPY --from=builder --chown=nestjs:nodejs /app/src/infrastructure/database/prisma ./src/infrastructure/database/prisma
-USER nestjs
-ENV PORT=8080
-EXPOSE 8080
-ENTRYPOINT ["dumb-init", "--"]
-CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && exec node dist/main.js"]
-```
-
-**Without Prisma:**
-
-```dockerfile
-USER nestjs
-ENV PORT=8080
-EXPOSE 8080
-ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "dist/main.js"]
-```
-
-- Start fresh from `node:22-alpine` — never inherit from `builder` (it has source, tooling, devDeps).
-- `dumb-init` is PID 1: forwards signals correctly and reaps zombies. Without it, `SIGTERM` on stop does not reach Node.js.
-- Dedicated non-root user with fixed GID/UID 1001. Never use the built-in `node` user in production.
-- Copy only `dist/`, `node_modules/`, `package.json`. Never copy `src/` or `tsconfig.json`.
-- All `COPY --from=builder` lines must include `--chown=nestjs:nodejs`.
-- `EXPOSE 8080` — production port, distinct from dev 3000.
-- Prisma only: `prisma migrate deploy` runs before app starts.
+- **Pinned base images.** A version tag, never `latest`. Prefer a minimal image (alpine, slim, distroless) unless a native library needs another one.
+- **Reproducible installs** from the lockfile, with install-time scripts disabled where the ecosystem allows it.
+- **Manifests before source.** Copy the dependency manifest and lockfile first and the source after, so a source change does not reinstall dependencies.
+- **The production stage starts fresh.** Never inherit from the build stage: it has the source, the compiler and the development dependencies. Copy only the artifact and what it needs at run time.
+- **A non-root user** with a fixed UID/GID in production.
+- **PID 1 forwards signals.** Use an init process (`dumb-init`, `tini`) as the entrypoint, unless the runtime is documented to handle `SIGTERM` and reap children as PID 1. Use the exec form for `CMD`/`ENTRYPOINT`, so the process gets the signals.
+- **No secrets in the image.** Never `ENV` or `ARG` for a secret: both stay in the layer history. A credential the build needs goes through a build secret (`RUN --mount=type=secret`).
 
 ### Forbidden Dockerfile patterns
 
 | Pattern | Reason |
 |---|---|
-| `FROM node:latest` | Unpinned — breaks reproducibility |
-| Single-stage build | Ships devDeps, source, and build tooling into production |
-| `RUN npm install` | Non-reproducible; use `npm ci` |
-| `COPY . .` in `base` or `deps` | Cache-busts on any source file change |
-| Running as root in production | Container escape = root on host |
-| `ENV SECRET=value` or `ARG SECRET` | Secrets end up in image layer history |
-| `CMD ["node", "dist/main"]` without dumb-init | PID 1 does not forward signals; ungraceful shutdown |
+| `FROM <image>:latest` | Unpinned — breaks reproducibility |
+| Single-stage build | Ships development dependencies, source and tooling into production |
+| `COPY . .` before installing dependencies | Invalidates the dependency cache on every source change |
+| Running as root in production | A container escape is root on the host |
+| `ENV SECRET=value` or `ARG SECRET` | Secrets end up in the image layer history |
+| A migration in the production `CMD` or `ENTRYPOINT` | See Migrations below |
+
+---
+
+## Migrations
+
+A schema migration runs as its own step, once per deploy, before the new version of the app starts:
+- in compose, a one-shot `migrate` service built from the `migrate` target, which the app waits for with `condition: service_completed_successfully`;
+- in an orchestrator, a job, an init container, or a release phase.
+
+It never runs in the `CMD` or `ENTRYPOINT` of the production image, for three reasons:
+1. **Every replica would migrate at boot**, racing each other.
+2. **A failed migration crash-loops the app** instead of stopping the deploy.
+3. **The production image would have to carry the migration tool.** When the tool is a development dependency, whether it survives the pruning depends on the package manager. Where it is gone, the container fails at start.
+
+The image that runs the migration must contain the tool: the `migrate` target is built from a stage that has it, never from the pruned runtime. The command is the project's own tool: the Migration tool row of the language opt-in (Flyway, Liquibase, EF Core, golang-migrate, goose, sqlx-cli, refinery, Rails, Prisma, Alembic and the rest).
 
 ---
 
@@ -180,80 +89,68 @@ Include only the services the project actually uses.
 | Database: PostgreSQL | `postgres` |
 | Database: MySQL | `mysql` |
 | Cache: Redis | `redis` |
+| The project has migrations | `migrate` |
 | Always | `app` |
 
-### App service
+### Services
 
 ```yaml
-app:
-  build:
-    context: .
-    dockerfile: Dockerfile
-    target: development
-  container_name: <project>-app
-  restart: unless-stopped
-  env_file:
-    - .env
-  environment:
-    DATABASE_URL: postgresql://${POSTGRESQL_USER:-postgres}:${POSTGRESQL_PASSWORD:-postgres}@postgres:5432/${POSTGRESQL_NAME:-postgres}
-    POSTGRESQL_HOST: postgres
-    POSTGRESQL_PORT: 5432
-    REDIS_URL: redis://redis:6379
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-  ports:
-    - '${PORT:-3000}:3000'
-  volumes:
-    - .:/app
-    - /app/node_modules
-    - /app/dist
-    - /app/src/infrastructure/database/prisma/generated
-  networks:
-    - <project>-network
+x-database: &database
+  DATABASE_URL: postgresql://${POSTGRESQL_USER:-postgres}:${POSTGRESQL_PASSWORD:-postgres}@postgres:5432/${POSTGRESQL_NAME:-postgres}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRESQL_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRESQL_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRESQL_NAME:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRESQL_USER:-postgres}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment: *database
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  app:
+    build:
+      context: .
+      target: production
+    restart: unless-stopped
+    environment: *database
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
 ```
 
-- `env_file: .env` for secrets. `environment:` for derived values (connection strings combining sibling service host/port).
-- `depends_on` with `condition: service_healthy` — app never starts before dependencies are ready.
-- Anonymous volumes for `node_modules`, `dist`, and `generated` — must NOT be overwritten by the bind mount.
-
-### PostgreSQL service
-
-```yaml
-postgres:
-  image: postgres:17-alpine
-  container_name: <project>-postgres
-  restart: unless-stopped
-  environment:
-    POSTGRES_USER: ${POSTGRESQL_USER:-postgres}
-    POSTGRES_PASSWORD: ${POSTGRESQL_PASSWORD:-postgres}
-    POSTGRES_DB: ${POSTGRESQL_NAME:-postgres}
-  ports:
-    - '${POSTGRESQL_PORT:-5432}:5432'
-  volumes:
-    - postgres_data:/var/lib/postgresql/data
-  healthcheck:
-    test: ['CMD-SHELL', 'pg_isready -U ${POSTGRESQL_USER:-postgres}']
-    interval: 10s
-    timeout: 5s
-    retries: 5
-  networks:
-    - <project>-network
-```
-
-If the project uses pgvector: `image: pgvector/pgvector:pg17`.
+- `env_file: .env` holds secrets; `environment:` holds derived values, such as a connection string built from sibling service names. The anchor keeps the `migrate` and `app` values identical.
+- `depends_on` with `condition: service_healthy` keeps the app and the migration from starting before the database is ready; `service_completed_successfully` keeps the app from starting before the migration finished.
+- The development app service (target `development`, source bind-mounted, published port) is in the ecosystem reference.
+- With pgvector: `image: pgvector/pgvector:pg17`.
 
 ### Redis service
 
 ```yaml
 redis:
   image: redis:7-alpine
-  container_name: <project>-redis
   restart: unless-stopped
-  ports:
-    - '${REDIS_PORT:-6379}:6379'
   volumes:
     - redis_data:/data
   healthcheck:
@@ -261,30 +158,13 @@ redis:
     interval: 10s
     timeout: 5s
     retries: 5
-  networks:
-    - <project>-network
 ```
 
-### Volumes and networks
+### Volumes, networks and credentials
 
-```yaml
-volumes:
-  postgres_data:
-    driver: local
-  redis_data:
-    driver: local
-
-networks:
-  <project>-network:
-    driver: bridge
-```
-
-- All persistent data uses named volumes — never bind-mount database data directories.
-- Named networks provide DNS resolution by container name (`postgres`, `redis`) — the default bridge network does not.
-
-### Credentials
-
-Pattern: `${VAR:-default}`. Never hardcode passwords. `.env` contains actual values; `.env.example` documents required vars without values.
+- All persistent data uses named volumes. Never bind-mount a database data directory.
+- Services reach each other by service name on the compose project's network. Publish a port only for what the host needs to reach.
+- Credentials use `${VAR:-default}`. Never hardcode passwords. `.env` holds the real values and is git-ignored; `.env.example` documents the variables without values.
 
 ### Runtime hardening
 
@@ -302,7 +182,7 @@ app:
 ```
 
 - `read_only: true` — the app writes only to `tmpfs` or to volumes it owns, so a compromised process cannot drop binaries or rewrite its own code. The development compose may skip it, because hot reload writes to the source tree.
-- `cap_drop: [ALL]` — a Node.js server on port 8080 needs no Linux capabilities. Add back only a named capability, with the reason in a comment.
+- `cap_drop: [ALL]` — a server listening on a port above 1024 needs no Linux capabilities. Add back only a named capability, with the reason in a comment.
 - `no-new-privileges:true` — setuid binaries inside the image cannot raise privileges.
 - Kubernetes uses the same settings under `securityContext`: `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, `runAsNonRoot: true`.
 
@@ -326,63 +206,16 @@ app:
 ## .dockerignore
 
 ```
-node_modules
-dist
 .git
 .env
 *.log
-coverage
-.nyc_output
 *.md
-*.test.ts
-*.spec.ts
 ```
 
----
-
-## Entrypoint script (development)
-
-`docker/entrypoint-development.sh`:
-
-**With Prisma:**
-
-```bash
-#!/bin/sh
-set -e
-
-echo "Installing/updating dependencies..."
-npm install
-
-echo "Generating Prisma client..."
-npx prisma generate
-
-echo "Running migrations..."
-npx prisma migrate deploy
-
-echo "Starting development server..."
-exec npm run start:dev
-```
-
-**Without Prisma:**
-
-```bash
-#!/bin/sh
-set -e
-
-echo "Installing/updating dependencies..."
-npm install
-
-echo "Starting development server..."
-exec npm run start:dev
-```
-
-- `set -e` — exit immediately on any error.
-- `exec` on the final command — replaces the shell so signals reach the app directly.
-- Never include Prisma commands if Prisma is not in the project — exits non-zero.
-- Commit with execute permission: `git update-index --chmod=+x docker/entrypoint-development.sh`.
+Add the ecosystem's build output, dependency directory and test files, as listed in its reference: what the build stage produces must never enter the build context from the host.
 
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

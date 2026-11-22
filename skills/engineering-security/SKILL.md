@@ -1,14 +1,14 @@
 ---
 name: engineering-security
 description: "Security rules for input validation, injection prevention, secrets management, auth, and HTTP. Use when handling user input, writing queries, managing credentials, implementing authentication or authorization, or configuring HTTP endpoints; also when code fetches URLs from input, handles files or uploads, parses untrusted data, uses cryptography, exposes GraphQL, edits CI/CD pipelines or dependencies, or calls an LLM. Holds per-vulnerability fiches in references/."
-version: 2.5.1
+version: 3.2.0
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -23,7 +23,7 @@ Every action must trace to: (a) user's explicit request, (b) code read in the re
   - **Other boundaries:** use the language/framework's validation library or schema validator (class-validator, Zod, Joi, or equivalent).
 - Whitelist allowed fields. Reject unknown properties.
 - User-facing text inputs must have explicit length caps before reaching processing, storage, or inference layers.
-- Validate format and type before processing: UUIDs, emails, enums, numeric ranges.
+- Accept each input only inside its declared domain, an allowlist: type and format, range, and its relation to now and to the state it refers to. A format check alone is not a domain. The rule and its proof are in Obligations in `engineering-governance`.
 
 ---
 
@@ -88,7 +88,14 @@ Before implementing authentication, determine who consumes the token — this de
 - Never expose stack traces, internal error messages, or implementation details to clients.
 - Use HTTPS everywhere. Never serve credentials or tokens over HTTP.
 - A WAF is not a control. It reduces noise in front of the application; the fix for a vulnerability lives in the code, and a finding is not closed because a WAF rule blocks its payload.
-- Behind a reverse proxy, trust `X-Forwarded-*` only from the proxy's address (Express `trust proxy` set to that hop, not `true`). The proxy and the application must agree on how a request is framed: reject requests carrying both `Content-Length` and `Transfer-Encoding`, and keep the proxy from passing ambiguous requests through (request smuggling, CWE-444).
+- Behind a reverse proxy, take the client address from `Forwarded` / `X-Forwarded-*` only through the hops you name: the proxy's address or CIDR, or the exact number of proxies in front of the application. A hop count is safe only when the application cannot be reached except through those proxies. Never use a setting that trusts every hop, however the framework spells it. That includes:
+  - a `true` flag;
+  - an all-addresses range (`0.0.0.0/0`, `::/0`);
+  - an emptied list of known proxies;
+  - a default that trusts every hop until configured. Set the value explicitly.
+
+  With any of these, a client picks its own IP by sending the header, which defeats per-IP rate limits, lockouts and audit records. Without a proxy, ignore the headers.
+- The proxy and the application must agree on how a request is framed: reject requests carrying both `Content-Length` and `Transfer-Encoding`, and keep the proxy from passing ambiguous requests through (request smuggling, CWE-444).
 
 ---
 
@@ -128,8 +135,8 @@ python3 <playbook>/lab/run.py --uninstall                   # removes the scanne
 ```
 
 - **Isolation.** The lab runs an isolated copy of the project's compose stack, as its own compose project. It removes published ports, fixed names, subnets and addresses, and gives the copy fresh volumes. Every network of the copy is marked `internal`, so no service reaches this computer, the local network or the internet, whatever the project's environment points at; a service that needs the internet to start does not start in the lab, and the run ends with exit code 3. It adds the scanner, OWASP ZAP baseline (passive), on its own internal network whose only other member is the target service. It refuses a service that shares a namespace, device or container with the host (`privileged`, `pid: host`, `devices`, added capabilities and the like). The developer's running stack is not touched.
-- **The target is a service, never a URL.** It is a compose service plus a port and a path. Nothing published (production, staging, any host not in the compose file) can be targeted, and there is no option to do so. The hook denies running scanners (`nmap`, `nuclei`, `sqlmap`, `ffuf`, ZAP and others), or scanner containers, outside `lab/run.py`.
-- **Folders of this computer.** When the project's compose file mounts folders of this computer into its containers (bind mounts), the lab refuses and lists them. The scan could otherwise write to the developer's real database or source tree. Re-run with `--allow-bind-mounts` only after showing the list to the user and getting their agreement.
+- **The target is a service, never a URL.** It is a compose service plus a port and a path. Run from the project with no `--service`, the lab finds the compose file (in the directory or a descendant; several and it lists them to pick with `--compose-file`) and scans every service built from inside the project, each in its own isolated bring-up, taking the port from `ports`/`expose`; `--service` and `--port` pick one. Nothing published (production, staging, any host not in the compose file) can be targeted, and there is no option to do so. The hook denies running scanners (`nmap`, `nuclei`, `sqlmap`, `ffuf`, ZAP and others), or scanner containers, outside `lab/run.py`.
+- **Folders of this computer.** A read-only mount whose source is inside the project (committed init scripts, seed data) is kept. A read-write mount is dropped before the lab starts, so the scan writes to a fresh, empty location and never to the developer's real database or source tree; the container uses its image's own content at that path. A read-only mount outside the project, and a `configs:`/`secrets:` file outside it, are refused with the path named.
 - **Nothing is kept.** The report lives in a temporary directory and is printed, then deleted. The lab's containers, network, volumes and built images are removed at the end of every run. Only the scanner image stays cached until `--uninstall`, and `--setup` states its size before downloading. Do not save the output to a file.
 - **Findings.** A Medium or High alert is a review candidate. Confirm it in the code, write the negative test from its fiche first (`engineering-testing`), then fix it. The test, not the report, is the record that it stays fixed.
 - **Exit codes.** `0` no Medium/High, `1` findings, `2` refused (environment or isolation, with the reason), `3` Docker or scanner error.
@@ -150,7 +157,7 @@ The rules above are the baseline. When the code reaches one of the sinks below, 
 | `untrusted-parsing.md` | deserializes, parses XML, merges objects from input, or runs a regex on input |
 | `access-control.md` | reads or changes an object by id, exposes a privileged operation, or copies a body into an entity |
 | `tokens-sessions.md` | issues or verifies JWTs, manages sessions or refresh tokens, or implements OAuth/OIDC |
-| `business-logic.md` | enforces a limit, balance, quota, single-use item, price or multi-step workflow |
+| `business-logic.md` | enforces a limit, balance, quota, single-use item, price or multi-step workflow, or writes a state another flow also writes |
 | `graphql.md` | exposes a GraphQL schema |
 | `crypto.md` | stores passwords, generates tokens or keys, encrypts, compares secrets, or configures TLS |
 | `supply-chain.md` | adds a dependency, changes a registry or base image, or edits a CI/CD pipeline |
@@ -163,5 +170,5 @@ The hostile inputs in a fiche are test data for the project's own code, run loca
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

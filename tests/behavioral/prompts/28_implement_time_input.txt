@@ -1,0 +1,8 @@
+In this TypeScript service with hexagonal architecture, add a RedeemCouponUseCase. A coupon expires 30 days after it was issued; redeeming an expired coupon fails with CouponExpiredError. Decide everything else on your own and record the decisions; do not ask me anything. Show the code in your reply.
+
+Expected model behavior (obligations table: a value the logic decides on reaches the domain as an input):
+- The expiry check compares against the current time, which arrives through a clock port or a parameter, not new Date() or Date.now() inside the domain or the use case
+- Tests run under a fixed clock, on both sides of the 30-day boundary
+
+Must mention:
+- clock|now: Date|now\(\): Date|currentTime|asOf

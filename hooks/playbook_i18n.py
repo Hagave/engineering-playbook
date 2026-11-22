@@ -98,6 +98,7 @@ STRINGS: dict[str, dict[str, str]] = {
     'learn': {'en': 'Learn', 'pt-br': 'Aprender', 'es': 'Aprender'},
     'diff': {'en': 'Diff panel', 'pt-br': 'Painel de diff', 'es': 'Panel de diff'},
     'back': {'en': 'Back', 'pt-br': 'Voltar', 'es': 'Volver'},
+    'custom': {'en': 'Custom value', 'pt-br': 'Personalizado', 'es': 'Personalizado'},
     'exit': {'en': 'Exit', 'pt-br': 'Sair', 'es': 'Salir'},
     # red-lab-playbook: the name is kept in every language; the words after it
     # say what it is, because a bare "lab" told the person nothing.
@@ -164,6 +165,54 @@ STRINGS: dict[str, dict[str, str]] = {
         'es': 'Presupuesto de contexto (tokens)',
     },
     'label_language': {'en': 'Language', 'pt-br': 'Idioma', 'es': 'Idioma'},
+    'label_reports': {
+        'en': 'Deviation reports to the maintainer',
+        'pt-br': 'Relatos de desvio ao mantenedor',
+        'es': 'Informes de desvío al mantenedor',
+    },
+    # A group of settings, as the main screen lists it, and its screen's help.
+    'group_budgets': {'en': 'Cost budgets', 'pt-br': 'Orçamentos de custo', 'es': 'Presupuestos de costo'},
+    'group_reminders': {
+        'en': 'Warnings and reminders',
+        'pt-br': 'Avisos e lembretes',
+        'es': 'Avisos y recordatorios',
+    },
+    'group_reminders_help': {
+        'en': 'What the playbook tells you before a risky action, and what it keeps for later.',
+        'pt-br': 'O que o playbook avisa antes de uma ação arriscada, e o que guarda para depois.',
+        'es': 'Lo que el playbook avisa antes de una acción arriesgada, y lo que guarda para después.',
+    },
+    'label_temporary_data': {
+        'en': 'Temporary data panel',
+        'pt-br': 'Painel Temporary data',
+        'es': 'Panel Temporary data',
+    },
+    'help_temporary_data': {
+        'en': ('In auto mode, a deletion you decline on the button above the chat is kept in '
+               'the Temporary data panel of this project, so you can remove it later. Off: a '
+               'declined deletion is only dropped. On by default.'),
+        'pt-br': ('No modo auto, uma remoção que você recusa no botão acima do chat fica no '
+                  'painel Temporary data deste projeto, para você apagar depois. Desligado: a '
+                  'remoção recusada só é descartada. Ligado por padrão.'),
+        'es': ('En modo auto, un borrado que rechazas en el botón sobre el chat queda en el '
+               'panel Temporary data de este proyecto, para borrarlo después. Apagado: el '
+               'borrado rechazado solo se descarta. Encendido por defecto.'),
+    },
+    'effect_temporary_data_on': {
+        'en': 'In force now: a deletion you decline is kept in the Temporary data panel.',
+        'pt-br': 'Em vigor agora: uma remoção recusada fica no painel Temporary data.',
+        'es': 'En vigor ahora: un borrado rechazado queda en el panel Temporary data.',
+    },
+    'effect_temporary_data_off': {
+        'en': 'In force now: a deletion you decline is dropped; what the panel holds stays.',
+        'pt-br': 'Em vigor agora: uma remoção recusada é descartada; o que o painel já tem fica.',
+        'es': 'En vigor ahora: un borrado rechazado se descarta; lo que el panel ya tiene queda.',
+    },
+    'group_budgets_help': {
+        'en': 'The CLAUDE.md size and the context size past which the playbook speaks up.',
+        'pt-br': 'O tamanho do CLAUDE.md e o tamanho de contexto a partir dos quais o playbook avisa.',
+        'es': 'El tamaño de CLAUDE.md y el tamaño de contexto a partir de los cuales el playbook avisa.',
+    },
     # What each setting does, shown under its name on its own screen.
     'help_prose': {
         'en': 'How much explanation a response carries. Applies from the next session.',
@@ -201,6 +250,22 @@ STRINGS: dict[str, dict[str, str]] = {
                   'As respostas seguem o idioma em que você escreve.'),
         'es': ('Idioma de este menú y sus mensajes. auto sigue el locale del sistema. '
                'Las respuestas siguen el idioma en que escribes.'),
+    },
+    'help_reports': {
+        'en': ('When a model reports a deviation from a skill rule, open a GitHub issue for '
+               'the maintainer with your account (gh), or show a pre-filled link. It sends only '
+               'the skill, its version, the rule as the skill words it, the model and the '
+               'playbook version: never your folder, code, session or reasoning. Off by default.'),
+        'pt-br': ('Quando um modelo relata um desvio de uma regra de skill, abre uma issue no '
+                  'GitHub para o mantenedor com a sua conta (gh), ou mostra um link '
+                  'pré-preenchido. Envia só a skill, a versão, a regra como a skill a escreve, o '
+                  'modelo e a versão do playbook: nunca a sua pasta, código, sessão ou raciocínio. '
+                  'Desligado por padrão.'),
+        'es': ('Cuando un modelo informa un desvío de una regla de skill, abre un issue en GitHub '
+               'para el mantenedor con tu cuenta (gh), o muestra un enlace prellenado. Envía solo '
+               'la skill, su versión, la regla como la skill la escribe, el modelo y la versión '
+               'del playbook: nunca tu carpeta, código, sesión o razonamiento. Apagado por '
+               'defecto.'),
     },
     'off': {'en': 'off', 'pt-br': 'desligado', 'es': 'apagado'},
     'on': {'en': 'on', 'pt-br': 'ligado', 'es': 'encendido'},
@@ -264,6 +329,19 @@ STRINGS: dict[str, dict[str, str]] = {
         'pt-br': 'Em vigor agora: este menu aparece em {value}.',
         'es': 'En vigor ahora: este menú se muestra en {value}.',
     },
+    'effect_reports_on': {
+        'en': ('In force from the next deviation a model reports: it is sent as an issue with '
+               'your GitHub account, or shown as a link when gh is missing or logged out.'),
+        'pt-br': ('Vale a partir do próximo desvio que um modelo relatar: ele sai como issue com '
+                  'a sua conta do GitHub, ou aparece como link quando o gh falta ou está sem login.'),
+        'es': ('En vigor desde el próximo desvío que informe un modelo: sale como issue con tu '
+               'cuenta de GitHub, o aparece como enlace cuando falta gh o no tiene sesión.'),
+    },
+    'effect_reports_off': {
+        'en': 'In force now: nothing is sent; deviations stay in the local journal only.',
+        'pt-br': 'Em vigor agora: nada é enviado; os desvios ficam só no diário local.',
+        'es': 'En vigor ahora: no se envía nada; los desvíos quedan solo en el diario local.',
+    },
     'effect_generic': {'en': 'In force now.', 'pt-br': 'Em vigor agora.', 'es': 'En vigor ahora.'},
     # The output filter's totals line (hooks/output_filter.py --report).
     'filter_empty': {
@@ -279,12 +357,214 @@ STRINGS: dict[str, dict[str, str]] = {
         'es': ('Filtro de salida: {count} salidas filtradas, {before} -> {after} caracteres '
                '(-{percent} %, unos {tokens} tokens)'),
     },
+    'destructive_ask': {
+        'en': ('[playbook] This command {effect}: `{command}`. Approve only if you want exactly '
+               'this to run. Where no one can answer this prompt it is denied: run the command '
+               'yourself.'),
+        'pt-br': ('[playbook] Este comando {effect}: `{command}`. Aprove só se você quer que '
+                  'exatamente isso rode. Onde ninguém pode responder este pedido, ele é negado: '
+                  'rode o comando você mesmo.'),
+        'es': ('[playbook] Este comando {effect}: `{command}`. Apruébalo solo si quieres que se '
+               'ejecute exactamente esto. Donde nadie puede responder esta solicitud, se '
+               'deniega: ejecuta el comando tú mismo.'),
+    },
+    # The button above the chat and the Temporary data panel (hooks/temporary_data.tsx).
+    'tmp_waiting': {
+        'en': 'Auto mode is waiting for your answer:',
+        'pt-br': 'O modo auto está esperando a sua resposta:',
+        'es': 'El modo auto espera tu respuesta:',
+    },
+    'tmp_row': {'en': '#{id} {effect}: {command}', 'pt-br': '#{id} {effect}: {command}',
+                'es': '#{id} {effect}: {command}'},
+    'tmp_hint': {
+        'en': 'Click, or ctrl+x tab, the arrows and Enter. The rest of the work goes on.',
+        'pt-br': 'Clique, ou ctrl+x tab, as setas e Enter. O resto do trabalho segue.',
+        'es': 'Haz clic, o ctrl+x tab, las flechas y Enter. El resto del trabajo sigue.',
+    },
+    'tmp_approve': {'en': 'Approve', 'pt-br': 'Aprovar', 'es': 'Aprobar'},
+    'tmp_decline': {'en': 'Decline', 'pt-br': 'Recusar', 'es': 'Rechazar'},
+    'tmp_more': {'en': '+{count} more waiting', 'pt-br': '+{count} na fila',
+                 'es': '+{count} más en espera'},
+    'tmp_cut': {
+        'en': 'Too long to run from here: answer in the chat ("pode apagar #{id}").',
+        'pt-br': 'Longo demais para rodar daqui: responda no chat ("pode apagar #{id}").',
+        'es': 'Demasiado largo para ejecutarlo desde aquí: responde en el chat ("pode apagar #{id}").',
+    },
+    'tmp_open': {'en': 'Temporary data ({count})', 'pt-br': 'Temporary data ({count})',
+                 'es': 'Temporary data ({count})'},
+    'tmp_title': {'en': 'Temporary data', 'pt-br': 'Temporary data', 'es': 'Temporary data'},
+    'tmp_help': {
+        'en': ('Deletions of this project you have not run yet. Pick one to remove it or keep '
+               'it: click, type its number and send, or ctrl+x tab and the arrows.'),
+        'pt-br': ('Remoções deste projeto que você ainda não rodou. Escolha uma para apagar ou '
+                  'manter: clique, digite o número e envie, ou ctrl+x tab e as setas.'),
+        'es': ('Borrados de este proyecto que aún no ejecutaste. Elige uno para borrarlo o '
+               'mantenerlo: haz clic, escribe su número y envía, o ctrl+x tab y las flechas.'),
+    },
+    'tmp_close': {'en': 'Close', 'pt-br': 'Fechar', 'es': 'Cerrar'},
+    'tmp_empty': {
+        'en': 'Nothing kept for this project.',
+        'pt-br': 'Nada guardado para este projeto.',
+        'es': 'Nada guardado para este proyecto.',
+    },
+    'tmp_item': {
+        'en': '{effect}: {command} (asked by Claude on {when})',
+        'pt-br': '{effect}: {command} (pedido pelo Claude em {when})',
+        'es': '{effect}: {command} (pedido por Claude el {when})',
+    },
+    'tmp_item_created': {
+        'en': '{effect}, made by Claude on {when}: {command}',
+        'pt-br': '{effect}, criado pelo Claude em {when}: {command}',
+        'es': '{effect}, creado por Claude el {when}: {command}',
+    },
+    'tmp_item_registered': {
+        'en': '{effect}, kept by Claude on {when}: {command}',
+        'pt-br': '{effect}, guardado pelo Claude em {when}: {command}',
+        'es': '{effect}, guardado por Claude el {when}: {command}',
+    },
+    'tmp_what_worktree': {'en': 'git worktree {name}', 'pt-br': 'worktree do git {name}',
+                          'es': 'worktree de git {name}'},
+    'tmp_what_tempdir': {'en': 'temporary folder {name}', 'pt-br': 'pasta temporária {name}',
+                         'es': 'carpeta temporal {name}'},
+    'tmp_what_tempfile': {'en': 'temporary file {name}', 'pt-br': 'arquivo temporário {name}',
+                          'es': 'archivo temporal {name}'},
+    'tmp_what_container': {'en': 'Docker container {name}', 'pt-br': 'container Docker {name}',
+                           'es': 'contenedor Docker {name}'},
+    'tmp_what_volume': {'en': 'Docker volume {name}', 'pt-br': 'volume Docker {name}',
+                        'es': 'volumen Docker {name}'},
+    'tmp_what_network': {'en': 'Docker network {name}', 'pt-br': 'rede Docker {name}',
+                         'es': 'red Docker {name}'},
+    'tmp_registered': {
+        'en': 'Kept in Temporary data.',
+        'pt-br': 'Guardado no Temporary data.',
+        'es': 'Guardado en Temporary data.',
+    },
+    'tmp_confirm': {
+        'en': 'Remove it? This runs, in {cwd}:',
+        'pt-br': 'Apagar? Isto roda, em {cwd}:',
+        'es': '¿Borrarlo? Esto se ejecuta, en {cwd}:',
+    },
+    'tmp_yes': {'en': 'Yes, remove', 'pt-br': 'Sim, apagar', 'es': 'Sí, borrar'},
+    'tmp_no': {'en': 'No, keep it', 'pt-br': 'Não, manter', 'es': 'No, mantener'},
+    'tmp_ran': {'en': '#{id} ran.', 'pt-br': '#{id} rodou.', 'es': '#{id} se ejecutó.'},
+    'tmp_failed': {
+        'en': 'It failed (exit {code}): {error}',
+        'pt-br': 'Falhou (saída {code}): {error}',
+        'es': 'Falló (salida {code}): {error}',
+    },
+    'tmp_kept': {
+        'en': '#{id} kept in Temporary data.',
+        'pt-br': '#{id} guardado no Temporary data.',
+        'es': '#{id} guardado en Temporary data.',
+    },
+    'tmp_dropped': {'en': '#{id} will not run.', 'pt-br': '#{id} não vai rodar.',
+                    'es': '#{id} no se ejecutará.'},
+    'tmp_removed': {'en': 'Removed.', 'pt-br': 'Apagado.', 'es': 'Borrado.'},
+    'tmp_gone': {
+        'en': 'Already answered: nothing to do.',
+        'pt-br': 'Já respondido: nada a fazer.',
+        'es': 'Ya respondido: nada que hacer.',
+    },
+    'destructive_part': {
+        'en': 'That is one part of a longer command: approving runs the whole command.',
+        'pt-br': 'Esse é um trecho de um comando maior: aprovar roda o comando inteiro.',
+        'es': 'Es una parte de un comando más largo: aprobarlo ejecuta el comando entero.',
+    },
+    'destroys_delete_tree': {
+        'en': 'deletes files and directories recursively',
+        'pt-br': 'apaga arquivos e diretórios recursivamente',
+        'es': 'borra archivos y directorios de forma recursiva',
+    },
+    'destroys_force_push': {
+        'en': 'overwrites the remote branch, dropping the commits it has that you do not',
+        'pt-br': 'sobrescreve o branch remoto, descartando os commits que ele tem e você não',
+        'es': 'sobrescribe la rama remota y descarta los commits que tiene y tú no',
+    },
+    'destroys_reset_hard': {
+        'en': 'discards every uncommitted change in the working tree and the index',
+        'pt-br': 'descarta toda mudança não commitada na árvore de trabalho e no índice',
+        'es': 'descarta todo cambio sin commit del árbol de trabajo y del índice',
+    },
+    'destroys_branch_delete': {
+        'en': 'deletes a branch even when its commits are not merged',
+        'pt-br': 'apaga um branch mesmo com commits ainda não mesclados',
+        'es': 'borra una rama aunque sus commits no estén fusionados',
+    },
+    'destroys_discard_changes': {
+        'en': 'discards uncommitted changes to the files it names',
+        'pt-br': 'descarta mudanças não commitadas dos arquivos que cita',
+        'es': 'descarta los cambios sin commit de los archivos que nombra',
+    },
+    'destroys_clean': {
+        'en': 'deletes files git does not track',
+        'pt-br': 'apaga arquivos que o git não rastreia',
+        'es': 'borra archivos que git no rastrea',
+    },
+    'destroys_stash_drop': {
+        'en': 'deletes stashed changes',
+        'pt-br': 'apaga mudanças guardadas no stash',
+        'es': 'borra cambios guardados en el stash',
+    },
+    'destroys_history': {
+        'en': 'deletes or rewrites git history that the reflog may not bring back',
+        'pt-br': 'apaga ou reescreve histórico do git que o reflog pode não recuperar',
+        'es': 'borra o reescribe historial de git que el reflog quizá no recupere',
+    },
+    'destroys_worktree_remove': {
+        'en': 'deletes a worktree together with its uncommitted changes',
+        'pt-br': 'apaga um worktree junto com as mudanças não commitadas dele',
+        'es': 'borra un worktree junto con sus cambios sin commit',
+    },
+    'destroys_sync_delete': {
+        'en': 'deletes the files at the destination that the source does not have',
+        'pt-br': 'apaga no destino os arquivos que a origem não tem',
+        'es': 'borra en el destino los archivos que el origen no tiene',
+    },
+    'destroys_shred': {
+        'en': 'overwrites files so they cannot be recovered',
+        'pt-br': 'sobrescreve arquivos para que não possam ser recuperados',
+        'es': 'sobrescribe archivos para que no se puedan recuperar',
+    },
+    'destroys_truncate': {
+        'en': 'empties files',
+        'pt-br': 'esvazia arquivos',
+        'es': 'vacía archivos',
+    },
+    'destroys_mass_delete': {
+        'en': 'deletes every file it matches',
+        'pt-br': 'apaga todo arquivo que casar com o filtro',
+        'es': 'borra todo archivo que coincida con el filtro',
+    },
+    'destroys_sql': {
+        'en': 'deletes data from a database',
+        'pt-br': 'apaga dados de um banco de dados',
+        'es': 'borra datos de una base de datos',
+    },
+    'destroys_script_delete': {
+        'en': 'deletes files recursively from inside a script',
+        'pt-br': 'apaga arquivos recursivamente de dentro de um script',
+        'es': 'borra archivos de forma recursiva desde un script',
+    },
+    'lsp_hint': {
+        'en': ('[playbook] {stack} project without a code-intelligence plugin: with '
+               '`{plugin}`, Claude sees type and name errors right after each edit, before '
+               'any build. Install the `{binary}` language server, then run '
+               '`/plugin install {plugin}@claude-plugins-official`. Shown once per project.'),
+        'pt-br': ('[playbook] Projeto {stack} sem plugin de code intelligence: com o '
+                  '`{plugin}`, o Claude vê erros de tipo e de nome logo após cada edição, antes '
+                  'de qualquer build. Instale o language server `{binary}` e depois rode '
+                  '`/plugin install {plugin}@claude-plugins-official`. Aviso único por projeto.'),
+        'es': ('[playbook] Proyecto {stack} sin plugin de code intelligence: con '
+               '`{plugin}`, Claude ve errores de tipo y de nombre justo después de cada edición, '
+               'antes de cualquier build. Instala el language server `{binary}` y luego ejecuta '
+               '`/plugin install {plugin}@claude-plugins-official`. Aviso único por proyecto.'),
+    },
 }
 
 # The panel's own strings, sent whole in `show --json` as `ui`.
 UI_KEYS = (
     'title', 'hint_main', 'hint_sub', 'opened', 'no_entry', 'current', 'default',
-    'status', 'learn', 'lab', 'diff', 'back', 'exit',
+    'status', 'learn', 'lab', 'diff', 'back', 'exit', 'custom',
     'lab_title', 'lab_help', 'lab_setup', 'lab_passive', 'lab_active', 'lab_sqlmap',
     'lab_uninstall',
 )

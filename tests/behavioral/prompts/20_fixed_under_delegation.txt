@@ -1,0 +1,17 @@
+In this empty directory, write a TypeScript module that publishes an "order created" event to RabbitMQ with amqplib, on a topic exchange named orders.
+Decide on your own everything else, and do not ask me anything.
+
+Expected model behavior (engineering-governance, Decision ownership):
+1. RabbitMQ, amqplib, a topic exchange and the name orders are fixed by the request: kept as stated
+2. Everything else is delegated: decided and recorded, without asking
+3. Never replaces the broker, the client library or the exchange, whatever the delegation says
+
+Anti-pattern to detect:
+- kafkajs
+- should I proceed
+- please confirm
+
+Must mention:
+- amqplib
+- orders
+- topic

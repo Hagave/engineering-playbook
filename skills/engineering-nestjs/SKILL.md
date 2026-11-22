@@ -1,14 +1,14 @@
 ---
 name: engineering-nestjs
 description: "**Opt-in for NestJS:** load only when NestJS is the chosen framework. NestJS-specific rules: module structure, controllers, dependency injection, DTOs, configuration, and logging. Use when working on a NestJS project: creating modules, controllers, services, guards, interceptors, or configuring the framework."
-version: 2.1.0
+version: 3.1.1
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 # NestJS
@@ -114,8 +114,9 @@ Remove deleted files from `app.module.ts` (controllers and providers arrays).
 # TypeORM + PostgreSQL
 <pm> add @nestjs/typeorm typeorm pg
 
-# Prisma
-<pm> add @prisma/client && <pm> add -D prisma
+# Prisma: the adapter and the CLI at the client's version (engineering-prisma, Installation)
+<pm> add @prisma/client
+<pm> add @prisma/adapter-pg@<the installed @prisma/client version> && <pm> add -D prisma@<the installed @prisma/client version>
 
 # Validation (always for NestJS)
 <pm> add class-validator class-transformer
@@ -135,8 +136,9 @@ Remove deleted files from `app.module.ts` (controllers and providers arrays).
 # Logger: nestjs-pino
 <pm> add nestjs-pino pino-http && <pm> add -D pino-pretty
 
-# Swagger (always)
+# Swagger (always); on Fastify the UI is served by @fastify/static, and the app exits at boot without it
 <pm> add @nestjs/swagger
+<pm> add @fastify/static   # Fastify only
 
 # Redis
 # cache-manager-ioredis-yet: verify maintenance status before use — check npm for recent activity
@@ -227,7 +229,7 @@ Verify: run `npm run lint:check` and `npm run test` before proceeding.
 
 Only after steps 1–11 are complete:
 
-1. Load `engineering-implement`. The STOP gate in that skill is mandatory — post the implementation checklist and wait for user confirmation before writing any domain entity, use case, or repository.
+1. Load `engineering-implement`. The STOP gate in that skill is mandatory — post the implementation checklist and wait for user confirmation before writing any domain entity, use case, or repository, unless the request delegated those decisions (Decision ownership in `engineering-governance`).
 2. Then load the architecture skill:
 
 | Architecture | Load skill |
@@ -251,7 +253,7 @@ Always prefer `@nestjs/*` packages over third-party alternatives.
 | Env validation | `@nestjs/config` + Joi | Zod, dotenv-safe, custom parsers |
 | Request validation | `class-validator` + `class-transformer` + `ValidationPipe` | Zod, Yup, Joi for request bodies |
 | HTTP client | `@nestjs/axios` | raw `axios`, `node-fetch`, `undici` |
-| Caching | `@nestjs/cache-manager` | direct `ioredis` for caching logic — **exception:** distributed locks, idempotency keys, and rate limiting counters require atomic Redis primitives not exposed by `@nestjs/cache-manager`; for those, use `ioredis` directly as specified in `engineering-concurrency` |
+| Caching | `@nestjs/cache-manager` | direct `ioredis` for caching logic — **exception:** distributed locks, rate limiting counters, and the idempotency claims of operations with no database effect require atomic Redis primitives not exposed by `@nestjs/cache-manager`; for those, use `ioredis` directly as specified in `engineering-concurrency`. The idempotency record of an operation that writes to the database is a row in that database, never a Redis key |
 | Rate limiting | `@nestjs/throttler` | custom middleware, `express-rate-limit` |
 | Scheduling | `@nestjs/schedule` | `node-cron`, `bull` for simple scheduling |
 | JWT | `@nestjs/jwt` + `@nestjs/passport` | raw `jsonwebtoken` |
@@ -401,19 +403,19 @@ Validate all env vars at startup via `@nestjs/config` with a Joi schema. Missing
 ```typescript
 ConfigModule.forRoot({
   isGlobal: true,
+  skipProcessEnv: true,
   validationSchema: Joi.object({
     NODE_ENV: Joi.string().valid('development', 'production', 'test').required(),
     PORT: Joi.number().default(3000),
     DATABASE_URL: Joi.string().required(),
     REDIS_URL: Joi.string().required(),
   }),
-  validationOptions: {
-    allowUnknown: false,
-    abortEarly: false,
-  },
 })
 ```
 
+- The schema validates the whole `process.env` merged with `.env`. Never set Joi's `allowUnknown: false`: it rejects `PATH`, `HOME` and every other variable of the machine, and the app never boots. `@nestjs/config` already gives a Joi schema `abortEarly: false` (every invalid variable reported at once) and `allowUnknown: true`.
+- `skipProcessEnv: true` keeps the variables of `process.env` that the schema does not declare out of `ConfigService`: only declared, validated values are served.
+- Since `@nestjs/config` 12 the schema is any Standard Schema (Joi 18, Zod 4), and `validationOptions` takes `{ libraryOptions }`, passed to that library. A project on an older major follows its installed version (see "Dependency versions" in `engineering-governance`).
 - Never read `process.env` directly outside the config validation module.
 - Inject `ConfigService` and use `getOrThrow` for required values.
 
@@ -437,5 +439,5 @@ If Logger is NestJS built-in: use `@nestjs/common` `Logger` and `(message, conte
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

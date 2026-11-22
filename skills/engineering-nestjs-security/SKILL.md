@@ -1,14 +1,14 @@
 ---
 name: engineering-nestjs-security
 description: "**Opt-in for NestJS:** load only when NestJS is the chosen framework. NestJS HTTP security setup: helmet (CSP), CORS with multi-origin callback, ThrottlerBehindProxyGuard, CSRF protection (cookie/session auth), and production-ready main.ts bootstrap. Loaded by engineering-nestjs Step 6 when HTTP security is selected."
-version: 1.1.0
+version: 2.0.1
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -21,7 +21,7 @@ Loaded from `engineering-nestjs` Step 6. Apply this entire step before moving to
 ## Packages
 
 **Fastify:** `@fastify/helmet @nestjs/throttler` — installed via `engineering-nestjs` Step 4 (Fastify branch).
-**Express:** `helmet @nestjs/throttler` — replace `app.register(helmet, ...)` with `app.use(helmet({ contentSecurityPolicy: { directives: { ... } } }))` throughout.
+**Express:** `helmet @nestjs/throttler` — replace `app.register(helmet, ...)` with `app.use(helmet({ contentSecurityPolicy: { directives: { ... } } }))` throughout, drop the `FastifyAdapter` argument, and set the proxy trust with `app.set('trust proxy', readTrustProxy())` right after `NestFactory.create`.
 **CSRF (only for cookie/session auth):** Layers 1–2 (cookie hardening + `CsrfGuard`) need **no extra packages** — just `@nestjs/config` and `Reflector`, already present. Layer 3 (optional token) adds Fastify `@fastify/cookie @fastify/csrf-protection` or Express `csrf-csrf cookie-parser`. Skip all of it for stateless Bearer-token APIs — see the CSRF protection section.
 
 ---
@@ -37,17 +37,33 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 // Logger: nestjs-pino only — remove this import if Logger was set to "NestJS built-in"
 import { Logger } from 'nestjs-pino';
-import { ConfigService } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import helmet from '@fastify/helmet';
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import { readTrustProxy } from './config/trust-proxy.config';
 // Adapt path to active architecture:
 // Hexagonal:          './presentation/modules/app.module'
 // MVC/Modular:        './app.module'
 import { AppModule } from './presentation/modules/app.module';
 
+const API_PREFIX = 'api';
+const DOCS_PATH = 'docs';
+// Swagger UI styles itself inline. Only its pages get this policy, and only in
+// development; scripts stay 'self' there too.
+const DOCS_CSP = [
+  `default-src 'self'`,
+  `script-src 'self'`,
+  `style-src 'self' 'unsafe-inline'`,
+  `img-src 'self' data:`,
+].join('; ');
+
 async function bootstrap(): Promise<void> {
+  // The adapter is built before ConfigService exists, so TRUST_PROXY is read
+  // once the env file is loaded, through the same validation as the rest.
+  await ConfigModule.envVariablesLoaded;
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({ trustProxy: true }),
+    new FastifyAdapter({ trustProxy: readTrustProxy() }),
     { bufferLogs: true },
   );
 
@@ -67,9 +83,9 @@ async function bootstrap(): Promise<void> {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: [`'self'`],
-        styleSrc: [`'self'`, `'unsafe-inline'`],
-        imgSrc: [`'self'`, 'data:', 'validator.swagger.io'],
-        scriptSrc: [`'self'`, `'unsafe-inline'`],
+        scriptSrc: [`'self'`],
+        styleSrc: [`'self'`],
+        imgSrc: [`'self'`, 'data:'],
       },
     },
   });
@@ -92,7 +108,7 @@ async function bootstrap(): Promise<void> {
     maxAge: 86_400,
   });
 
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix(API_PREFIX);
 
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
 
@@ -101,6 +117,19 @@ async function bootstrap(): Promise<void> {
   );
 
   if (isDev) {
+    const docsPrefix = `/${API_PREFIX}/${DOCS_PATH}`;
+    app
+      .getHttpAdapter()
+      .getInstance()
+      .addHook(
+        'onSend',
+        async (request: FastifyRequest, reply: FastifyReply, payload: unknown): Promise<unknown> => {
+          if (request.url.startsWith(docsPrefix)) {
+            reply.header('content-security-policy', DOCS_CSP);
+          }
+          return payload;
+        },
+      );
     const swaggerConfig = new DocumentBuilder()
       .setTitle('<project name>')
       .setDescription('<description>')
@@ -108,7 +137,7 @@ async function bootstrap(): Promise<void> {
       .addBearerAuth()
       .build();
     const document = SwaggerModule.createDocument(app, swaggerConfig);
-    SwaggerModule.setup('docs', app, document, { useGlobalPrefix: true });
+    SwaggerModule.setup(DOCS_PATH, app, document, { useGlobalPrefix: true });
   }
 
   const port = config.get<number>('PORT', 3000);
@@ -118,8 +147,56 @@ async function bootstrap(): Promise<void> {
 void bootstrap();
 ```
 
+Create `src/config/trust-proxy.config.ts`. It belongs to the config validation module: main.ts needs the value before `ConfigService` exists, and the AppModule schema reuses the same rule.
+
+```typescript
+import * as Joi from 'joi';
+
+// A hop count is passed as a function: the adapter options type has no number,
+// and Express's `trust proxy` takes the same (address, hop) function.
+export type TrustProxy = false | string[] | ((address: string, hop: number) => boolean);
+
+const HOP_COUNT = /^[1-9]\d*$/;
+
+export const trustProxySchema = Joi.string()
+  .trim()
+  .invalid('true')
+  .pattern(/^(?:false|[1-9]\d*|[\d.:a-fA-F/]+(?:\s*,\s*[\d.:a-fA-F/]+)*)$/)
+  .messages({
+    'any.invalid':
+      'TRUST_PROXY=true trusts every hop, so any client sets its own IP through X-Forwarded-For; ' +
+      'set the number of proxies in front of the app or their addresses',
+    'string.pattern.base': 'TRUST_PROXY must be false, a hop count, or a comma-separated list of proxy IPs/CIDRs',
+  });
+
+export const trustProxyEnvSchema = Joi.when('NODE_ENV', {
+  is: 'production',
+  then: trustProxySchema.required(),
+  otherwise: trustProxySchema.default('false'),
+});
+
+export function readTrustProxy(): TrustProxy {
+  const { error, value } = Joi.object<{ NODE_ENV?: string; TRUST_PROXY: string }>({
+    NODE_ENV: Joi.string(),
+    TRUST_PROXY: trustProxyEnvSchema,
+  }).validate({ NODE_ENV: process.env.NODE_ENV, TRUST_PROXY: process.env.TRUST_PROXY });
+  if (error) {
+    throw new Error(`Config validation error: ${error.message}`);
+  }
+  if (value.TRUST_PROXY === 'false') {
+    return false;
+  }
+  if (HOP_COUNT.test(value.TRUST_PROXY)) {
+    const hops = Number(value.TRUST_PROXY);
+    return (_address: string, hop: number): boolean => hop < hops;
+  }
+  return value.TRUST_PROXY.split(',').map((address): string => address.trim());
+}
+```
+
 Notes:
-- `trustProxy: true` — required behind any reverse proxy or load balancer; without it, `ThrottlerBehindProxyGuard` reads the proxy IP instead of the real client IP.
+- `TRUST_PROXY` — the number of proxies in front of the app (`1` behind one load balancer) or their addresses (`10.0.0.0/8,192.168.1.10`). With `false`, the default outside production, `X-Forwarded-For` is ignored and `req.ip` is the socket address. Production requires an explicit value, so a deploy behind a proxy cannot silently put every client in the proxy's rate-limit bucket. `true` is refused at boot: it trusts every hop, so any client picks its own IP by sending the header (the core rule in `engineering-security`, HTTP security).
+- CSP is strict on every route, in every environment. Only the Swagger pages, which exist only in development, get the inline styles Swagger UI needs; scripts stay `'self'` there too (`engineering-security/references/xss.md`).
 - `bufferLogs: true` — Nest holds log messages until Pino is initialized, preventing boot-time log loss.
 - If Logger was set to "NestJS built-in": remove both `import { Logger } from 'nestjs-pino'` and `app.useLogger(app.get(Logger))`. Removing only the call and leaving the import creates a dead import that violates the no-dead-code rule and will crash if `LoggerModule` is not registered.
 - Swagger is always dev-only. Never expose API docs in production.
@@ -130,7 +207,7 @@ Notes:
 
 ## ThrottlerBehindProxyGuard
 
-`ThrottlerGuard` (the default) reads `req.ip`, which behind a reverse proxy without `trustProxy` is always the proxy's IP — all clients share the same rate-limit bucket. `ThrottlerBehindProxyGuard` delegates to `req.ip` after Fastify's proxy resolution.
+`ThrottlerGuard` (the default) reads `req.ip`, which behind a reverse proxy with `TRUST_PROXY=false` is always the proxy's IP — all clients share the same rate-limit bucket. `ThrottlerBehindProxyGuard` delegates to `req.ip` after Fastify's proxy resolution, which follows `TRUST_PROXY`.
 
 Create in `src/common/guards/` — guards are cross-cutting concerns and belong in `common/` regardless of architecture:
 
@@ -143,12 +220,9 @@ import type { FastifyRequest } from 'fastify';
 @Injectable()
 export class ThrottlerBehindProxyGuard extends ThrottlerGuard {
   protected getTracker(req: Record<string, unknown>): Promise<string> {
-    // req.ip is resolved by Fastify based on trustProxy (set in main.ts):
-    //   - direct connections: socket.remoteAddress (real IP, cannot be spoofed)
-    //   - proxied connections: first IP from x-forwarded-for (real client IP when the
-    //     reverse proxy controls the header — configure nginx/LB to strip incoming XFF)
-    // Never parse x-forwarded-for directly: position [0] is client-writable regardless
-    // of array/string handling, allowing IP rotation to bypass per-IP rate limiting.
+    // Never parse x-forwarded-for here: its leading entries are written by the client,
+    // so reading them lets one client rotate IPs past the per-IP limit. req.ip already
+    // stops at the hops TRUST_PROXY trusts.
     return Promise.resolve((req as unknown as FastifyRequest).ip ?? 'unknown');
   }
 }
@@ -376,6 +450,7 @@ Add to the validation schema in `app.module.ts`:
 
 ```typescript
 CORS_ORIGIN: Joi.string().default(''),
+TRUST_PROXY: trustProxyEnvSchema, // import { trustProxyEnvSchema } from '../../config/trust-proxy.config'
 ```
 
 When CSRF Layer 3 (the double-submit token) is enabled, also add — the secret signs the
@@ -390,12 +465,12 @@ CSRF_SECRET: Joi.string().min(32).required(),
 
 ## Completion gate
 
-Before returning to `engineering-nestjs` Step 7: start the application and confirm it boots cleanly with all required env vars present. Add `CORS_ORIGIN` to `.env.example` with a placeholder and a comment. Verify that a request to a non-allowed origin returns `403` and a request to the correct origin succeeds.
+Before returning to `engineering-nestjs` Step 7: start the application and confirm it boots cleanly with all required env vars present. Add `CORS_ORIGIN` and `TRUST_PROXY` to `.env.example`, each with a placeholder and a comment (`TRUST_PROXY`: `false`, a hop count, or the proxy addresses). Verify that a request to a non-allowed origin returns `403` and a request to the correct origin succeeds. Verify that requests sent straight to the app with a different `X-Forwarded-For` each still share one rate-limit bucket, that `TRUST_PROXY=true` stops the boot, and that an API response carries no `'unsafe-inline'` in its `content-security-policy`.
 
 If CSRF protection was enabled: verify Layer 2 first — a `POST`/`PUT`/`PATCH`/`DELETE` with a disallowed or absent `Origin` returns `403`, the same request from an allowlisted origin succeeds, a `GET` is never blocked, and a `@SkipCsrf()` route passes regardless of origin. If Layer 3 was added, also add `CSRF_SECRET` to `.env.example` and confirm a mutation without a valid `x-csrf-token` is rejected while one carrying a freshly issued token succeeds.
 
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

@@ -17,6 +17,8 @@ blocking a turn that wrote code without confirming.
 
 Blocking contract (Claude Code hook semantics):
 - PreToolUse deny  → exit 0 + JSON {"hookSpecificOutput": {"permissionDecision": "deny", ...}}
+- PreToolUse ask   → exit 0 + JSON {"hookSpecificOutput": {"permissionDecision": "ask", ...}}:
+                     the harness's permission dialog, the destructive gate's only consent
 - Stop block       → exit 0 + JSON {"decision": "block", "reason": ...}
 - Warning          → exit 0 + JSON {"systemMessage": ...}
 Non-zero exit codes other than 2 are NOT blocking in Claude Code — never use
@@ -34,15 +36,18 @@ last write (the runner agent exists to run it cheaply), read from the
 subagent's state file; nothing ever writes another agent's state.
 """
 
+import contextlib
 import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import glob
 import time
+from datetime import datetime
 
 # Ensure hooks/ is importable regardless of how this file is loaded — as a
 # script (python3 hooks/context_guard.py, where sys.path already includes
@@ -50,6 +55,7 @@ import time
 # which does not add the file's directory to sys.path).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import playbook_core
+import playbook_i18n
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -106,10 +112,16 @@ VALIDATION_RE = playbook_core.VALIDATION_RE
 SUSPEND_SKILL = playbook_core.SUSPEND_SKILL
 RESUME_SKILLS = playbook_core.RESUME_SKILLS
 LEARNED_TOKEN = playbook_core.LEARNED_TOKEN
-DESTRUCTIVE_AUTHORIZED_RE = playbook_core.DESTRUCTIVE_AUTHORIZED_RE
 REVIEW_SKILLS = playbook_core.REVIEW_SKILLS
-PUSH_NOOP_RE = playbook_core.PUSH_NOOP_RE
-REVIEW_BYPASS_RE = playbook_core.REVIEW_BYPASS_RE
+
+# A review reads a repository through these: `git diff`, `git show`, and a
+# `git log` that prints patches. A plain `git log` lists commits without their
+# code, so it reads nothing a review could vouch for.
+REVIEW_READ_SUBS = frozenset({'diff', 'show'})
+PATCH_LOG_FLAGS = frozenset({'-p', '-u', '--patch'})
+DIFF_READS_KEPT = 50
+REVIEW_DELTA_LISTED = 20
+REVIEW_TIMES_KEPT = 20
 
 IMPL_TOOLS = {'Write', 'Edit', 'MultiEdit'}
 
@@ -133,6 +145,10 @@ COMMAND_NAME_RE = re.compile(r'<command-name>/?([\w:.-]+)</command-name>')
 _SESSION_ID = ''  # set by main() from hook stdin
 _AGENT_ID = ''    # set by main(); non-empty only for a subagent's own events
 _CWD = ''         # set by main(); the repo the hook is guarding
+# Set by main() on Stop and SubagentStop: the message that ended the turn, as
+# the event carries it. The transcript does not hold it yet when the hook runs
+# (captured on Claude Code 2.1.327: zero assistant records on disk at Stop).
+_FINAL_TEXT = ''
 
 
 def _state_path() -> str:
@@ -154,10 +170,7 @@ _VALIDATION_STARTS_KEPT = 8
 
 
 def _is_validation(tool_name: str, command: str) -> bool:
-    """A Bash command that validates, read with heredoc bodies and interpreter
-    payloads stripped: a doc that merely mentions `npm test` validates nothing."""
-    return tool_name == 'Bash' and bool(VALIDATION_RE.search(
-        playbook_core.strip_inline_payloads(playbook_core.strip_heredoc_bodies(command))))
+    return tool_name == 'Bash' and playbook_core.is_validation_command(command)
 
 
 def _note_validation_start(state: dict, tool_use_id: str) -> None:
@@ -232,9 +245,7 @@ def _assistant_text(obj: dict) -> str:
     return ''
 
 
-_NON_PROMPT_RE = re.compile(
-    r'^\s*(?:<system-reminder|<task-notification|<local-command|\[SYSTEM NOTIFICATION)'
-)
+_NON_PROMPT_RE = playbook_core.NON_PROMPT_RE
 
 
 def _is_prompt_text(text: str) -> bool:
@@ -261,9 +272,10 @@ def _is_user_prompt(obj: dict) -> bool:
     return False
 
 
-def _skill_uses(obj: dict) -> list[str]:
-    """Skill names invoked in this entry — Skill tool calls and slash commands."""
-    names: list[str] = []
+def _skill_uses(obj: dict) -> list[tuple[str, str]]:
+    """(tool_use id, skill name) for each skill invoked in this entry: Skill
+    tool calls, and slash commands with an empty id."""
+    names: list[tuple[str, str]] = []
     content = obj.get('message', {}).get('content')
     if obj.get('type') == 'assistant' and isinstance(content, list):
         for b in content:
@@ -272,7 +284,7 @@ def _skill_uses(obj: dict) -> list[str]:
                 inp = b.get('input', {})
                 value = inp.get('skill') or inp.get('command') or ''
                 if value:
-                    names.append(str(value))
+                    names.append((str(b.get('id') or ''), str(value)))
     elif obj.get('type') == 'user':
         text = content if isinstance(content, str) else ''
         if isinstance(content, list):
@@ -280,8 +292,17 @@ def _skill_uses(obj: dict) -> list[str]:
                 b.get('text', '') for b in content
                 if isinstance(b, dict) and b.get('type') == 'text'
             )
-        names.extend(COMMAND_NAME_RE.findall(text))
+        names.extend(('', n) for n in COMMAND_NAME_RE.findall(text))
     return names
+
+
+def _tool_results(obj: dict) -> list[tuple[str, bool]]:
+    """(tool_use id, whether it failed) for each tool result in a user entry."""
+    content = obj.get('message', {}).get('content')
+    if obj.get('type') != 'user' or not isinstance(content, list):
+        return []
+    return [(str(b.get('tool_use_id') or ''), bool(b.get('is_error')))
+            for b in content if isinstance(b, dict) and b.get('type') == 'tool_result']
 
 # ─── Context measurement ──────────────────────────────────────────────────────
 
@@ -374,12 +395,12 @@ def _measure_context(transcript: str | None) -> tuple[float, int] | None:
 
 # ─── Git helpers ──────────────────────────────────────────────────────────────
 
-def _git(*args: str) -> str:
+def _git(*args: str, cwd: str = '') -> str:
     """Git output, or '' on any failure. Fail-open by construction: a gate that
     cannot read the repo must not block the tool call."""
     try:
         out = subprocess.run(
-            ('git', '-C', _CWD or os.getcwd()) + args,
+            ('git', '-C', cwd or _CWD or os.getcwd()) + args,
             capture_output=True, text=True, timeout=3,
         )
         return out.stdout.strip() if out.returncode == 0 else ''
@@ -391,21 +412,120 @@ def _git_head() -> str:
     return _git('rev-parse', 'HEAD')
 
 
-def _push_range() -> str:
+def _worktree_heads() -> list[str]:
+    listing = _git('worktree', 'list', '--porcelain')
+    return [line[5:] for line in listing.splitlines() if line.startswith('HEAD ')]
+
+
+def _note_review(state: dict, at: float) -> None:
+    # A review does not say which worktree it read, so it credits the HEAD of
+    # every worktree of the session's repository: a commit made after it, in any
+    # of them, is not credited. The cost is a sibling worktree's commits that
+    # already existed and that this review never looked at. Repositories outside
+    # the session's own are credited only through what the review read
+    # (_reviewed_reads).
+    head = _git_head()
+    if head:
+        state['reviewed_head'] = head
+    heads = _worktree_heads()
+    if heads:
+        state['reviewed_heads'] = heads
+    times = [t for t in state.get('review_times') or [] if isinstance(t, (int, float))]
+    state['review_times'] = [*times, at][-REVIEW_TIMES_KEPT:]
+    # Findings are only in the text this turn flushes, so the check itself has
+    # to wait for Stop.
+    state['review_turn'] = True
+
+
+def _read_repositories(command: str) -> dict[str, bool]:
+    """Top-level directories of the repositories whose code `command` prints,
+    each with whether a read of it printed the working tree."""
+    roots: dict[str, bool] = {}
+    for call in playbook_core.git_calls(playbook_core.strip_heredoc_bodies(command), _CWD) or ():
+        if call.repo is None:
+            continue
+        if call.sub not in REVIEW_READ_SUBS and not (call.sub == 'log' and PATCH_LOG_FLAGS & set(call.args)):
+            continue
+        top = _git('rev-parse', '--show-toplevel', cwd=call.repo)
+        if top:
+            worktree = call.sub == 'diff' and playbook_core.reads_working_tree(call.args)
+            roots[top] = roots.get(top, False) or worktree
+    return roots
+
+
+def _in_review(state: dict, at: float) -> bool:
+    """Whether a review was loaded before `at` in the same turn: a turn that
+    ended in between (an allowed Stop) closes the review, so a diff read later,
+    while writing code, is not mistaken for one."""
+    reviews = [t for t in state.get('review_times') or [] if isinstance(t, (int, float))]
+    ends = [t for t in state.get('turn_ends') or [] if isinstance(t, (int, float))]
+    return any(start <= at and not any(start < end < at for end in ends) for start in reviews)
+
+
+def _note_diff_reads(state: dict, command: str) -> None:
+    reads = [r for r in state.get('diff_reads') or [] if isinstance(r, dict)]
+    now = time.time()
+    for top, worktree in _read_repositories(command).items():
+        head = _git('rev-parse', 'HEAD', cwd=top)
+        if not head:
+            continue
+        read: dict = {'repo': top, 'head': head, 'at': now}
+        blobs = playbook_core.working_tree_blobs(top) if worktree and _in_review(state, now) else None
+        if blobs is not None:
+            # One tree per repository is kept, so the state stays small: the
+            # latest read is the one a commit that follows it was made from.
+            for earlier in reads:
+                if earlier.get('repo') == top:
+                    earlier.pop('blobs', None)
+            read['blobs'] = blobs
+        reads.append(read)
+    state['diff_reads'] = reads[-DIFF_READS_KEPT:]
+
+
+def _reviewed_reads(state: dict) -> list[dict]:
+    """The reads a review made, with the HEAD (and, for a read of the working
+    tree, the files) as they were when it read them, so a commit or an edit
+    made afterwards stays unreviewed."""
+    reviewed: list[dict] = []
+    for read in state.get('diff_reads') or []:
+        if not isinstance(read, dict):
+            continue
+        at, head = read.get('at'), read.get('head')
+        if isinstance(at, (int, float)) and isinstance(head, str) and _in_review(state, at):
+            reviewed.append(read)
+    return reviewed
+
+
+def _reviewed_trees(state: dict, repo: str) -> list[playbook_core.ReviewedTree]:
+    top = _git('rev-parse', '--show-toplevel', cwd=repo)
+    trees = []
+    for read in _reviewed_reads(state):
+        blobs = read.get('blobs')
+        if read.get('repo') == top and isinstance(blobs, dict):
+            trees.append(playbook_core.ReviewedTree(
+                read['head'], {str(path): str(blob) for path, blob in blobs.items()}))
+    return trees
+
+
+def _line_time(obj: dict) -> float:
+    stamp = obj.get('timestamp')
+    if isinstance(stamp, str):
+        try:
+            return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+        except ValueError:
+            pass
+    return time.time()
+
+
+def _push_range(repo: str) -> str:
     """The diff range a push would publish: everything HEAD has that its
     upstream does not, falling back to the default branch for a branch that has
     no upstream yet."""
-    upstream = _git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')
+    upstream = _git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}', cwd=repo)
     if upstream:
         return f'{upstream}...HEAD'
-    head = _git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD')
+    head = _git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD', cwd=repo)
     return f'{head or "origin/main"}...HEAD'
-
-
-def _nothing_to_push() -> bool:
-    """True only when the upstream already contains HEAD. A branch with no
-    upstream returns '' and is treated as having something to push."""
-    return _git('rev-list', '--count', '@{u}..HEAD') == '0'
 
 
 # ─── Checks ───────────────────────────────────────────────────────────────────
@@ -415,13 +535,9 @@ def _nothing_to_push() -> bool:
 # is exactly what still has to get out at that point.
 HANDOFF_OPEN = '[HANDOFF]'
 HANDOFF_CLOSE = '[/HANDOFF]'
-# Markers must sit on lines of their own: a response that merely MENTIONS them
-# inline ("write between `[HANDOFF]` and `[/HANDOFF]`") would otherwise save the
-# text between the two mentions as a handoff, overwriting a real one.
-HANDOFF_RE = re.compile(
-    r'^[ \t]*' + re.escape(HANDOFF_OPEN) + r'[ \t]*\n(.*?)^[ \t]*' + re.escape(HANDOFF_CLOSE) + r'[ \t]*$',
-    re.DOTALL | re.MULTILINE,
-)
+# An inline mention of the markers would otherwise save the text between the two
+# mentions as a handoff, overwriting a real one.
+HANDOFF_RE = playbook_core.marker_block_re(HANDOFF_OPEN, HANDOFF_CLOSE)
 
 _HANDOFF_FORMAT = (
     f'Write the handoff in your response text between a {HANDOFF_OPEN} line and a '
@@ -574,6 +690,8 @@ def _scan_skills(transcript: str | None, state: dict) -> bool:
             offset = 0
             state['gov_loaded'] = False
             state['suspended'] = False
+            state['pending_skills'] = {}
+            state['unpaired_results'] = {}
         with open(transcript, encoding='utf-8', errors='replace') as f:
             f.seek(offset)
             for line in f:
@@ -583,48 +701,100 @@ def _scan_skills(transcript: str | None, state: dict) -> bool:
                     obj = json.loads(line)
                 except Exception:
                     continue
-                for name in _skill_uses(obj):
-                    base = name.rsplit(':', 1)[-1]
-                    if base == SUSPEND_SKILL:
-                        state['suspended'] = True
-                    elif base in RESUME_SKILLS:
-                        state['suspended'] = False
-                    elif base == GOVERNANCE_SKILL:
-                        state['gov_loaded'] = True
-                    if base in REVIEW_SKILLS:
-                        # Pins the review to the commit it actually read. A
-                        # commit made after the review is unreviewed code, and
-                        # the push gate must see that.
-                        head = _git_head()
-                        if head:
-                            state['reviewed_head'] = head
-                        # Findings are only in the text this turn flushes, so the
-                        # check itself has to wait for Stop.
-                        state['review_turn'] = True
-                    if base.startswith('engineering-'):
-                        loaded = state.get('skills')
-                        if not isinstance(loaded, list):
-                            loaded = []
-                        if base not in loaded:
-                            loaded.append(base)
-                        state['skills'] = loaded[-24:]
+                pending = state.get('pending_skills')
+                if not isinstance(pending, dict):
+                    pending = {}
+                results = state.get('unpaired_results')
+                if not isinstance(results, dict):
+                    results = {}
+                for use_id, name in _skill_uses(obj):
+                    if use_id and use_id not in results:
+                        pending[use_id] = [name, _line_time(obj)]
+                    elif not use_id or not results.pop(use_id):
+                        _apply_skill_load(state, name, _line_time(obj))
+                for use_id, failed in _tool_results(obj):
+                    call = pending.pop(use_id, None)
+                    if call is None:
+                        results[use_id] = failed
+                    elif not failed:
+                        _apply_skill_load(state, str(call[0]), float(call[1]))
+                state['pending_skills'] = dict(list(pending.items())[-_PENDING_SKILLS_CAP:])
+                state['unpaired_results'] = dict(list(results.items())[-_PENDING_SKILLS_CAP:])
             state['scan_offset'] = f.tell()
     except Exception:
         pass
     return bool(state.get('suspended'))
 
 
-def _check_skill_gate(state: dict) -> dict | None:
-    if state.get('gov_loaded'):
+# A Skill call counts once its result arrives without an error: a call the
+# harness rejects (an unknown skill, a denied permission) loaded no rules, and
+# counting the call alone let a write through the gate with a skill that was
+# never read. A call whose result never reaches the transcript stays pending,
+# which keeps the gate closed. The assistant record carrying a call can reach
+# the transcript after its result, so a result with no call yet waits in
+# unpaired_results. The cap bounds both maps for calls that never resolve. A
+# call with no id (a slash command, a transcript without ids) has no result to
+# pair and counts at once, as before.
+_PENDING_SKILLS_CAP = 32
+
+
+def _apply_skill_load(state: dict, name: str, at: float) -> None:
+    base = name.rsplit(':', 1)[-1]
+    if base == SUSPEND_SKILL:
+        state['suspended'] = True
+    elif base in RESUME_SKILLS:
+        state['suspended'] = False
+    elif base == GOVERNANCE_SKILL:
+        state['gov_loaded'] = True
+    if base in REVIEW_SKILLS:
+        _note_review(state, at)
+    _note_skill_loaded(state, base)
+
+
+# Every engineering-* skill the playbook ships fits under this cap; the skill
+# gate reads the whole list, so a cap that evicted one would re-deny a write
+# whose skill was loaded.
+_LOADED_SKILLS_CAP = 96
+
+
+def _note_skill_loaded(state: dict, base: str) -> None:
+    if not base.startswith('engineering-'):
+        return
+    loaded = state.get('skills')
+    if not isinstance(loaded, list):
+        loaded = []
+    if base not in loaded:
+        loaded.append(base)
+    state['skills'] = loaded[-_LOADED_SKILLS_CAP:]
+
+
+def _check_skill_gate(state: dict,
+                      required: list[playbook_core.SkillRequirement] | None = None,
+                      code_write: bool = True) -> dict | None:
+    """Deny a write until governance (for source) and every skill the write
+    requires (playbook_core.required_skills) were loaded in this session. One
+    message names everything missing and why, so a single round of Skill calls
+    clears it."""
+    loaded = state.get('skills') if isinstance(state.get('skills'), list) else []
+    missing_governance = code_write and not state.get('gov_loaded')
+    missing = [r for r in (required or []) if r.skill not in loaded]
+    if not missing_governance and not missing:
         return None
-    return {
-        'block': True,
-        'msg': (
-            '[playbook:skill-gate] engineering-governance has not been loaded this session. '
-            'Invoke the Skill tool with "engineering-governance" (which mandates its companion '
-            'skills) before writing any code. See the routing table in engineering-playbook.'
-        ),
-    }
+    parts = ['[playbook:skill-gate]']
+    if missing_governance:
+        parts.append(
+            'engineering-governance has not been loaded this session. Invoke the Skill tool '
+            'with "engineering-governance" before writing any code. See the routing table in '
+            'engineering-playbook.')
+    if missing:
+        listed = '; '.join(f'{r.skill} ({r.reason})' for r in missing)
+        parts.append(
+            f'This write also needs skills not loaded this session: {listed}. Invoke the Skill '
+            'tool for each, then retry the write. The rules come from what the file is '
+            '(language, framework in its manifest, the topic it touches), listed in the '
+            "playbook's hooks/data/skill_requirements.json; a /clear starts a new session, "
+            'so they are loaded again after it.')
+    return {'block': True, 'msg': ' '.join(parts)}
 
 
 def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
@@ -642,6 +812,8 @@ def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
     Absence of evidence is only fail-open when the window actually truncated the
     history. When the whole transcript fits inside it, a missing token really is
     a missing token, and the gate must still fire."""
+    if token in _FINAL_TEXT:
+        return True
     if not transcript or not os.path.exists(transcript):
         return True
     try:
@@ -660,40 +832,106 @@ def _token_after_last_prompt(transcript: str | None, token: str) -> bool:
     return truncated
 
 
-def _latest_user_prompt(transcript: str | None) -> str:
-    """Text of the most recent real user message, or ''."""
-    if not transcript or not os.path.exists(transcript):
-        return ''
-    for line in reversed(_read_tail_lines(transcript)):
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        if not _is_user_prompt(obj):
-            continue
-        content = obj.get('message', {}).get('content')
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return ' '.join(
-                b.get('text', '') for b in content
-                if isinstance(b, dict) and b.get('type') == 'text'
-            )
+# Trade-off: only the modes where a PreToolUse "ask" is documented to put a
+# dialog in front of the user — Manual (`default`), and auto mode, which sends a
+# hook's "ask" to the prompt instead of the classifier (hooks reference,
+# "PreToolUse ask decisions in auto mode"). The rest deny even where a dialog
+# might appear: bypassPermissions skips prompts, dontAsk denies them, and
+# acceptEdits (which auto-approves `rm`) and plan are not documented for it.
+_DIALOG_MODES = frozenset({'default', 'auto'})
+
+
+def _no_dialog_reason(input_data: dict) -> str:
+    """Why a permission dialog for this call cannot be trusted to reach the
+    user, or '' when it can."""
+    if _AGENT_ID:
+        return ('the call comes from a subagent, and the permission mode its payload reports '
+                'is not documented to be the mode it runs in')
+    if os.environ.get('CLAUDE_CODE_REMOTE') == 'true':
+        return 'in a cloud session a hook-raised permission dialog is not documented to reach the user'
+    mode = input_data.get('permission_mode')
+    if not isinstance(mode, str):
+        return 'the hook payload carries no permission mode'
+    if mode not in _DIALOG_MODES:
+        return f'in permission mode `{mode[:40]}` a permission dialog is not known to reach the user'
+    # Accepted: a `claude -p` run reports `default` too, and nothing in the
+    # payload tells it apart. There the harness denies the "ask" itself, or the
+    # run's own permission host (canUseTool, --permission-prompt-tool) answers
+    # it (headless docs) — never the model.
     return ''
 
 
-def _destructive_authorized(transcript: str | None) -> bool:
-    """Whether the user authorized a destructive operation in their current
-    message.
+def _consent_queued_msg(hit: dict, number: int) -> str:
+    return hit['msg'].replace(playbook_core.AUTHORIZATION_HINT, (
+        f"It is queued for the user's approval as #{number}. Do not stop or wait for it: "
+        'carry on with the rest of the work the user approved. In your next message to the '
+        f'user, say in plain words what #{number} removes, why it has to go, and what '
+        'happens if it is kept, and ask whether it may run. The user answers with the button '
+        'above the chat, where the playbook runs it or keeps it for later and tells you which, '
+        'or by writing so ("pode apagar", "pode remover", "yes, delete it"); for a written '
+        'approval the hook tells you, and you run this exact command again, once. Nothing '
+        'else lifts this block, and you cannot approve it yourself.'))
 
-    Read fresh from the latest user message on every call, which is what scopes
-    it: an authorization is good for the turn it was given in and no longer. It
-    is deliberately not persisted — a stored flag would let a "pode apagar" from
-    an hour ago clear a block on something the user never saw. And because only
-    user messages are scanned, the model cannot authorize itself by writing the
-    phrase in its own response."""
-    prompt = _latest_user_prompt(transcript)
-    return bool(prompt) and bool(DESTRUCTIVE_AUTHORIZED_RE.search(prompt))
+
+def _destructive_verdict(hit: dict, input_data: dict, command: str, prefs: dict) -> dict:
+    """What the gate answers for `hit` (a check_destructive block):
+
+    - `consented`: the user approved this exact command in the chat;
+    - `queue`: auto mode, the command is to be queued for that approval and
+      denied, so the run never stops on a dialog (`fallback` is the dialog,
+      should the queue be unwritable);
+    - `ask`: a permission dialog, worded for the user in their language
+      (Manual);
+    - a deny telling the model to hand the command to the user, where no
+      dialog can be trusted to reach them. An effect with no text to show is
+      denied too: a crash here would let the command run.
+
+    The first three are settled by the caller after every other gate: a deny
+    among them wins, so neither an approval nor a queued request carries a
+    command past a gate it does not mention."""
+    why = _no_dialog_reason(input_data)
+    effect_key = f"destroys_{hit.get('effect')}"
+    if not why and effect_key not in playbook_i18n.STRINGS:
+        why = 'the playbook has no text to show the user for this command'
+    if why:
+        return {**hit, 'msg': hit['msg'].replace(playbook_core.AUTHORIZATION_HINT, (
+            f'No permission dialog can be trusted to reach the user here ({why}), so the '
+            'playbook denies it: ask the user to run the command themselves. Nothing typed in '
+            'the chat lifts this block.'))}
+    language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'))
+    # The part that destroys stands in for the command only in a longer one:
+    # a single command is shown as typed, quotes and all.
+    part = str(hit.get('part') or '')
+    in_longer = bool(part) and len(playbook_core.shell_segments(command) or ()) > 1
+    message = playbook_i18n.text(
+        language, 'destructive_ask', effect=playbook_i18n.text(language, effect_key),
+        command=playbook_core.shown_command(part if in_longer else command))
+    if in_longer:
+        message += ' ' + playbook_i18n.text(language, 'destructive_part')
+    ask = {'ask': True, 'msg': message}
+    if not _SESSION_ID:
+        return ask
+    try:
+        if playbook_core.consent_take(STATE_DIR, _SESSION_ID, command, use=False):
+            return {'consented': True}
+    except OSError:
+        pass  # an approval that cannot be read is none: the user is asked again
+    if input_data.get('permission_mode') == 'auto':
+        return {'queue': True, 'hit': hit, 'fallback': ask, 'cwd': str(input_data.get('cwd') or '')}
+    return ask
+
+
+def _queue_for_consent(queued: dict, command: str) -> dict:
+    """Queue the command for the user's approval and return the deny that says
+    so; the dialog instead when the queue cannot be written, since then no
+    answer in the chat could ever approve it."""
+    hit = queued['hit']
+    try:
+        number = playbook_core.consent_request(
+            STATE_DIR, _SESSION_ID, command, str(hit.get('effect') or ''), queued['cwd'])
+    except OSError:
+        return queued['fallback']
+    return {**hit, 'msg': _consent_queued_msg(hit, number)}
 
 
 _FINDING_RE = re.compile(r'^\s*[-*]\s+`?[^`\n]+?:\d+`?\s*[—-]', re.MULTILINE)
@@ -708,7 +946,7 @@ def _review_findings(transcript: str | None) -> int:
     heading and produces no bullets, so a clean review never arms anything."""
     if not transcript or not os.path.exists(transcript):
         return 0
-    text_blocks: list[str] = []
+    text_blocks: list[str] = [] if not _FINAL_TEXT else [_FINAL_TEXT]
     for line in reversed(_read_tail_lines(transcript)):
         try:
             obj = json.loads(line)
@@ -717,7 +955,7 @@ def _review_findings(transcript: str | None) -> int:
         if _is_user_prompt(obj):
             break
         text = _assistant_text(obj)
-        if text:
+        if text and text != _FINAL_TEXT:
             text_blocks.append(text)
     findings = 0
     for text in text_blocks:
@@ -912,56 +1150,102 @@ def _check_watch(state: dict, prefs: dict, tool_name: str, tool_input: dict) -> 
     }
 
 
-def _check_push_gate(state: dict, transcript: str | None, command: str) -> dict | None:
-    """Deny a push whose HEAD has not been reviewed.
+def _credited_commits(state: dict) -> list[str]:
+    credited: list[str] = []
+    heads = state.get('reviewed_heads')
+    if isinstance(heads, list):
+        credited += [str(sha) for sha in heads]
+    if isinstance(state.get('reviewed_head'), str):
+        credited.append(state['reviewed_head'])
+    return credited + [read['head'] for read in _reviewed_reads(state)]
 
-    Pinned to the commit rather than to the session: reviewing, then committing
-    more, then pushing would otherwise publish unreviewed code under a review
-    that never saw it. The bypass is the user's own words in their latest
-    message (or PLAYBOOK_SKIP_REVIEW in the environment) — never the model's,
-    which would let it clear its own gate by writing the phrase.
 
-    Fail-open on everything it cannot establish: no git, no HEAD, nothing ahead
-    of upstream."""
-    if PUSH_NOOP_RE.search(command):
+def _review_command(repo: str, paths: list[str] | None = None) -> str:
+    same = os.path.realpath(repo) == os.path.realpath(_CWD or os.getcwd())
+    limited = f' -- {" ".join(shlex.quote(path) for path in paths)}' if paths else ''
+    return f'git {"" if same else f"-C {repo} "}diff {_push_range(repo)}{limited}'
+
+
+def _check_shell_edit(state: dict) -> dict | None:
+    if state.get('shell_edit_noted'):
         return None
+    return {
+        'block': False,
+        'to_model': True,
+        'model_only': True,
+        'msg': '[playbook:edit] This command edits project code from the shell. Use the edit tool for '
+               'project code: it checks each change against the file as read, and several edits can go '
+               'in one response. Keep a script for one mechanical change repeated across many files.',
+    }
+
+
+def _check_push_gate(state: dict, command: str) -> dict | None:
+    """Deny a push that publishes a commit no review covers.
+
+    Read from the repository each push runs in and the revisions it publishes,
+    not from the session's directory: a push from another worktree is about
+    that worktree's commits. A commit is covered when a remote-tracking ref has
+    it, a reviewed HEAD contains it, or it commits what a review read in the
+    working tree. The only waiver is PLAYBOOK_SKIP_REVIEW in the environment
+    Claude Code was started with, or the user running the push: nothing
+    written in the chat lifts it.
+
+    Fails closed when a push's directory or revisions cannot be resolved or git
+    cannot list its commits; outside a repository nothing is published."""
     if os.environ.get('PLAYBOOK_SKIP_REVIEW'):
         return None
-    # A push that only deletes refs publishes no code, so there is nothing to
-    # review — denying `git push origin --delete <merged branch>` until HEAD
-    # was reviewed was a measured false positive. Any push whose revisions are
-    # unknown still goes through the checks below.
-    targets = playbook_core.push_targets(command, _CWD)
-    if targets and all(t.revs == [] for t in targets):
+    credited = _credited_commits(state)
+    unknown = ''
+    pending: list[tuple[str, int, list[str]]] = []
+    for target in playbook_core.push_targets(command, _CWD):
+        if target.repo is None or target.revs is None:
+            unknown = unknown or target.reason
+            continue
+        found = playbook_core.unreviewed_commits(target.repo, target.revs, credited,
+                                                 _reviewed_trees(state, target.repo))
+        if found is None:
+            unknown = unknown or 'git could not list the commits it publishes'
+        elif found.count:
+            pending.append((target.repo, found.count, found.changed_after_review))
+    if not unknown and not pending:
         return None
 
-    head = _git_head()
-    if not head:
-        return None
-    if state.get('reviewed_head') == head:
-        return None
-    if state.get('review_bypass_head') == head:
-        return None
-    if REVIEW_BYPASS_RE.search(_latest_user_prompt(transcript)):
-        # Remembered per commit so the rest of this push (and a retry of it)
-        # does not re-prompt for a waiver the user already gave.
-        state['review_bypass_head'] = head
-        return None
-    if _nothing_to_push():
-        return None
-
+    waiver = ('Only the user can skip the review: by running the push themselves, or by '
+              'starting Claude Code with PLAYBOOK_SKIP_REVIEW=1. Nothing written in the chat '
+              'lifts this block, and you cannot waive it yourself.')
+    if not pending:
+        return {
+            'block': True,
+            'msg': (
+                f'[playbook:review-gate] Push denied — the hook could not determine what this '
+                f'push publishes ({unknown}), so it cannot confirm that it was reviewed. Push '
+                'with literal arguments from the repository directory (e.g. '
+                '`cd <worktree> && git push origin <branch>`).\n' + waiver
+            ),
+        }
+    repo, count, changed_after = pending[0]
+    if changed_after:
+        listed = changed_after[:REVIEW_DELTA_LISTED]
+        more = len(changed_after) - len(listed)
+        scope = (
+            'The review read the rest of this change; these files changed after it read them'
+            f'{f" ({more} more not listed)" if more else ""}: {", ".join(listed)}.\n'
+            f'Load the Skill `engineering-code-review` and review only them: '
+            f'`{_review_command(repo, listed if not more else None)}`. '
+        )
+    else:
+        scope = (f'Load the Skill `engineering-code-review` and review `{_review_command(repo)}` '
+                 'before pushing. ')
     return {
         'block': True,
         'msg': (
-            f'[playbook:review-gate] Push denied — HEAD {head[:7]} has not been reviewed.\n'
-            f'Load the Skill `engineering-code-review` and review `git diff {_push_range()}` '
-            'before pushing. Report findings as Blocker / Major / Minor and fix every Blocker.\n'
+            f'[playbook:review-gate] Push denied — {count} commit(s) it publishes from {repo} '
+            'have not been reviewed.\n' + scope +
+            'Report findings as Blocker / Major / Minor and fix every Blocker.\n'
             'Minimum coverage: information leakage (logs, responses, error payloads), N+1, '
             'idempotency, pagination done in memory, atomicity and transaction boundaries, '
             'dead code, algorithmic complexity, functionality that already exists and was not '
-            'reused, leftover console/print debugging, missing explicit types.\n'
-            'Bypass: the user says so explicitly (e.g. "pode pushar sem review"), '
-            'or PLAYBOOK_SKIP_REVIEW=1 in the environment. You cannot waive this yourself.'
+            'reused, leftover console/print debugging, missing explicit types.\n' + waiver
         ),
     }
 
@@ -1018,6 +1302,22 @@ def _check_spec_gate(transcript: str | None) -> dict | None:
 
 # ─── Output ───────────────────────────────────────────────────────────────────
 
+def _emit_ask(ask: dict, advisory: dict | None) -> None:
+    """The permission dialog, carrying any advisory that came with the call the
+    way _emit_pretooluse would deliver it."""
+    output: dict = {'hookSpecificOutput': {
+        'hookEventName': 'PreToolUse',
+        'permissionDecision': 'ask',
+        'permissionDecisionReason': ask['msg'],
+    }}
+    if advisory:
+        if advisory.get('to_model'):
+            output['hookSpecificOutput']['additionalContext'] = advisory['msg']
+        if not advisory.get('model_only'):
+            output['systemMessage'] = advisory['msg']
+    print(json.dumps(output))
+
+
 def _emit_pretooluse(result: dict) -> None:
     if result.get('block'):
         print(json.dumps({
@@ -1034,7 +1334,7 @@ def _emit_pretooluse(result: dict) -> None:
                 'hookEventName': 'PreToolUse',
                 'additionalContext': result['msg'],
             },
-            'systemMessage': result['msg'],
+            **({} if result.get('model_only') else {'systemMessage': result['msg']}),
         }))
     else:
         print(json.dumps({'systemMessage': result['msg']}))
@@ -1044,8 +1344,8 @@ def _emit_pretooluse(result: dict) -> None:
 def _turn_assistant_text(transcript: str | None) -> str:
     """Assistant text emitted after the most recent real user message."""
     if not transcript or not os.path.exists(transcript):
-        return ''
-    parts: list[str] = []
+        return _FINAL_TEXT
+    parts: list[str] = [] if not _FINAL_TEXT else [_FINAL_TEXT]
     for line in reversed(_read_tail_lines(transcript)):
         try:
             obj = json.loads(line)
@@ -1054,7 +1354,7 @@ def _turn_assistant_text(transcript: str | None) -> str:
         if _is_user_prompt(obj):
             break
         text = _assistant_text(obj)
-        if text:
+        if text and text != _FINAL_TEXT:
             parts.append(text)
     return '\n'.join(reversed(parts))
 
@@ -1072,6 +1372,103 @@ def _capture_handoff(transcript: str | None) -> None:
         pass  # a handoff write must never block a turn from ending
 
 
+# Seen blocks are kept by hash so the continuation Stop after a block, which
+# re-reads the same turn, records and announces each block once.
+_DEVIATIONS_SEEN_CAP = 64
+# The user-facing line for the deviations recorded at this Stop; every exit of
+# the Stop handler carries it, the blocking one included.
+_DEVIATION_NOTICE = ''
+
+
+def _capture_deviations(state: dict, transcript: str | None) -> str:
+    """Record each [PLAYBOOK-DEVIATION] block the model wrote this turn in the
+    deviation journal and return the notice for the user ('' when none is new).
+    A subagent's blocks are read from its own transcript and recorded too: a
+    deviation inside a subagent is the one most likely never to reach the user."""
+    try:
+        deviations = playbook_core.parse_deviations(_turn_assistant_text(transcript))
+    except Exception:  # noqa: BLE001 -- a deviation record must never block a turn from ending
+        return ''
+    seen = [h for h in state.get('deviations_seen') or [] if isinstance(h, str)]
+    loaded = state.get('skills') if isinstance(state.get('skills'), list) else []
+    journal = playbook_core.deviation_journal_path(STATE_DIR)
+    lines: list[str] = []
+    new: list[playbook_core.Deviation] = []
+    for deviation in deviations:
+        digest = hashlib.sha256(deviation.block.encode('utf-8')).hexdigest()[:16]
+        if digest in seen:
+            continue
+        seen.append(digest)
+        new.append(deviation)
+        fields = deviation.fields
+        skill = fields.get('skill', '')
+        version = playbook_core.skill_version(skill)
+        playbook_core.append_incident(journal, {
+            'ts': time.time(), 'session_id': _SESSION_ID, 'agent_id': _AGENT_ID, 'cwd': _CWD,
+            **{name: fields.get(name, '') for name in playbook_core.DEVIATION_FIELDS},
+            'skill_version': version, 'skill_loaded': skill in loaded,
+            'incomplete': list(deviation.incomplete),
+        }, max_lines=playbook_core.DEVIATION_MAX_LINES)
+        line = f'- {skill or "(no skill named)"}'
+        line += f' {version}' if version else ' (not a playbook skill)'
+        line += f' — {fields.get("action") or "?"}: {fields.get("rule", "")[:160]}'
+        if deviation.incomplete:
+            line += f' [incomplete: {", ".join(deviation.incomplete)}]'
+        lines.append(line)
+    state['deviations_seen'] = seen[-_DEVIATIONS_SEEN_CAP:]
+    if not lines:
+        return ''
+    who = f' (subagent {_AGENT_ID})' if _AGENT_ID else ''
+    notice = (f'[playbook:deviation] The model reported {len(lines)} deviation(s) from a playbook '
+              f'rule{who}, recorded in {journal}:\n' + '\n'.join(lines))
+    return notice + _report_deviations(new, transcript)
+
+
+def _turn_model(transcript: str | None) -> str:
+    """The model of the turn's last assistant message, '' when none is found."""
+    if not transcript or not os.path.exists(transcript):
+        return ''
+    for line in reversed(_read_tail_lines(transcript)):
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get('type') == 'assistant' and isinstance(obj.get('message'), dict):
+            return str(obj['message'].get('model') or '')
+    return ''
+
+
+def _report_deviations(deviations: list[playbook_core.Deviation], transcript: str | None) -> str:
+    """With the `reports` setting on, queue the new deviations for the maintainer
+    (hooks/deviation_report.py) and return what the user must see: the links of
+    reports gh cannot send. With it off, the one-time line that it exists.
+    Sending runs detached; this never waits on the network."""
+    try:
+        import deviation_report
+        store = deviation_report.store_path(STATE_DIR)
+        if not playbook_core.load_prefs(STATE_DIR).get('reports'):
+            if deviation_report.hint_once(store):
+                return ('\nDeviation reports to the playbook maintainer are off; '
+                        '/playbook-config can turn them on.')
+            return ''
+        model, version = _turn_model(transcript), deviation_report.playbook_version()
+        reports = [r for r in (deviation_report.build_report(
+            d.fields, playbook_core.skill_version(d.fields.get('skill', '')), model, 'claude', version)
+            for d in deviations if not d.incomplete) if r]
+        if not reports:
+            return ''
+        has_gh = deviation_report.gh_available()
+        shown = deviation_report.enqueue(store, reports, has_gh)
+        if has_gh:
+            deviation_report.start_drain(STATE_DIR)
+        if not shown:
+            return ''
+        return ('\nReports to the playbook maintainer that gh cannot send now: open each link to send it.\n'
+                + '\n'.join(deviation_report.link_lines(shown)))
+    except Exception:  # noqa: BLE001 -- a report must never block a turn from ending
+        return ''
+
+
 def _refresh_carryover(state: dict, transcript: str | None) -> None:
     """Keep the carry-over note current once the session is in compaction
     territory.
@@ -1079,12 +1476,14 @@ def _refresh_carryover(state: dict, transcript: str | None) -> None:
     PreCompact already writes it, but that only covers a compaction. A user who
     escapes a saturated session with /clear never fires PreCompact, and that is
     exactly the path the context guard recommends -- so the note is refreshed at
-    every turn end above the warn threshold."""
+    every turn end above the warn threshold, or once the user's budget was crossed:
+    on a 1M window the budget asks for the /clear well before the warn does."""
     if _AGENT_ID:
         return  # a subagent's context is discarded at its stop; nothing to carry
     try:
         measure = _measure_context(transcript)
-        if not measure or measure[0] < WARN_PCT:
+        over_warn = bool(measure) and measure[0] >= WARN_PCT
+        if not over_warn and not state.get('budget_level'):
             return
         import compact_guard
         compact_guard.write_note(_SESSION_ID, _AGENT_ID, transcript, state,
@@ -1119,12 +1518,16 @@ def _block_turn(state: dict, reason: str, gate: str) -> None:
     next. `gate` is recorded so the continuation Stop clears only its flag."""
     state['stop_blocked'] = [*state.get('stop_blocked', []), gate]
     _save_state(state)
-    print(json.dumps({'decision': 'block', 'reason': reason + _TURN_LOST_NOTE}))
+    output = {'decision': 'block', 'reason': reason + _TURN_LOST_NOTE}
+    if _DEVIATION_NOTICE:
+        output['systemMessage'] = _DEVIATION_NOTICE
+    print(json.dumps(output))
     sys.exit(0)
 
 
 def _handle_stop(input_data: dict, state: dict, transcript: str | None,
                  spec_transcript: str | None) -> None:
+    global _DEVIATION_NOTICE
     # Suspended via /playbook-off → no gate at all.
     if _scan_skills(transcript, state):
         state['pending_validation'] = False
@@ -1133,10 +1536,15 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
         _save_state(state)
         sys.exit(0)
 
+    if not _AGENT_ID and _SESSION_ID:
+        with contextlib.suppress(OSError):
+            playbook_core.consent_mark_turn_end(STATE_DIR, _SESSION_ID)
+
     # Before any gate can exit: a turn blocked by a gate below ends on a Stop that
     # carries stop_hook_active, which returns early -- the handoff written in the
     # blocked response would never be saved.
     _capture_handoff(transcript)
+    _DEVIATION_NOTICE = _capture_deviations(state, spec_transcript)
     _refresh_carryover(state, transcript)
 
     # A continuation after a block: the gates that already blocked this turn are
@@ -1148,6 +1556,7 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
                 state[flag] = False
     else:
         state['stop_blocked'] = []
+        state['shell_edit_noted'] = False
 
     # Spec gate, deferred from PreToolUse. Code was written this turn without a
     # visible [SPEC CONFIRMED]; the turn's text is now flushed, so this is the
@@ -1188,7 +1597,11 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
     if memory:
         _block_turn(state, memory['msg'], 'memory')
 
+    ends = [t for t in state.get('turn_ends') or [] if isinstance(t, (int, float))]
+    state['turn_ends'] = [*ends, time.time()][-REVIEW_TIMES_KEPT:]
     _save_state(state)
+    if _DEVIATION_NOTICE:
+        print(json.dumps({'systemMessage': _DEVIATION_NOTICE}))
     sys.exit(0)
 
 
@@ -1229,11 +1642,21 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
     if not notice:
         notice = _check_budget(int(pct * limit) if pct is not None else None, state, prefs)
     result = notice if notice and notice.get('block') else None
+    if not result and playbook_core.touches_consent_queue(tool_name, tool_input):
+        result = {'block': True, 'msg': (
+            '[playbook:safety] This call names the queue of destructive commands waiting for '
+            "the user's approval. That queue holds the user's answer: you may not read or "
+            'change it. Ask the user in your message instead.')}
+    # A destructive command the user can approve in a dialog, has approved in
+    # the chat, or is to be queued for that approval (auto mode). Each is the
+    # weakest verdict: every other gate still runs, and any deny among them
+    # wins, so an approval never carries a command past a gate it does not
+    # mention, and nothing is queued that another gate would deny anyway.
+    ask = None
+    consented = False
+    queued = None
 
     if not result and tool_name == 'Bash':
-        # The authorization lookup reads and parses the transcript tail, so it
-        # runs only once the pattern match has already fired — not on every
-        # Bash call, the vast majority of which are not destructive at all.
         # What a heredoc writes is data, not commands about to run: a commit
         # message that merely mentions a push, or a doc that documents a
         # dangerous command, must not trip gates that inspect commands.
@@ -1245,8 +1668,14 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
             playbook_core.strip_heredoc_bodies(command))
         destructive = _check_destructive(runnable, command, _CWD,
                                          disposable_root=_session_scratchpad())
-        if destructive and _destructive_authorized(transcript):
-            destructive = None
+        if destructive:
+            destructive = _destructive_verdict(destructive, input_data, command, prefs)
+            if destructive.get('ask'):
+                ask, destructive = destructive, None
+            elif destructive.get('consented'):
+                consented, destructive = True, None
+            elif destructive.get('queue'):
+                queued, destructive = destructive, None
         is_push = playbook_core.is_git_push(runnable)
         # Attribution and secrets before review: a push carrying either is
         # denied whether or not it was reviewed, and the review would not fix it.
@@ -1261,7 +1690,7 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
                       if is_push else None)
                   or (playbook_core.check_push_secrets(runnable, _CWD)
                       if is_push else None)
-                  or (_check_push_gate(state, transcript, runnable)
+                  or (_check_push_gate(state, runnable)
                       if is_push else None))
 
     # Only a deny takes the verdict slot here: a "possible secret" advisory in
@@ -1289,11 +1718,18 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
         _CWD or os.getcwd(),
     )
 
-    if not result and code_write:
-        # Governance must be loaded before any code write — this signal is a
-        # resolved Skill tool call, flushed before the write, so it is safe to
-        # enforce here (hard pre-write deny).
-        result = _check_skill_gate(state)
+    if not result:
+        # The skill loads are resolved Skill tool calls, flushed before the write,
+        # so a hard pre-write deny here cannot fire on a load still in flight.
+        required = playbook_core.required_skills(
+            tool_name, tool_input,
+            playbook_core.strip_heredoc_bodies(command) if tool_name == 'Bash' else '',
+            _CWD or os.getcwd())
+        if code_write or required:
+            result = _check_skill_gate(state, required, code_write)
+
+    shell_edit = _check_shell_edit(state) if not result and code_write and tool_name == 'Bash' else None
+    result = result or shell_edit
 
     # The advisory outranks every other non-blocking message (a watch hint):
     # governance names this hook the single source of truth for context health.
@@ -1305,9 +1741,27 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
         result = (secret_notice if not result else
                   {**secret_notice, 'msg': result['msg'] + '\n\n' + secret_notice['msg']})
 
+    if shell_edit and result and not result.get('block') and shell_edit['msg'] in result['msg']:
+        state['shell_edit_noted'] = True
+
     _save_state(state)
 
-    if result:
+    blocked = bool(result and result.get('block'))
+    if queued and not blocked:
+        verdict = _queue_for_consent(queued, command)
+        if verdict.get('ask'):
+            ask = verdict
+        else:
+            result = {**verdict, 'msg': verdict['msg'] + (f"\n\n{result['msg']}" if result else '')}
+    if consented and not blocked:
+        try:
+            playbook_core.consent_take(STATE_DIR, _SESSION_ID, command)
+        except OSError:
+            pass  # the approval stays: the user approved this command, it may run again once
+
+    if ask and not (result and result.get('block')):
+        _emit_ask(ask, result)
+    elif result:
         _emit_pretooluse(result)
     sys.exit(0)
 
@@ -1323,6 +1777,22 @@ def _is_tool_error(response: object) -> bool:
     if response.get('success') is False or response.get('is_error') is True:
         return True
     return bool(response.get('error') or response.get('errorMessage'))
+
+
+def _note_created_temporaries(input_data: dict, command: str) -> None:
+    """Keep in Temporary data what a command that ran made and leaves behind
+    (`created_temporaries`), for the person to remove later. The panel is
+    the project's, the folder Claude Code started in, whatever `cd` the
+    command made. A failure here loses a reminder, never the tool's result."""
+    if not _SESSION_ID or not playbook_core.load_prefs(STATE_DIR)['temporary_data']:
+        return
+    response = input_data.get('tool_response')
+    stdout = str(response.get('stdout') or '') if isinstance(response, dict) else ''
+    project = os.environ.get('CLAUDE_PROJECT_DIR') or _CWD or os.getcwd()
+    with contextlib.suppress(OSError, ValueError):
+        made = playbook_core.created_temporaries(command, stdout, _CWD or os.getcwd(),
+                                                 _session_scratchpad())
+        playbook_core.temporary_data_note_created(STATE_DIR, project, made, _SESSION_ID)
 
 
 def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -> None:
@@ -1360,6 +1830,26 @@ def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -
     if _is_tool_error(input_data.get('tool_response')):
         sys.exit(0)
 
+    # A subagent's Skill call is written to its own transcript, which no tool
+    # event carries: the scan above reads the parent's, so a subagent that
+    # loaded governance itself stayed denied for good. Its completed call is
+    # the one place that load is visible.
+    # The same event is also the first place the main session's review load is
+    # visible: the assistant record that carries the Skill call is not on disk
+    # yet when the next tool's hook reads the transcript, so a push right after
+    # a review was denied once and allowed on the retry.
+    if tool_name == 'Skill':
+        loaded = str(tool_input.get('skill') or tool_input.get('command') or '').rsplit(':', 1)[-1]
+        if loaded == GOVERNANCE_SKILL:
+            state['gov_loaded'] = True
+        _note_skill_loaded(state, loaded)
+        if loaded in REVIEW_SKILLS:
+            _note_review(state, time.time())
+
+    if tool_name == 'Bash':
+        _note_diff_reads(state, command)
+        _note_created_temporaries(input_data, command)
+
     if playbook_core.is_code_write(
             tool_name, tool_input,
             playbook_core.strip_heredoc_bodies(command) if tool_name == 'Bash' else '',
@@ -1389,7 +1879,7 @@ def _handle_posttooluse(input_data: dict, state: dict, transcript: str | None) -
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global _SESSION_ID, _AGENT_ID, _CWD
+    global _SESSION_ID, _AGENT_ID, _CWD, _FINAL_TEXT
     try:
         input_data = json.load(sys.stdin)
     except Exception:
@@ -1410,6 +1900,7 @@ def main() -> None:
         state = {'session_file': transcript, 'locked': False}
 
     if event in ('Stop', 'SubagentStop'):
+        _FINAL_TEXT = str(input_data.get('last_assistant_message') or '')
         spec_transcript = input_data.get('agent_transcript_path') if _AGENT_ID else transcript
         _handle_stop(input_data, state, transcript, spec_transcript)
     elif event == 'PostToolUse':

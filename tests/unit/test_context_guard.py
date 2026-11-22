@@ -24,6 +24,7 @@ spec.loader.exec_module(cg)
 
 sys.path.insert(0, os.path.join(_ROOT, 'hooks'))
 import playbook_core  # noqa: E402
+import playbook_i18n  # noqa: E402
 
 
 class TestCheckContext(unittest.TestCase):
@@ -358,6 +359,77 @@ class TestPushRevisions(unittest.TestCase):
     def test_dry_run_publishes_nothing(self):
         self.assertEqual(playbook_core.push_revisions(['--dry-run', 'origin', 'main']), [])
         self.assertEqual(playbook_core.push_revisions(['-n', 'origin', 'main']), [])
+        self.assertEqual(playbook_core.push_revisions(['origin', 'main', '-f', '-n']), [])
+
+    def test_porcelain_is_not_a_dry_run(self):
+        self.assertEqual(playbook_core.push_revisions(['--porcelain', 'origin', 'main']), ['main'])
+
+    def test_a_run_time_word_in_a_dry_run_is_unresolvable(self):
+        """The word may expand to `--no-dry-run`, which git honours."""
+        self.assertIsNone(playbook_core.push_revisions(['-n', 'origin', '$FLAGS']))
+
+    def test_flags_that_publish_nothing_extra(self):
+        for flag in ('-v', '--verbose', '-q', '--quiet', '--porcelain', '--progress', '-u',
+                     '--set-upstream', '-f', '--force', '--force-if-includes', '--atomic',
+                     '--no-verify', '--verify', '--prune', '--thin', '--follow-tags', '-4',
+                     '--ipv4', '-6',
+                     '--ipv6', '--force-with-lease', '--signed'):
+            with self.subTest(flag=flag):
+                self.assertEqual(playbook_core.push_revisions([flag, 'origin', 'main']), ['main'])
+
+    def test_an_optional_value_is_only_after_the_equals_sign(self):
+        """`--force-with-lease main` leases nothing: `main` is the refspec."""
+        for flag in ('--force-with-lease=main:abc123', '--force-with-lease=main', '--signed=if-asked'):
+            with self.subTest(flag=flag):
+                self.assertEqual(playbook_core.push_revisions([flag, 'origin', 'feat']), ['feat'])
+        self.assertEqual(playbook_core.push_revisions(['origin', '--force-with-lease', 'feat']),
+                         ['feat'])
+
+    def test_a_value_option_takes_the_next_word_or_its_value_after_equals(self):
+        for opt in ('-o', '--push-option', '--receive-pack', '--exec', '--repo'):
+            with self.subTest(opt=opt):
+                self.assertEqual(playbook_core.push_revisions([opt, 'x', 'origin', 'main']), ['main'])
+                if opt.startswith('--'):
+                    self.assertEqual(playbook_core.push_revisions([f'{opt}=x', 'origin', 'main']),
+                                     ['main'])
+
+    def test_every_spelling_of_delete_and_all(self):
+        self.assertEqual(playbook_core.push_revisions(['-d', 'origin', 'old']), [])
+        self.assertEqual(playbook_core.push_revisions(['--branches', 'origin']), ['--branches'])
+
+    def test_an_option_outside_the_closed_set_is_unknown(self):
+        """No abbreviation, no short-flag bundle, no negation, no value where git takes
+        none: each would need git's own option parser to read, so the push is denied
+        and a retry spelled as `git push -h` lists it passes."""
+        for args in (['--dr', 'origin', 'main'], ['-fn', 'origin', 'main'],
+                     ['-nf', 'origin', 'main'], ['--no-dry-run', 'origin', 'main'],
+                     ['-n', '--no-dry-run', 'origin', 'main'],
+                     ['-d', '--no-delete', 'origin', 'main'], ['--mir', 'origin'],
+                     ['--al', 'origin'], ['-fo', 'x', 'origin', 'main'],
+                     ['--future-flag', 'origin', 'main'], ['--no-follow-tags', 'origin', 'main'],
+                     ['--recurse-submodules=on-demand', 'origin', 'main'],
+                     ['--dry-run=yes', 'origin', 'main'], ['-o=x', 'origin', 'main']):
+            with self.subTest(args=args):
+                revs, reason = playbook_core.read_push(args)
+                self.assertIsNone(revs)
+                word = next(a for a in args if a.startswith('-') and a not in ('-n', '-d'))
+                self.assertIn(f'`{word}`', reason)
+                self.assertIn('git push -h', reason)
+
+    def test_end_of_options(self):
+        """After `--` every word is the remote or a refspec, as git reads it."""
+        self.assertEqual(playbook_core.push_revisions(['--', 'origin', 'main']), ['main'])
+        self.assertEqual(playbook_core.push_revisions(['origin', '--', 'main']), ['main'])
+        self.assertEqual(playbook_core.push_revisions(['-n', '--', 'origin', 'main']), [])
+
+    def test_a_refspec_source_shaped_like_an_option_is_unknown(self):
+        """Handed to `git log`, `--output=<file>` would write that file."""
+        for args in (['origin', '--', '--output=/tmp/x'], ['origin', '+--output=/tmp/x'],
+                     ['origin', '--', '-x:refs/heads/x']):
+            with self.subTest(args=args):
+                revs, reason = playbook_core.read_push(args)
+                self.assertIsNone(revs)
+                self.assertIn('starts with `-`', reason)
 
     def test_glab_mr_create_with_co_author_blocks(self):
         cmd = 'glab mr create --description "fix\n\nco-authored-by: claude"'
@@ -786,18 +858,38 @@ class TestDestructiveFalsePositives(unittest.TestCase):
     def test_a_real_destructive_command_is_still_blocked(self):
         self.assertIsNotNone(playbook_core.check_destructive(self.DANGEROUS + 'var/data'))
 
-    def test_authorization_phrases_are_not_questions(self):
-        authorized = ('pode apagar a pasta build', 'go ahead and delete it',
-                      'você pode remover esse arquivo', 'eu autorizo apagar',
-                      'confirmo o reset', 'I confirm the deletion')
-        not_authorized = ('o que acontece se apagar?', 'never delete the database',
-                          'delete is destructive')
-        for text in authorized:
-            with self.subTest(text=text):
-                self.assertTrue(playbook_core.DESTRUCTIVE_AUTHORIZED_RE.search(text))
-        for text in not_authorized:
-            with self.subTest(text=text):
-                self.assertFalse(playbook_core.DESTRUCTIVE_AUTHORIZED_RE.search(text))
+    def test_every_effect_has_dialog_text_in_every_language(self):
+        """A missing string would leave the gate nothing to ask with; it denies
+        then, but the dialog is the path the user is meant to get."""
+        effects = {effect for _, effect in
+                   playbook_core.DESTRUCTIVE_RULES + playbook_core.DELETION_TEXT_RULES} | {
+            'script_delete'}
+        for effect in sorted(effects):
+            for language in playbook_i18n.LANGUAGE_NAMES:
+                with self.subTest(effect=effect, language=language):
+                    self.assertTrue(playbook_i18n.STRINGS[f'destroys_{effect}'].get(language))
+        for language in playbook_i18n.LANGUAGE_NAMES:
+            with self.subTest(language=language):
+                template = playbook_i18n.STRINGS['destructive_ask'][language]
+                self.assertIn('{effect}', template)
+                self.assertIn('{command}', template)
+
+    def test_each_detection_names_its_effect(self):
+        for command, effect in (('rm -rf build', 'delete_tree'),
+                                ('git push --force origin main', 'force_push'),
+                                ('x=rm; $x -rf build', 'delete_tree'),
+                                ('python3 -c "import shutil; shutil.rmtree(\'b\')"', 'script_delete')):
+            with self.subTest(command=command):
+                runnable = playbook_core.strip_inline_payloads(command)
+                self.assertEqual(playbook_core.check_destructive(runnable, command)['effect'], effect)
+
+    def test_an_effect_without_text_is_denied_not_asked(self):
+        hit = {'block': True, 'effect': 'unheard_of',
+               'msg': f'[playbook:safety] x {playbook_core.AUTHORIZATION_HINT}'}
+        with mock.patch.object(cg, '_AGENT_ID', ''), mock.patch.dict(os.environ, {'CLAUDE_CODE_REMOTE': ''}):
+            verdict = cg._destructive_verdict(hit, {'permission_mode': 'auto'}, 'rm -rf b', {})
+        self.assertTrue(verdict.get('block'))
+        self.assertIn('run the command themselves', verdict['msg'])
 
     def test_deleting_inside_the_session_scratchpad_needs_no_consent(self):
         """Decided for 4.0.0: what the session made in its own scratchpad is
@@ -834,24 +926,6 @@ class TestDestructiveFalsePositives(unittest.TestCase):
         with mock.patch.object(cg.tempfile, 'gettempdir', return_value=tmp), \
                 mock.patch.object(cg, '_SESSION_ID', ''):
             self.assertEqual(cg._session_scratchpad(), '')
-
-    def test_a_general_approval_does_not_authorize_destruction(self):
-        """Release review of 4.0.0: each of these unlocked rm -rf for the turn."""
-        for text in ('pode rodar os testes', 'pode executar', 'pode seguir com o plano',
-                     'pode prosseguir', 'eu autorizo', 'confirmo', 'assumo o risco',
-                     'I confirm the spec looks right', 'i authorize it'):
-            with self.subTest(text=text):
-                self.assertFalse(playbook_core.DESTRUCTIVE_AUTHORIZED_RE.search(text))
-
-    def test_review_waiver_names_the_review(self):
-        for text in ('pode pushar sem review', 'skip review', 'pula o review',
-                     'no review needed'):
-            with self.subTest(text=text):
-                self.assertTrue(playbook_core.REVIEW_BYPASS_RE.search(text))
-        for text in ('no review comments so far', 'pode pushar', 'pode dar push',
-                     'push direto', 'deixa assim', 'deixa passar'):
-            with self.subTest(text=text):
-                self.assertFalse(playbook_core.REVIEW_BYPASS_RE.search(text))
 
 
 class TestInlinePayloadFalsePositives(unittest.TestCase):

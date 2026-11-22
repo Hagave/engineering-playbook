@@ -5,7 +5,7 @@ The project uses NestJS with hexagonal architecture and DDD.
 Expected model behavior (engineering-implement loaded):
 1. Loads companion skills: engineering-typescript, engineering-security, engineering-concurrency, engineering-error-handling, engineering-performance
 2. Produces an implementation checklist (domain entity, use case, repository interface, repository implementation, DTO, controller, tests)
-3. STOPS and waits for user confirmation
+3. Stops for the open decisions (no delegation in the request) and waits for the user
 4. Does NOT write any code before confirmation
 5. After confirmation: emits [SPEC CONFIRMED] as first line of response
 6. Checks for rate limiting (engineering-security: password endpoints need throttling)

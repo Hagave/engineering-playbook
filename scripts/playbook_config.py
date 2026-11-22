@@ -49,8 +49,13 @@ HARNESSES = ('claude', 'codex', 'antigravity')
 # - context_budget: needs the token counts only Claude Code's transcript has.
 # - language: only Claude Code's settings panel draws fixed text; elsewhere the
 #   model writes the menu itself, in the language the user writes in.
+# - reports: queued by the Stop hook from the deviation blocks it records, and
+#   only Claude Code's Stop hook records them.
+# - temporary_data: the panel is a Claude Code mod, and only its auto mode
+#   queues destructive commands for an answer.
 HARNESS_SETTINGS = {
-    'claude': ('prose', 'watch', 'claude_md_budget', 'context_budget', 'language'),
+    'claude': ('prose', 'watch', 'temporary_data', 'claude_md_budget', 'context_budget',
+               'language', 'reports'),
     'codex': ('prose',),
     'antigravity': ('prose',),
 }
@@ -61,6 +66,15 @@ DESCRIPTIONS = {
     'claude_md_budget': 'characters the project CLAUDE.md may grow to (0 = off)',
     'context_budget': 'context tokens past which to wrap up and /clear (0 = off)',
     'language': 'language of the settings menu (auto | en | pt-br | es)',
+    'reports': 'send deviation reports to the playbook maintainer (on | off)',
+    'temporary_data': 'keep declined deletions in the Temporary data panel (on | off)',
+}
+
+# Settings the panel lists under one row of the main screen, which opens a
+# screen of their own: the digits 1-9 hold five setting rows.
+GROUPS: dict[str, tuple[str, ...]] = {
+    'budgets': ('claude_md_budget', 'context_budget'),
+    'reminders': ('watch', 'temporary_data'),
 }
 
 
@@ -75,8 +89,8 @@ def effect_note(key: str, value: object, language: str = 'en') -> str:
     say = playbook_i18n.text
     if key == 'prose':
         return say(language, 'effect_prose')
-    if key == 'watch':
-        return say(language, 'effect_watch_on' if value else 'effect_watch_off')
+    if key in playbook_core.PREF_FLAGS:
+        return say(language, f'effect_{key}_on' if value else f'effect_{key}_off')
     if key in ('claude_md_budget', 'context_budget'):
         if not value:
             return say(language, f'effect_{key}_off')
@@ -94,12 +108,17 @@ CHOICES: dict[str, list[tuple[str, str]]] = {
     'prose': [(level, level) for level in playbook_core.PROSE_LEVELS],
     'watch': [('on', 'on'), ('off', 'off')],
     'claude_md_budget': [('0', 'off'), ('20000', '20k'), ('40000', '40k'), ('80000', '80k')],
-    'context_budget': [('0', 'off'), ('250000', '250k'), ('400000', '400k'),
-                       ('550000', '550k'), ('800000', '800k')],
+    'context_budget': [('0', 'off'), ('550000', '550k'), ('650000', '650k'), ('850000', '850k')],
     'language': list(playbook_i18n.LANGUAGE_LABELS.items()),
+    'reports': [('on', 'on'), ('off', 'off')],
+    'temporary_data': [('on', 'on'), ('off', 'off')],
 }
 
 _TRANSLATED_CHOICES = ('on', 'off')
+
+# Settings the panel also offers a typed value for: its "custom" entry hands
+# the request to the model, which asks for the number and runs `set`.
+CUSTOM_VALUE_KEYS = ('context_budget',)
 
 
 def _as_choice(value: object) -> str:
@@ -132,10 +151,24 @@ def snapshot(prefs: dict, harness: str = 'claude', environ: dict | None = None) 
                 'default': _as_choice(playbook_core.PREFS_DEFAULTS[key]),
                 'choices': [{'value': value, 'label': _choice_label(label, language)}
                             for value, label in CHOICES[key]],
+                'custom': key in CUSTOM_VALUE_KEYS,
+                'group': _group_of(key),
             }
             for key, description in DESCRIPTIONS.items() if key in HARNESS_SETTINGS[harness]
         ],
+        'groups': [
+            {
+                'key': group,
+                'label': playbook_i18n.text(language, f'group_{group}'),
+                'help': playbook_i18n.text(language, f'group_{group}_help'),
+            }
+            for group, members in GROUPS.items() if set(members) & set(HARNESS_SETTINGS[harness])
+        ],
     }
+
+
+def _group_of(key: str) -> str:
+    return next((group for group, members in GROUPS.items() if key in members), '')
 
 
 def _render(prefs: dict, harness: str = 'claude') -> str:

@@ -1,0 +1,124 @@
+{
+  "_comment": "Skills the write gate requires before a write, read by playbook_core.required_skills. companions: every source write. languages: the opt-in matching the written file's extension. frameworks: a dependency named in the nearest manifest above the file, for files of the listed languages. topics: what the written file itself touches, by file name (paths, matched against the base name or, with a '/', the path relative to the project) or by an import line naming a package (imports) or a code pattern (patterns). A topic applies to source files only, unless non_code is true; when_framework limits it to files a framework row already applies to.",
+  "companions": [
+    "engineering-security",
+    "engineering-concurrency",
+    "engineering-error-handling",
+    "engineering-performance"
+  ],
+  "_languages_comment": "One row per language the playbook has an opt-in for: the extensions the write gate maps to it, and the marker files in a project root that make the session name it. Rows are checked in this order, so a Kotlin Gradle project (build.gradle.kts) is found before a Java one (build.gradle). Every extension the gate treats as source belongs to a row here or to uncovered_extensions, so a language is never dropped by omission.",
+  "languages": {
+    "typescript": {"extensions": [".ts", ".tsx", ".mts", ".cts"], "markers": ["tsconfig.json"], "skill": "engineering-typescript"},
+    "rust": {"extensions": [".rs"], "markers": ["Cargo.toml"], "skill": "engineering-rust"},
+    "go": {"extensions": [".go"], "markers": ["go.mod"], "skill": "engineering-go"},
+    "csharp": {"extensions": [".cs"], "markers": ["*.csproj", "*.fsproj", "*.sln"], "skill": "engineering-csharp"},
+    "kotlin": {"extensions": [".kt", ".kts"], "markers": ["build.gradle.kts", "settings.gradle.kts"], "skill": "engineering-kotlin"},
+    "java": {"extensions": [".java"], "markers": ["pom.xml", "build.gradle", "settings.gradle"], "skill": "engineering-java"},
+    "ruby": {"extensions": [".rb"], "markers": ["Gemfile", "*.gemspec"], "skill": "engineering-ruby"},
+    "python": {"extensions": [".py", ".pyi"], "markers": ["pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements.txt"], "skill": "engineering-python"},
+    "cpp": {"extensions": [".cpp", ".cc", ".cxx", ".hpp", ".hxx"], "markers": ["CMakeLists.txt", "meson.build", "conanfile.txt", "conanfile.py", "vcpkg.json"], "skill": "engineering-cpp"}
+  },
+  "_uncovered_comment": "Source extensions with no opt-in yet: only the companions apply to them. They are listed so every source extension is accounted for, which a structural test checks. .c, .h and .m stay here because they are shared by C, C++ and Objective-C, and the extension alone cannot tell which.",
+  "uncovered_extensions": [".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".php", ".scala", ".sc", ".swift", ".dart", ".fs", ".exs", ".ex", ".erl", ".clj", ".cljs", ".hs", ".lua", ".zig", ".sh", ".bash", ".zsh", ".mm", ".c", ".h", ".m"],
+  "frameworks": [
+    {
+      "skill": "engineering-nestjs",
+      "languages": ["typescript"],
+      "manifests": {"package.json": ["@nestjs/core"]}
+    },
+    {
+      "skill": "engineering-prisma",
+      "languages": ["typescript"],
+      "manifests": {"package.json": ["@prisma/client", "prisma"]}
+    }
+  ],
+  "_architectures_comment": "One row per architecture skill, matched by the directories above a written source file, never by its content, and taken from the tree each skill draws. layers: an ancestor of the file, up to the project root, holds every one of these directories. container with module_dirs or module_files: the file sits under <container>/<module>/, and a module of that container has one of these subdirectories (module_dirs) or a file directly inside matching one of these names (module_files). A file that rows of two architectures match needs neither: the structure is ambiguous, and the session notice says so.",
+  "architectures": [
+    {
+      "skill": "engineering-arch-hexagonal",
+      "name": "hexagonal",
+      "layers": ["domain", "application", "infrastructure"]
+    },
+    {
+      "skill": "engineering-arch-modular",
+      "name": "modular",
+      "container": "modules",
+      "module_dirs": ["controllers", "handlers", "services", "repositories"]
+    },
+    {
+      "skill": "engineering-arch-mvc",
+      "name": "mvc",
+      "container": "modules",
+      "module_files": ["*.controller.*", "*.handler.*", "*.service.*", "*.repository.*"]
+    }
+  ],
+  "topics": [
+    {
+      "skill": "engineering-docker",
+      "non_code": true,
+      "paths": [
+        "Dockerfile", "Dockerfile.*", "*.Dockerfile", "*.dockerfile", "Containerfile",
+        "docker-compose.yml", "docker-compose.yaml", "docker-compose.*.yml", "docker-compose.*.yaml",
+        "compose.yml", "compose.yaml", "compose.*.yml", "compose.*.yaml", ".dockerignore"
+      ]
+    },
+    {
+      "skill": "engineering-prisma",
+      "non_code": true,
+      "paths": ["*.prisma"],
+      "imports": ["@prisma/client"]
+    },
+    {
+      "skill": "engineering-rabbitmq",
+      "imports": [
+        "amqplib", "amqp-connection-manager", "@golevelup/nestjs-rabbitmq",
+        "github.com/rabbitmq/amqp091-go", "github.com/streadway/amqp",
+        "com.rabbitmq", "org.springframework.amqp", "RabbitMQ.Client", "MassTransit.RabbitMqTransport",
+        "pika", "aio_pika", "lapin", "bunny"
+      ]
+    },
+    {
+      "skill": "engineering-kafka",
+      "imports": [
+        "kafkajs", "node-rdkafka", "@confluentinc/kafka-javascript",
+        "github.com/segmentio/kafka-go", "github.com/confluentinc/confluent-kafka-go",
+        "github.com/IBM/sarama", "github.com/Shopify/sarama",
+        "org.apache.kafka", "org.springframework.kafka", "Confluent.Kafka",
+        "confluent_kafka", "kafka", "aiokafka", "rdkafka", "karafka"
+      ]
+    },
+    {
+      "skill": "engineering-testing",
+      "paths": [
+        "*.spec.*", "*.test.*", "*.e2e-spec.*", "*_test.go", "test_*.py", "*_test.py",
+        "*Test.java", "*Tests.java", "*IT.java", "*Test.kt", "*Tests.kt",
+        "*Test.cs", "*Tests.cs", "*_spec.rb", "*_test.rb",
+        "test/*", "tests/*", "spec/*", "*/test/*", "*/tests/*", "*/__tests__/*", "*/spec/*"
+      ]
+    },
+    {
+      "skill": "engineering-nestjs-security",
+      "when_framework": "engineering-nestjs",
+      "imports": ["helmet", "@fastify/helmet", "@nestjs/throttler", "@fastify/csrf-protection", "csrf-csrf", "@fastify/cors"],
+      "patterns": ["\\bNestFactory\\.create\\b"]
+    },
+    {
+      "skill": "engineering-nestjs-logger",
+      "when_framework": "engineering-nestjs",
+      "imports": ["nestjs-pino", "pino", "pino-http"],
+      "patterns": [
+        "\\bnew\\s+Logger\\s*\\(",
+        "import\\s*(?:type\\s*)?\\{[^}]*\\bLogger\\b[^}]*\\}\\s*from\\s*['\"]@nestjs/common['\"]"
+      ]
+    },
+    {
+      "skill": "engineering-nestjs-interceptors",
+      "when_framework": "engineering-nestjs",
+      "patterns": [
+        "\\bimplements\\s+(?:\\w+(?:<[^<>]*>)?\\s*,\\s*)*(?:NestInterceptor|ExceptionFilter)\\b",
+        "@Catch\\s*\\(",
+        "\\bAPP_(?:INTERCEPTOR|FILTER)\\b"
+      ]
+    }
+  ]
+}

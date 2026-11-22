@@ -1,14 +1,14 @@
 ---
 name: engineering-architecture
 description: "Layer rules, forbidden patterns, and compatibility governance. Use for architecture decisions, when code crosses layer boundaries, when modifying a shared or public-contract artifact, or when asked about system design. Includes impact classification and breaking change strategy."
-version: 2.0.0
+version: 2.1.0
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -30,10 +30,11 @@ Import direction is never inverted. `presentation/` never imports `infrastructur
 
 ## Domain rules (`domain/`)
 
-- Zero external dependencies — no framework, no ORM, no libraries. Native runtime utilities are not external dependencies and are permitted (Node example: `node:*` modules; nuance owned by `engineering-ddd`).
+- Zero external dependencies — no framework, no ORM, no libraries. Native runtime utilities are not external dependencies and are permitted (Node example: `node:*` modules; nuance owned by `engineering-ddd`), except to read a value the logic decides on that varies between runs (below).
 - Entities enforce their own invariants; violations throw domain exceptions co-located with the feature. Entity mechanics (private constructor, semantic static factories, value object rules) are owned by `engineering-ddd` — load it for the full pattern.
 - Entities never reference DTOs, persistence models, HTTP types, or framework annotations.
 - Repository interfaces live in `domain/repositories/` and return domain types only — never persistence models.
+- A value the logic decides on that varies between runs (the current time, randomness that drives a branch, the environment, a remote answer) enters as an input: a parameter or a port, such as a clock. A value only stored or passed on (a generated id, an `updatedAt` stamp) may come from the native runtime. The same holds in the application layer. Proof and owner: Obligations in `engineering-governance`.
 
 ## Application layer rules (`application/`)
 
@@ -161,5 +162,5 @@ Never create V2 automatically. A DTO change does not imply V2. A contract change
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

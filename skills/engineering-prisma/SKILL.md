@@ -1,20 +1,34 @@
 ---
 name: engineering-prisma
 description: "**Opt-in for Prisma:** load only when Prisma is the chosen database access layer. Prisma-specific rules for schema structure, PrismaService, and configuration. Invoke when @prisma/client or prisma is present in the project dependencies, when writing or modifying Prisma schemas, PrismaService, migrations, or any database access code that uses Prisma."
-version: 2.1.0
+version: 2.2.1
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
 # Prisma
 
 These rules apply only when Prisma is present in the project. Do not apply them to projects using other ORMs.
+
+---
+
+## Installation
+
+This skill is written for Prisma 7. The `prisma` CLI, `@prisma/client` and the driver adapter are installed at one version, the client's (see "Dependency versions" in `engineering-governance`):
+
+```bash
+<pm> add @prisma/client
+<pm> add @prisma/adapter-pg@<the installed @prisma/client version>
+<pm> add -D prisma@<the installed @prisma/client version>
+```
+
+Never `<pm> add -D prisma` with no version: the CLI's `latest` tag points to a Prisma 8 release candidate, a different command set with no `prisma generate`, while `@prisma/client` stays on 7. A project already on Prisma 8 follows its installed version, reported as a deviation.
 
 ---
 
@@ -294,5 +308,5 @@ Add `"Prisma.prisma"` to `.vscode/extensions.json` if not already present. The e
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

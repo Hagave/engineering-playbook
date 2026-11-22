@@ -1,14 +1,14 @@
 ---
 name: engineering-playbook
-description: "Language-agnostic core engineering governance across TypeScript, Java, Go, Rust, C#, Kotlin, Ruby — invoke automatically at the start of any conversation involving software development, code writing, code review, architecture, or technical implementation. Also activates when the user says activate playbook. Loads non-negotiable rules (no duplication, no hallucination, scope discipline) and the skill routing table. Framework- and language-specific opt-in skills are loaded only when the stack dictates. Active by default unless /playbook-off was invoked this session."
-version: 4.0.0
+description: "Language-agnostic core engineering governance across TypeScript, Python, Java, Go, Rust, C#, C++, Kotlin, Ruby — invoke automatically at the start of any conversation involving software development, code writing, code review, architecture, or technical implementation. Also activates when the user says activate playbook. Loads non-negotiable rules (no duplication, no hallucination, scope discipline) and the skill routing table. Framework- and language-specific opt-in skills are loaded only when the stack dictates. Active by default unless /playbook-off was invoked this session."
+version: 5.1.0
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -48,7 +48,7 @@ Never proceed to the next step without this declaration. Vague completions ("don
 
 **No dead code.** Imports, variables, functions, or types that your changes made unused must be removed. Pre-existing dead code is mentioned, not fixed.
 
-**No hallucination.** Never assume a pattern, convention, or behavior exists in this project based on general knowledge or patterns from other projects. Read the actual code. Every decision traces to: (a) an explicit requirement from the task, (b) code read directly in this repository, or (c) a playbook rule. Anything else is a hypothesis — mark it explicitly and ask before acting on it.
+**No hallucination.** Never assume a pattern, convention, or behavior exists in this project based on general knowledge or patterns from other projects. Read the actual code. Every decision traces to: (a) the task, including the decisions it delegates to you, (b) code read directly in this repository, or (c) a playbook rule. Anything else is a hypothesis: mark it explicitly, and act on it only when the task delegated that decision (record it then); otherwise ask before acting on it.
 
 **No hardcoded secrets.** API keys, tokens, credentials, and passwords never appear in source code. They come from environment variables validated at startup.
 
@@ -56,7 +56,7 @@ Never proceed to the next step without this declaration. Vague completions ("don
 
 **No unbounded queries.** Never fetch all rows without pagination or a documented hard cap enforced in code.
 
-**Stop and ask when ambiguous.** Never silently pick one interpretation of an ambiguous requirement. List all open questions in a single message and wait for answers before writing any code.
+**Act only on the decisions you own.** A decision the request, the code or a skill fixes is implemented as it stands; one the request delegates you decide and record; any other is the user's, asked in a single message before writing code. Never silently pick one interpretation of an ambiguous requirement. Owner: Decision ownership in `engineering-governance`.
 
 **No ad-hoc bug investigation.** When the user reports bugs or strange behavior in an existing project, do not read files manually and produce a bug list. Route to `engineering-refactor` — bugs in a dirty codebase cannot be reliably scoped without purging dead code and establishing a tooling baseline first. Ad-hoc investigation produces incomplete, noise-inflated results.
 
@@ -97,6 +97,8 @@ Load specific skills when the task requires them. Use the Skill tool to invoke t
 
 The playbook core is language-agnostic. Framework, language, and driver opt-in skills are loaded only when the stack dictates.
 
+**The core wins.** An opt-in skill specializes the core for one stack; it never relaxes it. When a rule or a code template in an opt-in skill contradicts a core skill, follow the core, and report the opt-in rule in a `[PLAYBOOK-DEVIATION]` block (`action: deviated`, the opt-in as `skill`, the core rule in `why`). Never copy the contradicting template into the project because it is the more specific of the two.
+
 ### Core governance
 
 | When task involves | Invoke |
@@ -121,7 +123,7 @@ The playbook core is language-agnostic. Framework, language, and driver opt-in s
 | Hexagonal architecture | `engineering-arch-hexagonal` |
 | Modular monolith architecture | `engineering-arch-modular` |
 | MVC architecture | `engineering-arch-mvc` |
-| Code review | `engineering-code-review` |
+| Code review, or a review, survey or audit of existing code (module, route prefix, folder) | `engineering-code-review` |
 | User asks for session status, settings or config / `/playbook-config` | `playbook-config` |
 | User suspends rules | `playbook-off` |
 | User re-activates rules | `playbook-on` |
@@ -143,9 +145,11 @@ Load only when the project's implementation language matches the row. The table 
 | When task involves | Invoke |
 |---|---|
 | C# code | `engineering-csharp` |
+| C++ code | `engineering-cpp` |
 | Go code | `engineering-go` |
 | Java code | `engineering-java` |
 | Kotlin code | `engineering-kotlin` |
+| Python code | `engineering-python` |
 | Ruby code | `engineering-ruby` |
 | Rust code | `engineering-rust` |
 | TypeScript code | `engineering-typescript` |
@@ -211,5 +215,5 @@ Agent(
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

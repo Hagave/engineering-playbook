@@ -1,14 +1,14 @@
 ---
 name: engineering-implement
 description: "Step-by-step implementation workflow. Use when starting any implementation task: feature, fix, or new artifact. Guides through reading context, extracting requirements, resolving ambiguities, reuse search, implementing, validating, and updating registries."
-version: 3.0.0
+version: 4.1.0
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -44,17 +44,17 @@ List explicitly:
 
 Before proceeding to Step 3, confirm the mandatory companion skills defined in `engineering-governance` are loaded. The checklist in Step 6 must reflect their constraints.
 
-## Step 3 — Identify ambiguities
+## Step 3 — Settle who owns each decision
 
-List everything that is unclear, missing, or has more than one valid interpretation.
-Ambiguities are resolved BEFORE the spec checklist is generated and BEFORE the spec token is emitted — never after.
+List everything that is unclear, missing, or has more than one valid interpretation, and give each item its owner per Decision ownership in `engineering-governance`: fixed, delegated or open.
+Decide and record the delegated ones now, and get the open ones answered BEFORE the spec checklist is generated and BEFORE the spec token is emitted — never after.
 
-If ambiguities exist → go to Step 4.
+If open decisions exist → go to Step 4.
 If none → go to Step 5.
 
 ## Step 4 — Ask
 
-Follow the stop-and-ask protocol in `engineering-governance`: all questions in a single message, wait for answers, then summarize your understanding and confirm before proceeding.
+Ask the open decisions as Decision ownership in `engineering-governance` says: all in a single message, then proceed on the answers.
 
 ## Step 5 — Reuse search
 
@@ -63,6 +63,8 @@ For every artifact you are about to create, execute the reuse protocol in `engin
 ## Step 6 — Generate implementation checklist
 
 Before writing any code, produce a task-specific checklist and post it as the first item in the response. This checklist guides both user and Claude — nothing in it should be skipped silently.
+
+The checklist opens with the obligations table from `engineering-governance` (Obligations), one row per item the task touches. Each proof in that table is a test item of the checklist.
 
 **Ordering rule:** items must be listed in dependency order — the order you will actually implement them. An artifact that depends on another must come after it. No backtracking allowed: if item N depends on item M, M must appear before N in the list.
 
@@ -119,6 +121,8 @@ Accepted signals: "proceed", "go", "ok", "sim", "pode ir", or clear equivalent.
 Any other response = treat as a correction or addition to the checklist. Revise and re-post.
 Do not infer permission from silence or from the user describing the task further.
 Do not write any code before this confirmation is received.
+
+The request may already give that confirmation: when it delegates the decisions (Decision ownership in `engineering-governance`) and every checklist item is fixed or delegated, post the checklist with the decisions you took and proceed in the same turn. A delegation is permission the user stated, not one you inferred.
 
 When confirmation is received, emit `[SPEC CONFIRMED]` in your response text before the first Write or Edit call of the task, and repeat it in the turn's final message — token semantics and hook enforcement are defined in the spec gate section of `engineering-governance`.
 
@@ -183,5 +187,5 @@ Summarize:
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

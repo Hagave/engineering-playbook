@@ -1,18 +1,28 @@
 ---
 name: engineering-performance
 description: "Performance rules for data access, loops, and Node.js event loop. Use when writing queries, iterating over collections, handling bulk operations, or processing large datasets. Detects N+1 patterns, unbounded queries, and algorithmic complexity issues."
-version: 2.0.0
+version: 2.1.0
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
 # Performance
+
+## Cost bound
+
+The cost of any work over data is bounded by what it changes or returns, and the bound is known: the page, the batch, the children that changed. Work whose cost grows with the total size of a table, an aggregate or an external response is rejected, and where input sets the size a hard cap is enforced in code. The obligation and its proof are in Obligations in `engineering-governance`; the sections below are the common ways the bound is lost:
+
+- one query per item of a list (N+1);
+- a read with no page or cap;
+- a nested scan where a lookup map would do;
+- a page of parents, each loaded with its whole relation;
+- saving an aggregate by deleting its children and inserting them all again, instead of writing only the children that changed.
 
 ## N+1 queries
 
@@ -104,5 +114,5 @@ These rules cover parallel async execution as a throughput concern. For distribu
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

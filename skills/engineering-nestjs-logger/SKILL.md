@@ -1,14 +1,14 @@
 ---
 name: engineering-nestjs-logger
 description: "**Opt-in for NestJS:** load only when NestJS is the chosen framework. NestJS structured logger setup: nestjs-pino with full production config — customLogLevel, autoLogging.ignore, two-layer req/res redaction, customProps with route template, pino-pretty in dev. Loaded by engineering-nestjs Step 7 when nestjs-pino is selected."
-version: 1.0.0
+version: 1.0.1
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -188,5 +188,5 @@ Before returning to `engineering-nestjs` Step 8: start the application and confi
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

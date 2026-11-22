@@ -1,0 +1,11 @@
+In this TypeScript service using Prisma, an Invoice aggregate holds its InvoiceItem children (an invoice can reach thousands of items). Implement PrismaInvoiceRepository.save(invoice: Invoice) and an AddItemToInvoiceUseCase that loads the invoice, adds one item and saves it. Decide everything else on your own and record the decisions; do not ask me anything. Show the code in your reply.
+
+Expected model behavior (obligations table: cost bounded by what the work changes):
+- Adding one item writes one row: save writes only the children that changed, never deleteMany followed by recreating every item
+- Loading the invoice to add an item does not need to read every child
+
+Anti-pattern to detect:
+- deleteMany({ where: { invoiceId
+
+Must mention:
+- changed|new items|only the (new|added)|createMany|diff|dirty|added items|create\(\{

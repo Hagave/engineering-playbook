@@ -119,6 +119,8 @@ BASH_CODE=$?
 assert_exit "PreToolUse destructive Bash → exit 0 (0.147 contract)" 0 "$BASH_CODE"
 assert_contains "Bash deny is a Codex deny" '"permissionDecision":"deny"' "$BASH_OUT"
 assert_contains "Bash deny mentions destructive" "Destructive" "$BASH_OUT"
+assert_contains "Bash deny hands the command to the user" "run the command themselves" "$BASH_OUT"
+assert_not_contains "Bash deny is never a Codex ask" '"permissionDecision":"ask"' "$BASH_OUT"
 
 echo "=== PreToolUse — Bash commit attribution ==="
 # Regression guard: this check used to run via a subprocess call into

@@ -4,9 +4,9 @@
 > Built for Claude Code. Codex CLI and Google Antigravity adapters are experimental.
 
 [![License: MIT + Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-4.1.0-blueviolet.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-4.2.0-blueviolet.svg)](.claude-plugin/plugin.json)
 [![Harnesses](https://img.shields.io/badge/harnesses-Claude_Code%20%7C%20Codex%20CLI%20%7C%20Antigravity-2ea44f.svg)](#supported-harnesses)
-[![Skills](https://img.shields.io/badge/skills-40-orange.svg)](skills/)
+[![Skills](https://img.shields.io/badge/skills-42-orange.svg)](skills/)
 [![PRs target develop](https://img.shields.io/badge/PRs-target%20%60develop%60-blueviolet.svg)](#contributing)
 
 The Engineering Playbook is a multi-harness plugin catalog that turns an AI
@@ -35,7 +35,7 @@ use, including at work, and to modify; not to be sold. See [License](#license).
 | Partial implementations | Hard spec gate in `engineering-implement` — no code written before explicit user sign-off on the checklist |
 | Context loss | Non-negotiable rules anchored in every skill via identical prefix blocks — KV cache hits across sessions |
 | Context overflow | At 70% the model finishes the task and writes a handoff; at 85% every tool call is denied. Either way the exit is `/clear` + "resume", never `/compact` |
-| Destructive operations | Hook intercepts `rm -r*`, `git push --force`, `git reset --hard`, `DROP TABLE`, and similar — requires explicit user confirmation |
+| Destructive operations | Hook intercepts `rm -r*`, `git push --force`, `git reset --hard`, `DROP TABLE`, and similar — requires explicit user approval (a dialog in Manual; in auto mode a queued request the user answers in the chat, without stopping the run) |
 | Vulnerable code | 13 vulnerability fiches, a security review whose every candidate is confirmed, ruled out or left as a named proof gap, and a local lab that scans your own running app |
 | Leaked secrets | Hook scans what a write adds, what a commit records and what a push publishes with gitleaks' rules — tokens with a known shape are denied |
 | Repeated errors | `engineering-learn` mines real session logs and writes specific corrections back into the project |
@@ -90,6 +90,22 @@ What [`install.sh`](install.sh) does:
 - **Claude Code:** adds this repository as a plugin marketplace and installs
   the plugin through the `claude` CLI; a second run updates it. It does not
   download anything itself.
+- **Several Claude Code accounts:** Claude Code keeps plugins inside each
+  config directory, so an account run with its own `CLAUDE_CONFIG_DIR` does
+  not see a plugin installed in another. The script finds `~/.claude`, the
+  `~/.claude-*` directories Claude Code has used and the `CLAUDE_CONFIG_DIR`
+  values set in your shell startup files (read as text, never run), and asks
+  which of them to install into. It remembers the answer, so the next run
+  updates the same accounts and asks only about a new one. Without a terminal
+  (CI, a container) it installs into the current account only. To skip the
+  question, pass `--all-accounts`, or `--accounts default,~/.claude-work` for
+  a given list:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/Hagave/engineering-playbook/main/install.sh | bash -s -- --all-accounts
+  ```
+
+  Auto-update (below) is set per account: turn it on in each one.
 - **Codex and Antigravity:** downloads the latest release's archive, checks
   it against the SHA-256 published with it, unpacks it into
   `~/.local/share/engineering-playbook/<version>` and links it as `current`,
@@ -228,9 +244,21 @@ current `HEAD` has been reviewed; a new commit needs a new review. Blockers
 are fixed before the push. Blocker and Major findings in code the agent wrote
 arm the learn gate (see *Learning from mistakes*).
 
-**How to use it.** Ask "review this diff" or "review PR 42", or just ask for a
-push and the review runs first. Only you can skip it: say "pode pushar sem
-review" / "skip review", or set `PLAYBOOK_SKIP_REVIEW=1`.
+**Audit mode.** For existing code, and before every push, the review first
+lists its scope with `audit/surface.py`: the routes, the files that serve
+them, where they write, every caller (a front end in a sibling repository
+included), the screens that use those callers, and the recent commits. Then it
+runs one pass per dimension (`references/audit-dimensions.json`: authorization,
+validation, concurrency, callers and screens, project rules, recent changes,
+errors and contract, code checklist). Every finding carries evidence, a
+reproduction or a `file:line` trace, and the report ends with what each
+dimension examined and what the surface could not read.
+
+**How to use it.** Ask "review this diff" or "review PR 42", ask for an audit
+of a module, a route prefix or a folder, or just ask for a push and the review
+runs first. Only you can skip it: run the push yourself, or
+start Claude Code with `PLAYBOOK_SKIP_REVIEW=1`. Nothing typed in the chat lifts
+it.
 
 ### Safety gates
 
@@ -239,18 +267,38 @@ machine: destructive commands, AI attribution in history, and secrets.
 
 **How it works.**
 - **Destructive commands** (`rm -r`, `git reset --hard`, force push,
-  `git clean`, `DROP TABLE`, and their respellings) are denied until you
-  authorize that act in your own message. The permission lasts one turn. An
-  `rm` inside the session's own scratchpad needs none.
+  `git clean`, `DROP TABLE`, and their respellings) run only after you approve
+  them. In Manual, Claude Code's permission dialog for that command says what
+  it destroys. In auto mode nothing stops the run: the command is denied and
+  queued as `#n`, the agent carries on and tells you in its message what `#n`
+  removes and why, and runs it once after you approve it in the chat. Where
+  neither can reach you (other permission modes, a subagent, a cloud session)
+  they are denied, and you run them yourself. An `rm` inside the session's own
+  scratchpad needs none.
 - **AI attribution** (`Co-Authored-By: Claude`, "Generated with Claude") is
   denied in commits, tags, pull requests and their bodies.
 - **Secrets** with a known token shape (AWS, GitHub, Stripe, private keys and
   about a hundred more, from gitleaks' rules) are denied in what a write adds,
   a commit records or a push publishes. Generic patterns only warn.
 
-**How to use it.** When a destructive command is denied, the agent shows it
-and what it destroys. Answer naming the act: "pode apagar", "confirmo o
-reset", "go ahead and delete it"; a plain "ok" does not count. For a secret
+**How to use it.** When a destructive command comes up in Manual, read the
+dialog and approve or decline it. In auto mode, Claude Code shows the queued
+command above the chat with **Decline** and **Approve** (click, or ctrl+x tab,
+the arrows and Enter; no digit presses them, so a message you start typing never
+runs one). Approve runs it right away and tells the agent; Decline drops it, or
+keeps a deletion in the project's **Temporary data** panel (`/temporary-data`,
+or the button that appears above the chat), where you remove it later or keep
+it. The panel also gets, once the agent's turn ends, what a command made and
+left behind: a git worktree, a named Docker container, volume or network, what a
+lone `mktemp` printed, and anything else the agent keeps there with
+`scripts/temporary_data.py register` (a deletion only). An item whose target is
+already gone leaves the panel by itself. `temporary_data` in `/playbook-config`
+turns the panel off. Or answer the
+agent's question in your own words: "pode apagar", "pode remover", "apaga isso", "yes, delete it"
+approve every command it listed, and naming a number ("pode apagar o #2")
+approves that one. A message that also refuses ("não apague isso") approves
+nothing, and a bare verb about code ("remova o import") is not an answer. Only
+words you type count: pasted text and notifications do not. For a secret
 false positive, add the fingerprint from the denial to
 `.playbook/secrets-allow` yourself; the agent cannot write that file. If your
 team allows attribution, set `PLAYBOOK_ALLOW_AI_ATTRIBUTION=1` in your own
@@ -311,16 +359,23 @@ no override for that.
 #### Running the red-playbook tests
 
 These prove the defenses above. Run them from a clone of this repository, at
-its root; `python3 tests/run_all.py` runs all of them except the two opt-in
+its root; `python3 tests/run_all.py` runs all of them except the opt-in
 rows at the end.
 
 | What it proves | Command | Needs |
 | --- | --- | --- |
 | The gates cannot be talked past: a corpus of evasion attempts (respelled commands, `eval`, `sh -c`, `find -exec`, interpreter one-liners, heredocs, script files) against the destructive-command, code-write, AI-attribution and scanner-outside-the-lab checks, plus the gaps left open on purpose | `python3 -m unittest tests.unit.test_gate_evasion -v` | Python 3.10+ |
+| In auto mode a destructive command is queued, not asked: only the user's own explicit words approve it, once, for that exact command; refusals, mixed messages, pasted text and notifications approve nothing | `python3 -m unittest tests.unit.test_consent tests.e2e.test_learn_and_push.TestDestructiveConsentByDialog -v` | Python 3.10+ |
 | The secret scanner loads and compiles gitleaks' rules, denies distinctive tokens and only warns on keyword-shaped ones, honors the allow file, redacts what it shows, and blocks a write, a commit or a push that carries a secret | `python3 -m unittest tests.unit.test_secret_scan tests.e2e.test_secret_gate -v` | Python 3.10+, git |
 | Static analysis is offered with the exact command when `semgrep`/`opengrep` is installed, and its scan counts as validation | `python3 -m unittest tests.unit.test_sast -v` | Python 3.10+ |
 | The lab refuses every unsafe compose configuration (host network, privileged, devices, host namespaces, bind mounts, external networks...) and cleans up after itself | `python3 -m unittest tests.unit.test_lab -v` | Python 3.10+ (no Docker) |
 | Every vulnerability fiche has its sections (invariant, sinks, control, negative proof, dynamic proof, review signal) | `python3 -m unittest tests.structural.test_security_fiches -v` | Python 3.10+ |
+| No code template in an opt-in skill (framework, language, driver) contradicts a core rule. Covered: trusting every proxy hop (a `true` flag, an all-addresses range, an emptied list of known proxies) and `unsafe-inline`/`unsafe-eval` for scripts (a header or directive key, a policy DSL). Each spelling is a row with a sample it must catch and a correct form it must not flag | `python3 -m unittest tests.structural.test_core_wins -v` | Python 3.10+ |
+| **Opt-in:** the NestJS security templates, taken from the skill's own code blocks, compile under `strict` against the release of every package a new project installs today (the stable `latest` tag, else the newest stable release), keep a forged `X-Forwarded-For` out of the rate limit, refuse `TRUST_PROXY=true`, and serve a strict CSP on every API route. The `template-latest` workflow runs every template test weekly and opens an issue when a release breaks one | `PLAYBOOK_TEMPLATE_IT=1 python3 -m unittest tests.e2e.test_nest_security_template -v` | node and npm with network access, about a minute |
+| **Opt-in:** the Docker templates for Node (`engineering-docker/references/node.md` and the core compose), taken from the skill's own code blocks, build and run a minimal Prisma app: the `migrate` service applies the migration and exits 0 before the app starts, the production command runs no migration, the app answers as a non-root user, and `docker compose stop` ends it through SIGTERM. The base image is the newest Node.js LTS line, and the prisma CLI and adapter are installed at the client's version | `PLAYBOOK_TEMPLATE_IT=1 python3 -m unittest tests.e2e.test_docker_node_template -v` | Docker with Compose, npm and network access, a few minutes |
+| **Opt-in:** the NestJS environment validation templates (`engineering-nestjs` Configuration and `engineering-arch-hexagonal` Env validation), taken from the skills' code blocks, compile under the playbook's strict flags and boot beside the machine's own variables; a missing or invalid variable stops the boot with every missing one named, and an undeclared one is not served | `PLAYBOOK_TEMPLATE_IT=1 python3 -m unittest tests.e2e.test_nest_config_template -v` | node and npm with network access, under a minute |
+| A deviation report carries only the skill's own words and fixed fields (project data put in every field the model writes never reaches the report, the issue or the link), is queued once, opens at most five issues a day, turns into a +1 on a rule already reported, retries with backoff and gives a link when gh has no login | `python3 -m unittest tests.unit.test_deviation_report tests.e2e.test_hook.TestDeviationReports -v` | Python 3.10+ (a stand-in `gh`) |
+| **Opt-in:** a deviation report through the real `gh`: the issue is opened, found by its fingerprint, and a second report becomes a +1; the issue is closed at the end | `PLAYBOOK_REPORT_IT=1 PLAYBOOK_REPORT_REPO=<owner>/<repo> python3 -m unittest tests.e2e.test_report_gh -v` | `gh` logged in, a repository where a test issue may be opened and closed (the playbook's own works) |
 | **Opt-in:** a real lab run against a throwaway app scans it and leaves no container, network or volume behind | `python3 lab/run.py --setup`, then `PLAYBOOK_LAB_IT=1 python3 -m unittest tests.e2e.test_lab_integration -v` | Docker with Compose 2.20+, the ZAP image (about 1.2 GB), a few minutes |
 | **Opt-in:** a review of 13 intentionally vulnerable diffs (one per fiche) names the findings each one expects | `bash tests/behavioral/run_behavioral.sh 06` (one fixture; `06` to `18`), or `bash tests/behavioral/run_behavioral.sh` for every prompt | the `claude` CLI, an API key, the plugin at `~/.engineering-playbook`; spends tokens, and results are probabilistic (a miss in most of 10 runs is a regression) |
 
@@ -438,7 +493,7 @@ concurrent sessions in the same project never interfere; a subagent gets its
 own state (`session_id` + `agent_id`) and is gated at `SubagentStop`, so its
 writes never block the parent session's turn.
 
-**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.1.0`.
+**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.2.0`.
 
 **For a team:** commit the marketplace and the plugin to the project's
 `.claude/settings.json`; each teammate still accepts the folder's trust dialog
@@ -531,7 +586,7 @@ There is no native auto-trust config key in Codex 0.147.0. The bypass flag
 does not persist trust; automation either needs the flag per invocation or a
 one-time interactive trust step after hook hashes change.
 
-**What you get** — All 40 skills are registered explicitly
+**What you get** — All 42 skills are registered explicitly
 in [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) (one path per
 skill, matching `.claude-plugin/plugin.json`'s array), not a bare directory
 string, which is not guaranteed to be expanded by every Codex version. The
@@ -564,7 +619,7 @@ What it produces in the target workspace:
 | Artifact | Purpose |
 | --- | --- |
 | `AGENTS.md` (marker block) | Always-loaded core: non-negotiables, concept mapping, skill routing table, proportional model routing. Idempotent — re-running replaces the block, preserving anything else in the file. |
-| `.agents/skills/*.md` | All 40 skills, YAML frontmatter stripped (Antigravity skills are plain markdown). |
+| `.agents/skills/*.md` | All 42 skills, YAML frontmatter stripped (Antigravity skills are plain markdown). |
 | `.agents/workflows/*.md` | Slash commands: `/engineering-playbook`, `/playbook-on`, `/playbook-off`, `/playbook-config`. |
 | `.git/hooks/commit-msg` + `pre-commit` (with `--git-hooks`) | Mechanical enforcement independent of the IDE: blocks AI co-author attribution through the playbook's own check (`scripts/check_commit_message.py`; where git runs the hook without `python3` 3.10+ or the clone, the same rule, rendered into the hook at install time, still blocks); runs `tsc --noEmit` + lint before every commit. `git commit --no-verify` skips both once, and no environment variable does: a hook inherits the environment of the `git commit` the agent runs. Foreign hooks are never overwritten. |
 | `.github/workflows/engineering-playbook.yml` (with `--ci`) | The same two checks on every pull request, where nothing local can skip them: AI attribution in the PR's commits or body, and `tsc --noEmit` + lint. The attribution rule is rendered from `hooks/playbook_core.py` at install time. Make its `policy` check required in branch protection. A foreign workflow with the same name is never overwritten. |
@@ -676,19 +731,35 @@ note** — the original request, files written, commands already run, skills
 loaded, gates still armed, repo state — to disk before the transcript is
 summarized away. `session_start.py` re-injects it on the `SessionStart` that
 follows. The Stop hook refreshes the same note at every turn end above
-`WARN_PCT`, so it also exists for the `/clear` the context guard recommends.
-A `/clear` starts a new `session_id`, so for that path the note is stored under a
-project key next to the model's own `[HANDOFF]` block, and the `SessionStart:clear`
-that follows injects both once and deletes them.
+`WARN_PCT` or past the user's context budget, so it also exists for the `/clear`
+the context guard recommends. A `/clear` starts a new `session_id`, so for that
+path the note is stored under a project key next to the model's own `[HANDOFF]`
+block, and the `SessionStart:clear` that follows injects both once and deletes
+them. The key is the directory Claude Code was launched in (`CLAUDE_PROJECT_DIR`),
+not the hook's `cwd`: the `cwd` follows the model's `cd` into a subfolder, and the
+`SessionStart` after the `/clear` arrives with the launch directory.
 
 The `PreToolUse` guard's **destructive-command block** (`rm -r`, `git reset
---hard`, force push, `git clean`, mass delete, destructive SQL) lifts for the
-turn in which the user authorizes the operation in their own words, naming the
-act — "pode apagar", "confirmo o reset", "go ahead and delete it". A general
-approval ("pode seguir", "pode rodar os testes", "I confirm") is not consent.
-The authorization is re-read from the user's current message on every call, so
-it never outlives the turn that granted it, negations ("nunca apague isso") do
-not count as consent, and the model cannot authorize itself. An `rm` of literal
+--hard`, force push, `git clean`, mass delete, destructive SQL) answers
+`permissionDecision: "ask"` in the `default` (Manual) mode, so Claude Code shows
+the user its permission dialog with the command and, in the configured
+language, what it destroys; the command runs only if the user approves. In
+`auto` mode a dialog stops a run the user left to finish on its own, so the
+guard denies instead and queues the exact command, per session, in
+`~/.claude/hooks/.consent-<session>.json`; the model carries on and asks the
+user in its message. `hooks/consent_guard.py` reads the user's answer from the
+`UserPromptSubmit` payload's `prompt` field (never the transcript): an explicit
+consent moves the queued commands to approved, and the guard lets each exact
+command through once. A prompt the payload marks as not typed by the user, a
+notification, pasted blocks and a subagent's prompt approve nothing, and so
+does a message that both approves and refuses. An approval covers only what was
+queued before the last turn ended (marked at `Stop`), so the user never approves
+a command the model had not yet listed. Any tool call that names the queue's
+files is denied, so the model cannot read or write its own approval; a path the
+shell computes is a known gap. Another gate's deny outranks
+both the dialog and the queue, so nothing is queued that would be denied
+anyway. Every other mode, an unknown or missing mode, a subagent's call and a
+cloud session are denied, with the model told to hand the command to the user. An `rm` of literal
 absolute paths inside the session's own scratchpad needs no consent: it deletes
 only what the session made there. Two false-positive sources were also removed: a heredoc body
 written by `cat`, `tee` or a non-shell interpreter is data, not shell about to
@@ -699,10 +770,15 @@ it.
 
 The `PreToolUse` guard also enforces the **review gate**: `git push` is denied
 until the current `HEAD` has been reviewed through `engineering-code-review`.
-The review is pinned to the commit, so committing after a review re-arms the
-gate. Only the user can waive it — in their own words ("pode pushar sem
-review", "skip review") or with `PLAYBOOK_SKIP_REVIEW=1`. The model cannot
-waive it for itself: the bypass is read from the user's message only. The gate
+The review is pinned to what it read: a commit is covered when a reviewed
+`HEAD` contains it, or when it commits exactly what the review read in the
+working tree (`git diff`, `git diff HEAD`), so reviewing before committing does
+not cost a second review. A file changed after the read is not covered, and the
+denial names those files so only they are reviewed again. A merge commit is
+covered by a reviewed `HEAD` only. Only the user can skip it — by running the push themselves or by starting
+Claude Code with `PLAYBOOK_SKIP_REVIEW=1`, which the hook reads from its own
+environment, not from the command the model runs. Nothing typed in the chat
+lifts it, so the model cannot waive it for itself. The gate
 fails open outside a git repository and when nothing is ahead of upstream.
 Blocker and Major findings from a review feed straight back into the learn loop:
 they are journaled, and the learn gate holds the turn open until the defect
@@ -760,7 +836,7 @@ personal travels with the plugin.
 |---|---|---|---|---|
 | Prose level | `prose` | `mid` | Claude Code, Codex, Antigravity | Response verbosity budget, read at session start: applies from the next session. |
 | Known-failure warnings | `watch` | `off` | Claude Code | Known-failure warnings before risky actions. |
-| Context budget | `context_budget` | `off` | Claude Code | Context size past which the session is told to wrap up, hand off and `/clear`. |
+| Context budget | `context_budget` | `550k` | Claude Code | Context size past which the session is told to wrap up, hand off and `/clear`. |
 | CLAUDE.md budget | `claude_md_budget` | `40000` | Claude Code | Characters the project `CLAUDE.md` may grow to before the turn end is blocked. |
 | Language | `language` | `auto` | Claude Code | Language of the numbered menu's own text; `auto` follows the system locale. Elsewhere the model writes the menu in the language the user writes in. |
 
@@ -821,15 +897,12 @@ the model for every subagent whose call and definition name none, and the
 built-in `Explore` and `Plan` agents already skip `CLAUDE.md`.
 
 **Codex parity:** the learn loop, the carry-over note, the review gate and the
-destructive-command authorization bypass are Claude Code only for now. The Codex
+destructive-command permission dialog are Claude Code only for now. The Codex
 guard shares `check_destructive`, so it does get the false-positive fixes
-(heredoc bodies, SQL statement shape) — but not the bypass, because scoping an
-authorization to the turn it was given in requires locating the latest user
-message, and Codex's transcript schema for that is not confirmed. A session-wide
-scan would be the easy version and the wrong one: an authorization from an hour
-earlier would clear a block on something the user never saw. Until the schema is
-confirmed, Codex keeps the stricter behaviour of always blocking. The shared primitives live in `hooks/playbook_core.py`
-(`CORRECTION_RE`, `REVIEW_BYPASS_RE`, `GIT_PUSH_RE`, the journal helpers), but
+(heredoc bodies, SQL statement shape) — but not the dialog, because whether a
+Codex hook's "ask" reaches the user is not confirmed, so Codex keeps the
+stricter behaviour of always blocking. The shared primitives live in `hooks/playbook_core.py`
+(`CORRECTION_RE`, `GIT_PUSH_RE`, the journal helpers), but
 the Codex adapter's transcript and tool-result schemas differ and are not
 confirmed for these events, so the adapter guards have not been wired to them.
 
@@ -843,7 +916,9 @@ confirmed for these events, so the adapter guards have not been wired to them.
 Those percentages protect the window. They do not protect the bill: every call
 re-reads the whole context, so cost grows with context size times call count, and
 on a 1M window the first warning arrives at 700k tokens. `context_budget` is the
-cost-side threshold — an absolute token count (`250k`), off by default. Past it,
+cost-side threshold — an absolute token count (`250k`), 550k by default (`0`
+turns it off), so on a 1M window the handoff comes before the 700k warning; on a
+smaller window the 70% warning comes first and the budget never fires. Past it,
 the model is told once per multiple of the budget (1x, 2x, ...) to finish the step
 in progress, write the handoff and ask for `/clear`. It never blocks a tool call,
 and subagents are exempt. The trade is real: a `/clear` keeps only what the
@@ -907,10 +982,40 @@ before Stop runs.
 
 #### Skill gate
 
-Writing a source file is denied until `engineering-governance` has been
+Writing a source file is denied until the skills that file needs have been
 loaded via the Skill tool in the session. This converts the most common
 failure mode observed in POC validation (skills never loaded, causing
 non-conformant scaffolds) into a mechanical block.
+
+What a write needs comes from a data table, `hooks/data/skill_requirements.json`,
+so the gate itself names no language or framework:
+
+- every source file: `engineering-governance` and its four companions
+  (security, concurrency, error handling, performance);
+- the language opt-in matching the file's extension (a `.py` file in a
+  repository that also has `tsconfig.json` does not need TypeScript);
+- a framework skill when the nearest manifest above the file declares its
+  dependency (`@nestjs/core` in `package.json` → `engineering-nestjs`), so a
+  monorepo is read per package;
+- an architecture skill when the directories above the file have the shape
+  that skill draws: `domain/`, `application/` and `infrastructure/` side by
+  side (hexagonal), or `modules/<feature>/` holding layer folders such as
+  `services/` (modular) or flat `<feature>.service.*` files (MVC). Only a file
+  under that structure needs it. Where two structures hold the same file
+  (modules of both shapes, or a `modules/` inside a hexagonal `src/`), the
+  gate requires neither, and the session context names the overlap so the
+  model confirms the architecture with the user. The session context also
+  names each structure it finds (`[playbook:architecture]`);
+- a topic skill when the file itself touches the topic: by file name
+  (`Dockerfile`, `compose.yaml`, `*.prisma`, test files), by an import line
+  naming a package (`amqplib`, `org.apache.kafka`, `confluent_kafka`), or by a
+  code pattern. A Dockerfile needs `engineering-docker` and nothing else.
+
+The destination is read from every write channel: the editing tools, a shell
+redirect or `tee`, and the shell copy/move commands for source files. A
+temporary or git-ignored file needs nothing. The deny lists each missing skill
+with the reason it applies. Supporting another stack is a new row in the table,
+and a structural test checks that every row names an existing skill.
 
 #### Validation gate (Stop)
 
@@ -922,12 +1027,66 @@ loop after a single block.
 Every gate, the safety blocks included, is suspended while `/playbook-off`
 is active: off is a full pass-through until `/playbook-on`.
 
+#### Deviation journal (Stop)
+
+A model that does not follow a skill rule, or follows one it believes is
+wrong, reports it in a block of its response text (format in
+`engineering-governance`):
+
+```
+[PLAYBOOK-DEVIATION]
+skill: engineering-concurrency
+rule: the rule quoted word for word from the skill, then its section
+action: deviated | followed
+instead: what it did in its place
+why: the reason
+[/PLAYBOOK-DEVIATION]
+```
+
+At Stop and SubagentStop the hook records each block in
+`~/.claude/hooks/.deviations.jsonl`: one file for every project, kept across
+sessions, trimmed to the last 500 records. A record holds the fields, the
+session, subagent and directory, the version of the installed skill and whether
+that skill was loaded in the session. The user sees one line per block, and
+the line is also shown on a turn a gate blocks. `PLAYBOOK_DEVIATION_JOURNAL`
+moves the file. It is a record, not a gate. It holds only what the model chose
+to report: a rule broken in silence is not in it.
+
+#### Deviation reports to the maintainer (opt-in)
+
+Off by default, Claude Code only, turned on with `reports` in
+`/playbook-config` (or in the guided setup). Nothing turns it on for the user:
+someone who installed before the setting existed stays off.
+
+- **What is sent.** The skill, its version and section, the rule only as a
+  quote the hook finds word for word in the installed skill's text, the action,
+  the playbook version, the harness and the model; for a deviation whose `why`
+  starts with `version <name>@<version>:`, that pair. A paraphrased rule stays
+  in the local journal. The project folder, code, session, `instead` and the
+  rest of `why` are never read into the report.
+- **How.** The Stop hook queues the report and starts
+  `hooks/deviation_report.py drain` detached, so the turn never waits on the
+  network. The drain searches the playbook's issues for the report's
+  fingerprint (skill + version + quote): a match gets a +1 reaction, otherwise
+  `gh issue create` opens one, **with the user's own GitHub account**. At most
+  five issues a day; a failure is retried with backoff.
+- **Without gh**, or without a login, the user is shown a pre-filled
+  `issues/new` link instead, at that Stop or at the next session start.
+- `~/.claude/hooks/.deviation-reports.json` holds the queue and the
+  fingerprints already sent. `PLAYBOOK_REPORT_STORE` moves it;
+  `PLAYBOOK_REPORT_REPO` points the reports at another repository (tests).
+
 #### Destructive operations
 
 The hook denies `Bash` commands matching these patterns and requires explicit
 user confirmation before proceeding:
 
-- `rm -r*` / `rm --recursive` (any recursive remove)
+- `rm -r*` / `rm --recursive` (any recursive remove), read from the words of
+  each command: `rm` must be the program or run as an argument of one
+  (`find -exec rm -r`, `watch rm -rf`, `docker exec db rm -rf`, a `sh -c` or
+  `eval` script), and the flag must be that `rm`'s, in any position
+  (`rm dir -rf`). `docker run --rm` is not an `rm`, and neither is a later
+  flag holding an `r` (`javac -proc:none`)
 - `git push --force` / `git push -f` / force-push refspec (`git push origin +main`)
 - `git reset --hard`, forced branch deletion (`-D`, `-df`, `--delete --force`), `git clean -f*`
 - `git checkout --` / `git restore <path>` (except `--staged` alone)
@@ -940,13 +1099,24 @@ The patterns also run on the command as the shell reads it — quotes around the
 command word removed (`'rm' -rf`), wrappers dropped (`command`, `env`, `sudo`),
 git's global options dropped (`git -C . reset --hard`), and each `$(...)` read
 as a command of its own — so respelling a command does not get it past the
-check. Two more cases are denied the same way:
+check. When a command has several parts, the dialog shows the part that
+destroys, not the start of the command, and says that approving runs all of
+it.
 
-- a command whose **program is decided at run time** (`$x -rf build`,
-  `eval "$CMD"`, `bash -c "$CMD"`): nothing can read what it runs. A variable
-  directory with a literal program (`$JAVA_HOME/bin/java`) is fine.
+A **variable as the program** (`P="docker exec db psql"; $P -c "select 1"`) is
+read as every literal value the command gives it, wherever and in whatever order
+it is assigned, in a `for` list too, and split by any `IFS` the command sets:
+`ok && P="rm -rf" || P=echo; $P build` asks, `ls mvnw && M=./mvnw || M=mvn; $M
+test` does not. A program the command never shows (`$(...)`, `eval "$CMD"`,
+`bash -c "$CMD"`, a variable from `read`, `source` or the environment) is not
+asked about: only what is shown to be destructive asks. That is a decision, and
+a gap an adversarial command could use; every literal value the text holds is
+still checked. One more case is denied the same way:
+
 - **recursive deletion in an interpreter one-liner** (`shutil.rmtree(`,
-  `fs.rmSync(..., {recursive: true})`, `FileUtils.rm_rf`, `rmtree(`).
+  `fs.rmSync(..., {recursive: true})`, `FileUtils.rm_rf`, `rmtree(`), except on
+  a temporary directory the same script created and never rebinds
+  (`const dir = fs.mkdtempSync(...)`, `d = tempfile.mkdtemp()`).
 
 The corpus of evasion attempts and the gaps left open on purpose are in
 `tests/unit/test_gate_evasion.py`.
@@ -1022,9 +1192,10 @@ python3 lab/run.py --uninstall                   # removes the image
 - **Isolated copy.** The lab renders the project's compose configuration into its own compose project. That copy has no published ports, no fixed names, subnets or addresses, and fresh volumes, so the running dev stack is not touched.
 - **Internal networks.** Every network of the copy is `internal`, so no service of it reaches this computer (a database on `host.docker.internal`), the local network or the internet. A service that needs the internet to start does not start in the lab. The scanner joins its own internal network, whose only other member is the target service.
 - **Host access.** A service that is privileged, adds capabilities beyond a small safe set, uses devices or GPUs, shares the host's namespaces (`pid`, `ipc`, `uts`, `userns_mode`, `cgroup`), uses a `network_mode`, or reaches containers outside the lab is refused.
-- **Target.** The target is a compose service plus a port and a path, never a URL.
+- **Target.** The target is a compose service plus a port and a path, never a URL. Run from the project and the lab finds the compose file (in the directory or a descendant; more than one and it lists them for you to pick with `--compose-file`) and scans every service built from inside the project — each in its own isolated bring-up — taking the port from `ports`/`expose`. `--service` and `--port` pick one instead.
 - **Checks before start.** Both the rendered and the Compose-resolved configuration are checked. A failed check refuses the run with exit code 2.
-- **Bind mounts.** A project that mounts folders of this computer is refused, with the list of mounts. `--allow-bind-mounts` scans anyway.
+- **Mounts of this computer.** A read-only mount whose source is inside the project (committed init scripts, seed data) is kept. A read-write mount is dropped, so the lab writes to a fresh, empty location and never to the developer's files; a read-only mount outside the project, and a `configs:`/`secrets:` file outside it, are refused.
+- **The committed tree, on `--gate`.** By default the lab builds the working tree; `--gate` builds a `git worktree` of the commit (HEAD, or `--commit`) instead — the project's own repo at that commit, any other repo built as a dependency at its HEAD — so the scan is of exactly what is being pushed. It records the verdict against the commit in a per-project file outside the repo (`REDLAB_STATE_DIR`, default `~/.claude/hooks/redlab/`), which a later pre-push gate reads; a result for an earlier commit never counts for a new one. The worktrees are removed when the run ends.
 - **Nothing kept.** The report is printed and deleted. The lab's containers, network, volumes and built images are removed at the end of every run, also on error or Ctrl-C. A removal that fails is reported with the command that finishes it.
 
 The hook denies scanners and scanner containers (`nmap`, `nuclei`, `sqlmap`,
@@ -1078,8 +1249,8 @@ is treated as a failure.
 
 Edit `hooks/context_guard.py`. The thresholds (`WARN_PCT`, `BLOCK_PCT`,
 `UNLOCK_PCT`) are defined at the top of the file; destructive patterns
-(`DESTRUCTIVE_PATTERNS`), the correction and review-bypass phrase sets
-(`CORRECTION_RE`, `REVIEW_BYPASS_RE`) and the journal helpers live in
+(`DESTRUCTIVE_PATTERNS`), the correction phrase set (`CORRECTION_RE`) and the
+journal helpers live in
 `hooks/playbook_core.py`, shared with the Codex adapter. After editing, run the
 test suites:
 
@@ -1125,7 +1296,8 @@ language-agnostic.
 - `engineering-typescript` — listed above under code quality
 - `engineering-java`, `engineering-kotlin` — JVM ecosystem, build tools, ORMs,
   idiomatic layering
-- `engineering-go`, `engineering-rust`, `engineering-csharp`, `engineering-ruby`
+- `engineering-go`, `engineering-rust`, `engineering-csharp`, `engineering-ruby`,
+  `engineering-python`, `engineering-cpp`
   — each language's frameworks, data access, test runner and idioms
 
 ### Concurrency and reliability
@@ -1178,7 +1350,7 @@ language-agnostic.
 | --- | --- |
 | `/playbook-off` | Suspends all governance rules for the session (prototyping, exploration) |
 | `/playbook-on` | Re-activates rules after a suspension |
-| `/playbook-config` | Settings menu: prose level, known-failure warnings, cost budgets; session status; Learn (mines this project's failures and writes rules to `CLAUDE.md`). In Claude Code, typing it opens a numbered menu above the prompt (`hooks/config_panel.tsx`): type a number and Enter (0 goes back or exits). Settings change with no model call; Status and Learn hand the request to the model, since both need the session's context. |
+| `/playbook-config` | Settings menu: prose level, known-failure warnings, cost budgets, menu language, deviation reports to the maintainer (off by default); session status; Learn (mines this project's failures and writes rules to `CLAUDE.md`). In Claude Code, typing it opens a numbered menu above the prompt (`hooks/config_panel.tsx`): type a number and Enter (0 goes back or exits). Settings change with no model call; Status and Learn hand the request to the model, since both need the session's context. |
 
 Codex CLI does not expose slash commands for installed skills — invoke the
 corresponding skill by name in the prompt or via the Codex skill surface.
@@ -1221,7 +1393,7 @@ the language opt-in) along when an implementation starts.
 | Shared state, distributed ops, idempotency | `engineering-concurrency` |
 | Exception paths, retry, external calls | `engineering-error-handling` |
 | Tests | `engineering-testing` |
-| Code review | `engineering-code-review` |
+| Code review, audit of existing code | `engineering-code-review` |
 | New implementation task | `engineering-implement` |
 | Refactoring or bug investigation | `engineering-refactor` |
 | New project scaffolding | `engineering-scaffold` |

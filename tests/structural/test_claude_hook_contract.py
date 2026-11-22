@@ -46,9 +46,25 @@ class TestHooksJson(unittest.TestCase):
     def test_lifecycle_events_registered(self):
         self.assertEqual(
             set(self.config['hooks']),
-            {'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
-             'PreCompact', 'Stop', 'SubagentStop'},
+            {'SessionStart', 'UserPromptSubmit', 'UserPromptExpansion', 'PreToolUse', 'PostToolUse',
+             'PostToolUseFailure', 'PreCompact', 'Stop', 'SubagentStop', 'SessionEnd'},
         )
+
+    def test_ledger_runs_in_a_group_of_its_own(self):
+        """Hooks of one event run in parallel, so a separate group cannot
+        reorder, delay or share a timeout with the hooks already there; and
+        the ledger is the only hook on the events it added."""
+        ledger_events = set()
+        for event, entries in self.config['hooks'].items():
+            for entry in entries:
+                commands = [hook['command'] for hook in entry['hooks']]
+                if any('hooks/ledger.py' in command for command in commands):
+                    self.assertEqual(len(commands), 1, msg=event)
+                    ledger_events.add(event)
+        self.assertEqual(ledger_events, {'SessionStart', 'UserPromptSubmit', 'UserPromptExpansion', 'PostToolUse',
+                                         'PostToolUseFailure', 'Stop', 'SessionEnd'})
+        for event in ('UserPromptExpansion', 'PostToolUseFailure', 'SessionEnd'):
+            self.assertEqual(len(self.config['hooks'][event]), 1, msg=event)
 
     def test_every_command_points_at_an_existing_script(self):
         for event, entries in self.config['hooks'].items():

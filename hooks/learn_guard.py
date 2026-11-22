@@ -198,7 +198,7 @@ def _handle_post_tool_use(data: dict, path: str, state: dict, journal: str) -> N
 
 
 def _handle_user_prompt(data: dict, path: str, state: dict, journal: str) -> None:
-    prompt = str(data.get('prompt') or '')
+    prompt = playbook_core.typed_words(str(data.get('prompt') or ''))
     if not playbook_core.CORRECTION_RE.search(prompt):
         return
 

@@ -1,14 +1,14 @@
 ---
 name: engineering-concurrency
 description: "Concurrency rules for shared state, distributed operations, and idempotency. Use when implementing read-modify-write operations, distributed locks, idempotency keys, rate limiting, or background jobs across multiple replicas."
-version: 2.0.0
+version: 3.0.1
 user-invocable: false
 ---
 
 <!-- RULE-ANCHOR -->
 Rules in this skill are **non-negotiable** and active for the entire session.
 Read this skill completely before acting. No partial reads.
-Every action must trace to: (a) user's explicit request, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis — stop and confirm.
+Every action must trace to: (a) the user's request, including the decisions it delegates to you, (b) code read in the repo, or (c) a rule in a loaded skill. Anything else is a hypothesis: a decision you do not own, asked of the user (Decision ownership in `engineering-governance`).
 <!-- /RULE-ANCHOR -->
 
 
@@ -72,35 +72,40 @@ Never delete a lock without the Lua script — a plain `DEL` can release another
 
 ## Idempotency
 
-POST endpoints that mutate state must be idempotent when called with the same `Idempotency-Key`.
+A state-changing request that a client may retry (a POST from an app, a webhook, a payment) takes effect once, however many times it arrives. The client sends an `Idempotency-Key` header with a value it generates once per logical operation (a UUID).
 
-Protocol:
-1. Client sends `Idempotency-Key: <uuid>` header.
-2. Before executing the use case: check if the key exists in Redis.
-3. If it exists: return the cached response immediately — do not re-execute.
-4. If it does not exist: execute the use case, store `key → response` in Redis with a TTL (24h standard), return response.
-5. On conflict: return `409 Conflict` with the existing resource ID.
-
-Storage pattern — always use atomic `SET NX` to claim the key before executing. A `GET` + conditional `SET` creates a race window: two concurrent requests with the same key both see a cache miss and both execute the use case.
+Rules:
+1. **The key belongs to the caller.** The record is unique on (caller identity, key). The same key sent by another caller is a different key and never returns the first caller's response.
+2. **The key is bound to the request.** Store a fingerprint of the request: a hash of the method, the route and the canonical body. The same key with another fingerprint is refused with `422`, with no effect.
+3. **The record lives where the effect lives.** When the operation writes to a database, the idempotency record is a row in that database, written in the same transaction as the effect, under a unique index on (caller, key). The response is stored in that row before the commit. The effect and the record commit together or roll back together, so a retry after a failure runs cleanly once. Never keep it in a second store (a cache, Redis) for such an operation: a crash between the commit and the second write leaves an effect with no record, so the retry runs it again, or leaves a record that never finishes.
+4. **A concurrent duplicate never runs twice.** The second request's insert meets the unique index. Depending on the database, it waits for the first transaction and then replays the stored response, or it fails at once and gets `409` ("in progress", with the key).
+5. **A replay returns the stored status and body**, without executing again.
+6. **Retention is a documented window** (24 h is common), purged by a job. A record is never removed while its client may still retry the operation.
 
 ```pseudocode
-key = "idempotency:" + idempotency_key
+fingerprint = hash(method, route, canonical(body))
 
-# Atomic claim — only the first request proceeds; concurrent duplicates are blocked
-claimed = redis.set(key, "processing", NX, EX, 86400)
-if not claimed:
-  cached = redis.get(key)
-  if cached exists and cached != "processing":
-    return parse_response(cached)
-  # 'processing' means a concurrent request is in flight with the same key
-  # conflict response carries the idempotency key back to the client
-  throw duplicate_request("Request already in progress", idempotency_key)
-
-result = operation.execute(input)
-# Overwrite 'processing' placeholder with the actual response
-redis.set(key, serialize(result), EX, 86400)
+transaction:
+  # unique index on (caller, key); the claim is never visible outside this transaction
+  claimed = idempotency.insert_if_absent(caller, key, fingerprint)
+  if not claimed:
+    record = idempotency.find(caller, key)
+    if record.fingerprint != fingerprint:
+      throw unprocessable("Idempotency-Key reused with another request")   # 422
+    if record.response exists:
+      return record.response
+    throw duplicate_request("Request already in progress", key)            # 409
+  result = operation.execute(input)          # every write of the effect, same transaction
+  idempotency.store_response(caller, key, serialize(result))
+commit
 return result
 ```
+
+**An operation with no database effect**, such as a call to an external API, has nothing to share a transaction with:
+- **Prefer the provider's own idempotency:** pass the key on, since most payment APIs accept one.
+- **Otherwise, claim the key in a shared store** with an atomic set-if-absent that carries the fingerprint, never a read followed by a write. Release the claim when the call fails, and store the response after it succeeds. A crash after the external call and before the store still repeats the call on retry. Write that trade-off down where the code makes it.
+
+Status codes follow the IETF `Idempotency-Key` header draft: `422` for a key reused with another request, `409` for a duplicate still in progress.
 
 ---
 
@@ -149,5 +154,5 @@ Never use `GET` + conditional `SET` for rate limiting — `INCR` is atomic at th
 <!-- OUTPUT-DISCIPLINE -->
 No preamble. No ceremony. No restating context already confirmed.
 Implement exactly what was specified — nothing more, nothing less.
-When ambiguous: stop, list the question, wait. Never assume.
+A decision you do not own: ask, never assume. One the request delegates to you: decide and record it.
 <!-- /OUTPUT-DISCIPLINE -->

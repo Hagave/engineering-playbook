@@ -8,6 +8,8 @@ CWE-840, CWE-841, CWE-362, CWE-367, CWE-20
 
 Business rules hold under concurrency, replays, out-of-order steps and boundary values. They are enforced in the domain and the database, never by the client.
 
+A rule is an invariant of the stored state, not of the flow that happens to check it (Obligations in `engineering-governance`). Every flow that writes the state enforces all of its invariants: two flows that each guard only their own counter (refunds and chargebacks of one payment; paid and complimentary tickets of one venue) together break the limit they share. An input is accepted only inside its declared domain, so its edges are the boundaries of that domain, not a list of bad values.
+
 ## Sinks
 
 - Check-then-act on shared state:
@@ -17,8 +19,9 @@ Business rules hold under concurrency, replays, out-of-order steps and boundary 
   - count the invites, then insert.
 - Values the server should own taken from the request: price, total, discount, currency, the current workflow step, the "approved" flag.
 - Workflows whose endpoints can be called in any order (pay before confirming, confirm twice, skip verification).
-- Numeric edges:
-  - negative quantities, zero, very large numbers;
+- A state written by more than one flow, where each flow checks only its own part of the limit they share.
+- An input with no declared domain: a negative or zero quantity, a huge number, a date in the past or before the record it refers to all pass where only the format is checked.
+- Number representation:
   - floating point for money;
   - integer overflow in a language that wraps.
 - Retries and replays of state-changing requests without idempotency.
@@ -43,10 +46,14 @@ Concurrency tests run the requests truly in parallel (`Promise.all`, a thread po
 | 20 parallel redemptions of one single-use coupon | exactly 1 succeeds |
 | parallel withdrawals whose sum exceeds the balance | the balance never goes below zero; failures are clean errors |
 | 20 parallel purchases of the last item in stock | exactly 1 succeeds; stock is 0, not negative |
-| `quantity: -1`, `0`, `2^53`, `1.5` where an integer is expected | 400 |
+| every writer of a shared state run in parallel on its last unit (paid and complimentary tickets on the last seat) | the shared invariant holds; the surplus requests fail cleanly |
+| each boundary of an input's declared domain, on both sides (`quantity` 0 and 1 and the cap and cap + 1; a date just before and just after now) | inside accepted, outside 400 |
 | `price` / `total` / `discount` in the request body | ignored; the server value is charged |
 | calling step 3 of a workflow before step 2 | 409, no effect |
 | the same request replayed with the same idempotency key | same response, one effect |
+| the same idempotency key sent by another user | handled as a new key; the first user's response is never returned |
+| the same idempotency key with a different body | 422, no effect |
+| the operation fails after its write (fault injected before the commit) | the write and the key roll back together; the retry takes effect once |
 
 ## Dynamic proof
 
@@ -55,5 +62,8 @@ Not provable in the lab: the passive baseline sends no request bursts. The concu
 ## Review signal
 
 - A `find` followed by a `save` of the same row with a condition checked in application code between them.
+- A write to a state that another flow also writes, whose condition covers only this flow's part of the shared limit.
+- An input validated for format or type only, with no range or relation to now and to the record it refers to.
 - A monetary or permission value read from the request.
 - An endpoint of a multi-step flow that does not read the current state before acting.
+- An idempotency key kept in a cache or a second store for an operation that writes to the database, or not scoped to the caller.

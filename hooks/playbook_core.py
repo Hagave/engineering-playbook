@@ -16,7 +16,9 @@ not need to be manually re-ported to a second implementation.
 
 import ast
 import contextlib
+import fnmatch
 import glob
+import hashlib
 import json
 import os
 import re
@@ -25,6 +27,7 @@ import subprocess
 import tempfile
 import time
 import warnings
+from enum import Enum, auto
 from typing import NamedTuple
 
 import playbook_i18n
@@ -36,7 +39,7 @@ SPEC_TOKEN = '[SPEC CONFIRMED]'
 # language-agnostic, so the gates must be too — an extension missing here silently
 # disables the skill gate, the spec gate and the validation gate for that language.
 _CODE_EXT = (
-    r'\.(?:tsx|ts|jsx|js|mjs|cjs|vue|svelte'
+    r'\.(?:tsx|ts|mts|cts|jsx|js|mjs|cjs|vue|svelte'
     r'|pyi|py|rb|php|go|java|kts|kt|scala|sc|swift|dart|rs|cs|fs'
     r'|exs|ex|erl|clj|cljs|hs|lua|zig|sh|bash|zsh'
     r'|cpp|cxx|cc|hpp|hxx|mm|c|h|m)\b'
@@ -70,10 +73,12 @@ _REDIRECT_PUNCT = ';&|()<>'
 _TEE_VALUE_OPTS = frozenset({'--output-error'})
 
 
-def redirect_code_targets(command: str) -> list[str] | None:
+def redirect_code_targets(command: str, source_only: bool = True) -> list[str] | None:
     """Source files `command` writes through a redirect or `tee`, as written;
     None when it does not tokenize (the text patterns then apply, failing
-    closed).
+    closed). With `source_only` False, every file it writes that way, source or
+    not, except through a nested shell script (`bash -c`), whose targets are
+    read for source only.
 
     Read as the shell reads it, not as text: a quoted `->` in a commit message
     (`git commit -m "rename a.py -> b.py"`) or a `>` inside an echoed string is
@@ -109,7 +114,7 @@ def redirect_code_targets(command: str) -> list[str] | None:
         # redirects are read from the script itself (`bash -c "echo x > a.py"`).
         for script in _nested_scripts(words):
             targets += _redirect_or_text_targets(script)
-    return [t for t in targets if _ends_with_code_ext(t)]
+    return [t for t in targets if not source_only or _ends_with_code_ext(t)]
 
 
 def _ends_with_code_ext(path: str) -> bool:
@@ -252,41 +257,49 @@ def is_code_write(tool_name: str, tool_input: dict, command: str = '', cwd: str 
     base = cwd or os.getcwd()
     return any(not is_throwaway_write(t, base) for t in targets)
 
-DESTRUCTIVE_PATTERNS = [
-    r'\brm\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[rR]|--recursive\b)',
-    r'\bgit\s+push\b[^\n]*(?:\s-f\b|\s--force\b|\s\+\S+)',
-    r'\bgit\s+reset\s+--hard\b',
+# `rm -r` and `xargs rm` are read from the tokens of each simple command
+# (`token_deletion`): as text, `\brm` matched the `rm` of `docker run --rm` and
+# the `r` of a later flag (`javac -proc`) read as `-r`. These patterns are the
+# fallback for text that does not tokenize, where failing closed is the point.
+DELETION_TEXT_RULES = [
+    (r'\brm\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[rR]|--recursive\b)', 'delete_tree'),
+    (r'\bxargs\b[^\n]*\brm\b', 'mass_delete'),
+]
+
+DESTRUCTIVE_RULES = [
+    (r'\bgit\s+push\b[^\n]*(?:\s-f\b|\s--force\b|\s\+\S+)', 'force_push'),
+    (r'\bgit\s+reset\s+--hard\b', 'reset_hard'),
     # Forced branch deletion in every spelling: -D, a -df/-fd cluster, and the
     # long forms in either order. A plain -d refuses an unmerged branch.
     # Case-sensitive on the short flags: the patterns run with IGNORECASE, and
     # read that way `-d` (safe delete) was `-D`.
-    r'\bgit\s+branch\b[^\n;&|]*?\s(?:(?-i:-[a-zA-Z]*D)\b'
-    r'|(?-i:-[a-zA-Z]*(?:d[a-zA-Z]*f|f[a-zA-Z]*d)[a-zA-Z]*)\b'
-    r'|(?:--delete|-d)\b[^\n;&|]*\s(?:--force|-f)\b'
-    r'|(?:--force|-f)\b[^\n;&|]*\s(?:--delete|-d)\b)',
-    r'\bgit\s+checkout\s+--\s',
+    (r'\bgit\s+branch\b[^\n;&|]*?\s(?:(?-i:-[a-zA-Z]*D)\b'
+     r'|(?-i:-[a-zA-Z]*(?:d[a-zA-Z]*f|f[a-zA-Z]*d)[a-zA-Z]*)\b'
+     r'|(?:--delete|-d)\b[^\n;&|]*\s(?:--force|-f)\b'
+     r'|(?:--force|-f)\b[^\n;&|]*\s(?:--delete|-d)\b)', 'branch_delete'),
+    (r'\bgit\s+checkout\s+--\s', 'discard_changes'),
     # `git restore` discards working-tree changes unless it only unstages.
     # Short flags case-sensitive: under IGNORECASE `-s` (--source, which
     # overwrites the working tree) read as `-S` (--staged, which only unstages).
-    r'\bgit\s+restore\b(?=[^\n;&|]*\s(?:--worktree|(?-i:-W))\b)',
-    r'\bgit\s+restore\b(?![^\n;&|]*\s(?:--staged|(?-i:-S))\b)',
-    r'\bgit\s+clean\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[fdx]\b|--force\b)',
+    (r'\bgit\s+restore\b(?=[^\n;&|]*\s(?:--worktree|(?-i:-W))\b)', 'discard_changes'),
+    (r'\bgit\s+restore\b(?![^\n;&|]*\s(?:--staged|(?-i:-S))\b)', 'discard_changes'),
+    (r'\bgit\s+clean\s+(?:[^\n]*\s)?(?:-[a-zA-Z]*[fdx]\b|--force\b)', 'clean'),
     # History and stash that no reflog brings back.
-    r'\bgit\s+stash\s+(?:clear|drop)\b',
-    r'\bgit\s+reflog\s+(?:expire|delete)\b',
-    r'\bgit\s+update-ref\s+(?:[^\n;&|]*\s)?-d\b',
-    r'\bgit\s+filter-(?:branch|repo)\b',
+    (r'\bgit\s+stash\s+(?:clear|drop)\b', 'stash_drop'),
+    (r'\bgit\s+reflog\s+(?:expire|delete)\b', 'history'),
+    (r'\bgit\s+update-ref\s+(?:[^\n;&|]*\s)?-d\b', 'history'),
+    (r'\bgit\s+filter-(?:branch|repo)\b', 'history'),
     # A forced worktree removal discards its uncommitted changes.
-    r'\bgit\s+worktree\s+remove\b[^\n;&|]*\s(?:--force|-f)\b',
-    r'\brsync\b[^\n;&|]*\s--delete',
-    r'\bshred\s',
-    r'\btruncate\s+[^\n;&|]*(?:-s\s*0+\b|--size(?:=|\s+)0+\b)',
-    r'\bfind\s+[^\n]*-delete\b',
-    r'\bxargs\b[^\n]*\brm\b',
-    r'\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?[`"\[]?\w',
-    r'\bTRUNCATE\s+(?:TABLE\s+|ONLY\s+)?[`"\[]?\w+[`"\]]?\s*(?:;|$|\s+(?:CASCADE|RESTART))',
-    r'(?s)\bDELETE\s+FROM\b(?!.*\bWHERE\b)',
+    (r'\bgit\s+worktree\s+remove\b[^\n;&|]*\s(?:--force|-f)\b', 'worktree_remove'),
+    (r'\brsync\b[^\n;&|]*\s--delete', 'sync_delete'),
+    (r'\bshred\s', 'shred'),
+    (r'\btruncate\s+[^\n;&|]*(?:-s\s*0+\b|--size(?:=|\s+)0+\b)', 'truncate'),
+    (r'\bfind\s+[^\n]*-delete\b', 'mass_delete'),
+    (r'\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?[`"\[]?\w', 'sql'),
+    (r'\bTRUNCATE\s+(?:TABLE\s+|ONLY\s+)?[`"\[]?\w+[`"\]]?\s*(?:;|$|\s+(?:CASCADE|RESTART))', 'sql'),
+    (r'(?s)\bDELETE\s+FROM\b(?!.*\bWHERE\b)', 'sql'),
 ]
+DESTRUCTIVE_PATTERNS = [pattern for pattern, _ in DESTRUCTIVE_RULES]
 
 # AI attribution on anything a team reads as project history. The harness injects
 # two forms by default -- the commit trailer and a "Generated with Claude Code"
@@ -341,39 +354,6 @@ PUBLISH_CMD_RE = re.compile(
 # attribution check reads pull request bodies too, and those arrive almost
 # exclusively as `--body "$(cat <<'EOF' ...)"`.
 PUBLISH_TOOLS = frozenset({'git', 'gh', 'glab', 'az'})
-
-# The user authorizing a destructive operation in their own words. Scoped to the
-# message it appears in (see context_guard._destructive_authorized): the guard
-# re-reads the latest user message on every call, so an authorization never
-# outlives the turn that granted it, and the model can never grant itself one.
-# Negation directly before a permission phrase inverts it: "não pode apagar" and
-# "never delete the database" are prohibitions, and reading either as consent is
-# the worst failure this pattern can have.
-_NOT = r'(?<!não )(?<!nao )(?<!nunca )(?<!never )(?<!not )(?<!don\'t )'
-# A bare imperative only counts where the sentence actually starts with it, or
-# after an explicit yes. Otherwise any sentence that merely contains "delete the
-# database" reads as an instruction to delete it.
-_AFFIRMATIVE = r'(?:^|[.!?;]\s+|\b(?:yes|sim|ok|beleza|claro|please|por\s+favor),?\s+)'
-
-# Every form names the destructive act itself. A general approval ("pode
-# seguir", "pode rodar os testes", "I confirm the spec") answers another
-# question, and read as consent it unlocked rm -rf and force push for the turn.
-_PT_VERBS = 'apagar|deletar|remover|excluir|limpar|resetar|sobrescrever|forçar|forcar'
-_PT_ACTS = r'exclus[ãa]o|remo[çc][ãa]o|reset|push\s+for[çc]ado'
-_EN_VERBS = 'delete|remove|drop|wipe|reset|overwrite|force'
-_EN_ACTS = r'deletion|removal|force\s+push'
-
-DESTRUCTIVE_AUTHORIZED_RE = re.compile(
-    _NOT + rf'\bpode\s+(?:{_PT_VERBS})\b'
-    + '|' + _AFFIRMATIVE + r'(?:apaga|apague|deleta|remova|remove|exclua|limpa|limpe'
-    r'|reseta|resete)\s+(?:isso|isto|esse|este|essa|esta|tudo|o\s+\S+|a\s+\S+)\b'
-    + rf'|\b(?:eu\s+)?(?:autorizo|confirmo)\s+(?:(?:a|o)\s+)?(?:{_PT_VERBS}|{_PT_ACTS})\b'
-    + rf'|\bgo\s+ahead\s+and\s+(?:{_EN_VERBS})\b'
-    + '|' + _AFFIRMATIVE + rf'(?:{_EN_VERBS})\s+(?:it|this|that|them|the\s+\S+)\b'
-    + rf'|\byou\s+(?:can|may)\s+(?:{_EN_VERBS})\b'
-    + rf'|\bi\s+(?:authorize|confirm)\s+(?:the\s+)?(?:{_EN_VERBS}|{_EN_ACTS})\b',
-    re.IGNORECASE | re.MULTILINE,
-)
 
 # A heredoc body written by cat/tee, or fed to a non-shell interpreter, is data
 # or foreign-language source — not shell about to run. Scanning it with shell and
@@ -630,7 +610,9 @@ def shell_segments(command: str) -> list[list[str]] | None:
     return segments
 
 
-def _tokenize_segments(command: str) -> list[list[str]] | None:
+def _statements(command: str) -> list[tuple[str, list[str]]] | None:
+    """Simple commands of `command` (substitutions already lifted), each with
+    the separator token that comes before it ('' for the first)."""
     text = _unquoted_newlines_as_separators(command)
     lexer = shlex.shlex(text, posix=True, punctuation_chars=_SHELL_PUNCT)
     lexer.whitespace_split = True
@@ -639,18 +621,142 @@ def _tokenize_segments(command: str) -> list[list[str]] | None:
         tokens = list(lexer)
     except ValueError:
         return None
-    segments: list[list[str]] = []
+    statements: list[tuple[str, list[str]]] = []
     current: list[str] = []
+    separator = ''
     for token in tokens:
-        if token and all(ch in _SHELL_PUNCT for ch in token):
+        # Inside `[[ ... ]]`, `&&`, `||` and parentheses are operators of the
+        # test, not command separators: split there, `[[ "$t" > a && "$t" < b ]]`
+        # made `$t < b ]]` a command whose program was decided at run time.
+        in_test = bool(current) and current[0] == '[[' and current[-1] != ']]'
+        if token and all(ch in _SHELL_PUNCT for ch in token) and not in_test:
             if current:
-                segments.append(current)
+                statements.append((separator, current))
             current = []
+            separator = token
         else:
             current.append(token)
     if current:
-        segments.append(current)
-    return segments
+        statements.append((separator, current))
+    return statements
+
+
+def _tokenize_segments(command: str) -> list[list[str]] | None:
+    statements = _statements(command)
+    return None if statements is None else [words for _, words in statements]
+
+
+_VAR_REF_RE = re.compile(r'\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))')
+# A value with any of these is not one fixed text once the shell expands it.
+_NON_LITERAL_VALUE_CHARS = frozenset(';&|<>()*?[`$')
+# Builtins whose arguments are assignments to the running shell.
+_DECLARE_WORDS = frozenset({'export', 'local', 'readonly', 'declare', 'typeset'})
+# A name with more literal values than this is checked on its first ones.
+_CANDIDATES_MAX = 16
+_DEFAULT_IFS = ' \t\n'
+
+
+def _expand_candidates(value: str, candidates: dict[str, list[str]]) -> list[str]:
+    """Every text `value` can be with its references replaced by the literal
+    values those names take in the command; [] when it holds anything the
+    shell computes (a substitution, a glob, a name with no literal value)."""
+    texts = ['']
+    position = 0
+    for match in _VAR_REF_RE.finditer(value):
+        name = match.group(1) or match.group(2)
+        if not candidates.get(name):
+            return []
+        prefix = value[position:match.start()]
+        texts = [text + prefix + one for text in texts
+                 for one in candidates[name]][:_CANDIDATES_MAX]
+        position = match.end()
+    texts = [text + value[position:] for text in texts]
+    return [text for text in texts
+            if text.strip() and not any(ch in _NON_LITERAL_VALUE_CHARS for ch in text)]
+
+
+def _assignments(words: list[str]) -> list[str]:
+    """The `NAME=value` words a statement assigns in the running shell: a
+    statement of assignments alone, the leading ones of a command (which also
+    count: conservatively, since only that command sees them), and the
+    arguments of `export`, `local` and the other declaring builtins."""
+    while words and words[0] in _SHELL_KEYWORDS:
+        words = words[1:]
+    at = 1 if words and words[0] in _DECLARE_WORDS else 0
+    found = []
+    for word in words[at:]:
+        if _ENV_ASSIGN_RE.match(word):
+            found.append(word)
+        elif not (at and word.startswith('-')):
+            break
+    return found
+
+
+def _literal_candidates(statements: list[tuple[str, list[str]]]) -> dict[str, list[str]]:
+    """Every literal value each name takes anywhere in the command: each
+    assignment and each word a `for NAME in ...` list holds, wherever it sits
+    (a branch, a loop, after `&&`), in any order. Read twice, so a value that
+    names a variable assigned later in the text is expanded too."""
+    candidates: dict[str, list[str]] = {}
+    for _ in range(2):
+        for _separator, words in statements:
+            pairs = [tuple(word.split('=', 1)) for word in _assignments(words)]
+            if len(words) > 2 and words[0] == 'for' and words[2] == 'in':
+                pairs += [(words[1], word) for word in words[3:] if word != 'do']
+            for name, value in pairs:
+                known = candidates.setdefault(name, [])
+                for text in _expand_candidates(value, candidates):
+                    if text not in known and len(known) < _CANDIDATES_MAX:
+                        known.append(text)
+    return candidates
+
+
+def _split_words(value: str, separators: list[str]) -> list[list[str]]:
+    """`value` split into words the way each IFS the command may set splits it."""
+    shapes = []
+    for ifs in separators:
+        words = [word for word in re.split('[' + re.escape(ifs) + ']+', value) if word]
+        if words and words not in shapes:
+            shapes.append(words)
+    return shapes
+
+
+def resolve_literal_commands(command: str) -> str:
+    """`command` with each command word that is a variable replaced by every
+    literal value the command gives it (`P="docker exec db psql"; $P -c "select
+    1"`), one simple command per line and one line per value; `command`
+    itself when there is none.
+
+    Every literal the text holds for the name counts, wherever it is assigned
+    and in whatever order (`ok && P="rm -rf" || P=echo; $P build` is read as
+    both), split by every IFS the command sets. What the text cannot show (a
+    value from `$(...)`, `read`, `source`, the environment) is not read: a
+    program the command does not show is not asked about (decided by the user
+    for the auto-mode consent work), while every one it does show is checked.
+    Commands inside substitutions are kept as they are."""
+    outer, inner = _lift_substitutions(command.replace('\\\n', ' '))
+    statements = _statements(outer)
+    if not statements:
+        return command
+    candidates = _literal_candidates(statements)
+    separators = [_DEFAULT_IFS] + candidates.get('IFS', [])
+    resolved: list[list[str]] = []
+    changed = False
+    for _separator, words in statements:
+        effective = command_words(words)
+        reference = _VAR_REF_RE.fullmatch(effective[0]) if effective else None
+        name = (reference.group(1) or reference.group(2)) if reference else ''
+        if not candidates.get(name):
+            resolved.append(words)
+            continue
+        prefix = words[:len(words) - len(effective)]
+        for value in candidates[name]:
+            resolved += [prefix + shape + effective[1:] for shape in _split_words(value, separators)]
+        changed = True
+    if not changed:
+        return command
+    return '\n'.join([' '.join(shlex.quote(word) for word in words) for words in resolved]
+                     + inner)
 
 
 def command_words(segment: list[str]) -> list[str]:
@@ -688,38 +794,9 @@ def normalized_command(command: str) -> str:
     if not segments:
         return ''
     # One command per line, and a bare assignment is not a command: `x=rm` next
-    # to `$x -rf` must not read as `rm -rf` (that one is unattestable_command's).
+    # to `$x -rf` must not read as `rm -rf` (that one is resolve_literal_commands').
     text = '\n'.join(' '.join(words) for words in map(command_words, segments) if words)
     return _GIT_GLOBAL_OPTS_RE.sub('git ', text)
-
-
-def _starts_unknown(word: str) -> bool:
-    return word.startswith(('$', '`'))
-
-
-def _program_unknown(word: str) -> bool:
-    """Whether the program NAME is decided at run time. `$JAVA_HOME/bin/java`
-    is attestable — the directory varies, the program is `java` — while `$P`,
-    `/usr/bin/$X` and `$(echo rm)` (read as `$SUBST`) are not."""
-    return _starts_unknown(word.rsplit('/', 1)[-1])
-
-
-def unattestable_command(command: str) -> str:
-    """The first simple command whose program is decided at run time — a
-    variable or a command substitution as the command word, or as the whole
-    script of `eval` / `sh -c`. What such a command runs cannot be read before
-    the shell runs it, so no pattern can clear it. '' when there is none."""
-    for segment in shell_segments(command) or ():
-        words = command_words(segment)
-        if not words:
-            continue
-        base = words[0].rsplit('/', 1)[-1]
-        if (_program_unknown(words[0])
-                or (base == 'eval' and len(words) > 1 and _starts_unknown(words[1]))
-                or (base in _SHELL_WORDS and '-c' in words[:-1]
-                    and _starts_unknown(words[words.index('-c') + 1]))):
-            return ' '.join(segment)
-    return ''
 
 
 def inline_payloads(command: str) -> list[str]:
@@ -765,6 +842,7 @@ _NO_SCRIPT_FILE_OPTS = frozenset({'-c', '-e', '-E', '-m', '-r', '-p', '-', '--ev
 _INTERPRETER_VALUE_OPTS = frozenset({'-W', '-X', '--require', '-I', '--import', '--loader'})
 _SCRIPT_EXT_LANGUAGE = {
     '.py': 'python', '.js': 'other', '.mjs': 'other', '.cjs': 'other', '.ts': 'other',
+    '.mts': 'other', '.cts': 'other',
     '.rb': 'other', '.pl': 'other', '.php': 'other', '.sh': 'shell', '.bash': 'shell',
 }
 _PY_RECURSIVE_DELETE_CALLS = frozenset({'rmtree', 'remove_tree'})
@@ -843,6 +921,26 @@ def _tracked_by_git(path: str) -> bool:
     return done.returncode == 0
 
 
+# The playbook's own scripts that its skills tell the model to run, as
+# `python3 <playbook>/<path>`. Installed by `install.sh` (a release tarball) or
+# `claude plugin install` (the plugin cache), none of them is in a git work
+# tree, so the tracked-file exemption below never applied: the destructive gate
+# read lab/run.py, found the `shutil.rmtree` of its own temporary directory,
+# and denied every lab step outside this repository. A fixed list, not every
+# file under the root: a script written into the plugin directory and run from
+# there is still read.
+PLAYBOOK_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+PLAYBOOK_ENTRY_SCRIPTS = ('lab/run.py', 'scripts/playbook_config.py', 'hooks/output_filter.py',
+                          'audit/surface.py', 'scripts/temporary_data.py')
+
+
+def _is_playbook_entry_script(path: str) -> bool:
+    """Whether `path`, links resolved, is one of PLAYBOOK_ENTRY_SCRIPTS. A link
+    inside the plugin that points elsewhere resolves to where it points."""
+    real = os.path.realpath(path)
+    return any(real == os.path.join(PLAYBOOK_ROOT, rel) for rel in PLAYBOOK_ENTRY_SCRIPTS)
+
+
 def script_sources(raw: str, cwd: str, untracked_only: bool = False) -> list[ScriptSource]:
     """Scripts `raw` hands an interpreter other than inline: a heredoc body fed
     to python/node/ruby/perl/php, and a script file named as an interpreter's
@@ -855,7 +953,8 @@ def script_sources(raw: str, cwd: str, untracked_only: bool = False) -> list[Scr
     build and test scripts (`./mvnw`, `tests/run_all.py`) clean up after
     themselves, and reading them blocked 184 of 6885 recorded commands. A
     script the agent writes and then runs is untracked, and that is the way
-    past the gate this closes."""
+    past the gate this closes. The playbook's own entry scripts are left out
+    the same way, wherever it is installed (`_is_playbook_entry_script`)."""
     sources: list[ScriptSource] = []
     for start in _HEREDOC_START_RE.finditer(raw):
         language = _interpreter_language(_segment_command_word(raw, start.start()))
@@ -871,7 +970,7 @@ def script_sources(raw: str, cwd: str, untracked_only: bool = False) -> list[Scr
         if not path or not _is_literal_path(path):
             continue
         full = os.path.join(root, os.path.expanduser(path))
-        if untracked_only and _tracked_by_git(full):
+        if untracked_only and (_is_playbook_entry_script(full) or _tracked_by_git(full)):
             continue
         text = _read_script(path, root)
         if text is None:
@@ -977,15 +1076,76 @@ def _python_source_paths(tree: ast.AST) -> list[str]:
             and _CODE_PATH_WORD_RE.fullmatch(node.value)]
 
 
+# A name bound once to a directory the script itself creates as temporary:
+# `const dir = fs.mkdtempSync(...)`, `let d = await mkdtemp(...)`.
+_TEXT_TEMP_DIR_RE = re.compile(
+    r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:[\w$]+\s*\.\s*)*'
+    r'mkdtemp(?:Sync)?\s*\(')
+_FIRST_ARGUMENT_NAME_RE = re.compile(r'\(\s*([A-Za-z_$][\w$]*)\s*[,)]')
+
+
+def _text_temp_dirs(text: str) -> set[str]:
+    """Names a script binds to a temporary directory it creates and never
+    rebinds: deleting one removes only what the script made. A name that is
+    also assigned again, a parameter (`(dir) =>`, `function f(dir)`), a loop
+    variable or a `catch` binding is left out: the text does not show scope."""
+    names = set()
+    for name in _TEXT_TEMP_DIR_RE.findall(text):
+        word = re.escape(name)
+        rebound = (len(re.findall(rf'(?<![\w$.]){word}\s*=(?![=>])', text)) != 1
+                   or re.search(rf'\([^()]*(?<![\w$.]){word}(?![\w$])[^()]*\)\s*(?:=>|\{{)', text)
+                   or re.search(rf'(?<![\w$.]){word}\s*=>', text)
+                   or re.search(rf'\bfor\s*\([^)]*(?<![\w$.]){word}(?![\w$])', text)
+                   or re.search(rf'\bcatch\s*\(\s*{word}\b', text))
+        if not rebound:
+            names.add(name)
+    return names
+
+
+def _recursive_delete_in_text(text: str) -> str:
+    """The first recursive-deletion call of a script read as text, other than
+    one on a temporary directory the script created; '' when there is none."""
+    temp_dirs = _text_temp_dirs(text)
+    for match in _RECURSIVE_DELETE_API_RE.finditer(text):
+        argument = _FIRST_ARGUMENT_NAME_RE.search(text, match.start(), match.end() + 120)
+        if argument and argument.start() < match.end() and argument.group(1) in temp_dirs:
+            continue
+        return match.group(0).strip()
+    return ''
+
+
+def _python_temp_dirs(tree: ast.AST) -> set[str]:
+    """Names a Python script binds once, and only, to `tempfile.mkdtemp()`:
+    any other binding of the name (a loop target, `with ... as`, `:=`, a second
+    assignment, a parameter) leaves it out."""
+    stores: dict[str, int] = {}
+    parameters: set[str] = set()
+    temp: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            stores[node.id] = stores.get(node.id, 0) + 1
+        elif isinstance(node, ast.arg):
+            parameters.add(node.arg)
+        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call)
+              and _call_name(node.value.func) == 'mkdtemp'):
+            temp.add(node.targets[0].id)
+    return {name for name in temp if stores.get(name) == 1 and name not in parameters}
+
+
 def _recursive_delete_call(source: ScriptSource) -> str:
     """The recursive-deletion call a python/other script makes, as text; ''
-    when it makes none."""
+    when it makes none. A call on a temporary directory the script itself
+    created (`mkdtemp`) deletes only what the script made, and is not one."""
     if source.language != 'python':
-        match = _RECURSIVE_DELETE_API_RE.search(source.text)
-        return match.group(0).strip() if match else ''
+        return _recursive_delete_in_text(source.text)
     tree = _python_tree(source.text)
+    temp_dirs = _python_temp_dirs(tree) if tree is not None else set()
     for node in ast.walk(tree) if tree is not None else ():
         if isinstance(node, ast.Call) and _call_name(node.func) in _PY_RECURSIVE_DELETE_CALLS:
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Name) and first.id in temp_dirs:
+                continue
             return (ast.get_source_segment(source.text, node) or _call_name(node.func))[:120]
     return ''
 
@@ -1150,10 +1310,12 @@ def _nested_scripts(words: list[str]) -> list[str]:
     return scripts
 
 
-def _simple_commands(command: str) -> tuple[list[list[str]], list[str]] | None:
-    """The command words of every simple command in `command`, with the
-    scripts it hands to a shell (see `_nested_scripts`) read as commands of
-    their own; plus those nested scripts that do not tokenize, as text.
+def _raw_simple_commands(command: str
+                         ) -> tuple[list[tuple[list[str], bool]], list[str]] | None:
+    """Every simple command of `command` as written, wrappers kept (`xargs rm`
+    is a mass delete because of its wrapper), with the scripts it hands to a
+    shell (see `_nested_scripts`) read as commands of their own and flagged
+    as nested; plus those nested scripts that do not tokenize, as text.
 
     A nested script that does not tokenize is returned for a text check and
     leaves the commands around it standing: dropping the whole command for it
@@ -1162,21 +1324,29 @@ def _simple_commands(command: str) -> tuple[list[list[str]], list[str]] | None:
     segments = shell_segments(command)
     if segments is None:
         return None
-    commands: list[list[str]] = []
+    found: list[tuple[list[str], bool]] = []
     opaque: list[str] = []
     for segment in segments:
+        found.append((segment, False))
         words = command_words(segment)
-        if not words:
-            continue
-        commands.append(words)
-        for script in _nested_scripts(words):
-            nested = _simple_commands(script)
+        for script in _nested_scripts(words) if words else ():
+            nested = _raw_simple_commands(script)
             if nested is None:
                 opaque.append(script)
             else:
-                commands += nested[0]
+                found += [(inner, True) for inner, _ in nested[0]]
                 opaque += nested[1]
-    return commands, opaque
+    return found, opaque
+
+
+def _simple_commands(command: str) -> tuple[list[list[str]], list[str]] | None:
+    """`_raw_simple_commands` with each command reduced to its command words
+    (wrappers and assignments dropped), and assignment-only ones left out."""
+    read = _raw_simple_commands(command)
+    if read is None:
+        return None
+    commands = [words for words in (command_words(segment) for segment, _ in read[0]) if words]
+    return commands, read[1]
 
 
 def _read_commands(command: str) -> tuple[list[list[str]], list[str]]:
@@ -1482,6 +1652,12 @@ VALIDATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def is_validation_command(command: str) -> bool:
+    """A Bash command that validates, read with heredoc bodies and interpreter
+    payloads stripped: a doc that merely mentions `npm test` validates nothing."""
+    return bool(VALIDATION_RE.search(strip_inline_payloads(strip_heredoc_bodies(command))))
+
 # Static analysis engines the playbook delegates to when one is installed. Never
 # bundled: the engine is LGPL and the community rules may not be redistributed,
 # so the playbook only tells the model how to run what the user already has.
@@ -1522,19 +1698,15 @@ def sast_notice(cwd: str) -> str:
     )
 
 
-# Marker files that identify a project's implementation language. Only the
-# languages the playbook has an opt-in for are listed, because the notice points
-# the model at engineering-<lang>. Order matters for a shared build tool: a
-# Kotlin Gradle project (.kts) is checked before a Java one (build.gradle).
-_LANGUAGE_MARKERS = (
-    ('typescript', ('tsconfig.json',)),
-    ('rust', ('Cargo.toml',)),
-    ('go', ('go.mod',)),
-    ('csharp', ('*.csproj', '*.fsproj', '*.sln')),
-    ('kotlin', ('build.gradle.kts', 'settings.gradle.kts')),
-    ('java', ('pom.xml', 'build.gradle', 'settings.gradle')),
-    ('ruby', ('Gemfile', '*.gemspec')),
-)
+def _language_markers() -> list[tuple[str, list[str]]]:
+    """(language, marker files) per row of the skill requirements table, in its
+    order: the same rows the write gate maps extensions with, so a language the
+    gate knows is also one the session can name."""
+    languages = skill_requirements().get('languages')
+    if not isinstance(languages, dict):
+        return []
+    return [(name, [str(m) for m in row.get('markers', ())])
+            for name, row in languages.items() if isinstance(row, dict)]
 
 
 def detect_languages(cwd: str) -> list[tuple[str, str]]:
@@ -1544,7 +1716,7 @@ def detect_languages(cwd: str) -> list[tuple[str, str]]:
     repository with no known marker returns []."""
     root = cwd or os.getcwd()
     found: list[tuple[str, str]] = []
-    for lang, markers in _LANGUAGE_MARKERS:
+    for lang, markers in _language_markers():
         for marker in markers:
             if '*' in marker:
                 hit = next((os.path.basename(p)
@@ -1573,6 +1745,467 @@ def language_notice(cwd: str) -> str:
     opts = ', '.join(f'engineering-{lang}' for lang, _ in found)
     return (f'[playbook:language] Multiple languages in the root: {listed}. Load '
             f'the matching opt-in ({opts}) for the part you touch.')
+
+
+# ─── Skills a write requires ─────────────────────────────────────────────────
+
+_SKILL_REQUIREMENTS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'data', 'skill_requirements.json')
+_skill_requirements_cache: dict | None = None
+_SOURCE_READ_LIMIT = 512 * 1024
+_MANIFEST_WALK_LIMIT = 16
+_PACKAGE_JSON_SECTIONS = ('dependencies', 'devDependencies', 'peerDependencies',
+                          'optionalDependencies')
+
+# Only lines shaped as an import are read (and a dynamic import only with a
+# literal quoted argument), so a comment or docstring that mentions a package
+# does not put the file on its topic. Accepted cost: a module name built at run
+# time is not seen.
+_IMPORT_LINE_RE = re.compile(
+    r'^\s*(?:import|from|use|using|require|require_relative|extern\s+crate)\b'
+    r'|^\s*(?:\}|export\b.*)\s*\bfrom\b'
+    r'|^\s*#\s*include\b'
+    r'|^\s*(?:[\w.]+\s+)?"[^"\s]+"\s*$'
+)
+_DYNAMIC_IMPORT_RE = re.compile(r"""\b(?:require|import)\s*\(\s*["']([^"'\s]+)["']""")
+_QUOTED_RE = re.compile(r"""["']([^"'\s]+)["']""")
+
+
+class SkillRequirement(NamedTuple):
+    skill: str
+    reason: str
+
+
+def skill_requirements() -> dict:
+    """The table in hooks/data/skill_requirements.json, read once per process.
+
+    An unreadable or malformed table yields {}: the skill gate then requires
+    governance alone, which is how it behaved before the table existed. Denying
+    every write over a broken install would leave no way out but editing the
+    plugin, and the structural tests already fail on a malformed table."""
+    global _skill_requirements_cache
+    if _skill_requirements_cache is None:
+        try:
+            with open(_SKILL_REQUIREMENTS_PATH, encoding='utf-8') as f:
+                data = json.load(f)
+            _skill_requirements_cache = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _skill_requirements_cache = {}
+    return _skill_requirements_cache
+
+
+def _requirement_text(tool_name: str, tool_input: dict, command: str) -> str:
+    """The whole text a call writes, read for import lines and code patterns.
+    Not the secret scan's added-lines view: an import kept by an edit still
+    puts the file on its topic."""
+    if tool_name == 'Write':
+        return str(tool_input.get('content') or '')
+    if tool_name == 'Edit':
+        return str(tool_input.get('new_string') or '')
+    if tool_name == 'MultiEdit':
+        edits = tool_input.get('edits')
+        if isinstance(edits, list):
+            return '\n'.join(str(e.get('new_string') or '') for e in edits if isinstance(e, dict))
+        return ''
+    if tool_name == 'Bash':
+        return str(tool_input.get('command') or command or '')
+    return ''
+
+
+def _write_paths(tool_name: str, tool_input: dict, command: str, root: str) -> list[str]:
+    """Every destination of the write. An editing tool's file counts whatever its
+    extension, so a Dockerfile or a Prisma schema reaches the topic rows. A shell
+    command yields its source-file targets plus the other files it writes by a
+    redirect or `tee` (`cat > Dockerfile <<EOF`); a non-source file it copies,
+    moves or downloads is not read, a gap the topic rows accept."""
+    if tool_name in CODE_WRITE_TOOLS:
+        path = str(tool_input.get('file_path') or tool_input.get('path')
+                   or tool_input.get('target_file') or '')
+        if not path:
+            return []
+        return [os.path.normpath(os.path.join(root, os.path.expanduser(path)))]
+    if tool_name == 'Bash':
+        paths = code_write_targets(tool_name, {**tool_input, '_cwd': root}, command)
+        base = _command_root(command, root) or root
+        for target in redirect_code_targets(command, source_only=False) or ():
+            if not _ends_with_code_ext(target) and target != '/dev/null':
+                paths.append(os.path.normpath(os.path.join(base, os.path.expanduser(target))))
+        return paths
+    return []
+
+
+def _read_source(path: str) -> str:
+    # A regular file only: opening a named pipe at the written path would block
+    # the hook until its timeout.
+    if not os.path.isfile(path):
+        return ''
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read(_SOURCE_READ_LIMIT)
+    except OSError:
+        return ''
+
+
+def _project_relative(path: str, root: str) -> str:
+    real, base = os.path.realpath(path), os.path.realpath(root) if root else ''
+    if base and (real == base or real.startswith(base + os.sep)):
+        return os.path.relpath(real, base).replace(os.sep, '/')
+    return path.replace(os.sep, '/')
+
+
+def _nearest_manifest(start: str, name: str, root: str) -> str:
+    """The manifest called `name` closest above `start`: the one that governs the
+    file in a monorepo. The walk stops at the project root, at a repository
+    boundary, or after a fixed number of levels."""
+    stop = os.path.realpath(root) if root else ''
+    current = os.path.realpath(start)
+    for _ in range(_MANIFEST_WALK_LIMIT):
+        if '*' in name:
+            hits = sorted(glob.glob(os.path.join(glob.escape(current), name)))
+            if hits:
+                return hits[0]
+        elif os.path.isfile(os.path.join(current, name)):
+            return os.path.join(current, name)
+        parent = os.path.dirname(current)
+        if current == stop or os.path.exists(os.path.join(current, '.git')) or parent == current:
+            break
+        current = parent
+    return ''
+
+
+def _manifest_declares(manifest: str, dependency: str, cache: dict[str, object]) -> bool:
+    """Whether `manifest` declares `dependency`. A package.json is read by its
+    dependency sections, so a script or description mentioning the name does not
+    count; any other manifest format is matched as a whole name in its text."""
+    if manifest not in cache:
+        text = _read_source(manifest)
+        if os.path.basename(manifest) == 'package.json':
+            names: set[str] = set()
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = {}
+            if isinstance(data, dict):
+                for section in _PACKAGE_JSON_SECTIONS:
+                    deps = data.get(section)
+                    if isinstance(deps, dict):
+                        names.update(str(k) for k in deps)
+            cache[manifest] = names
+        else:
+            cache[manifest] = text
+    declared = cache[manifest]
+    if isinstance(declared, set):
+        return dependency in declared
+    return bool(re.search(r'(?<![\w.-])' + re.escape(dependency) + r'(?![\w-])', str(declared)))
+
+
+def _imported_name(text: str, names: list[str]) -> str:
+    """The first of `names` that an import line of `text` names. Inside a quoted
+    module path the name must be the whole path or its prefix up to a `/`, so
+    `./kafka` or `kafkajs` is not `kafka`; an unquoted import (Java, C#, Rust,
+    Python) matches the name as a dotted or `::` prefix of the imported path."""
+    quoted: list[str] = []
+    bare: list[str] = []
+    for line in text.splitlines():
+        quoted.extend(_DYNAMIC_IMPORT_RE.findall(line))
+        if not _IMPORT_LINE_RE.search(line):
+            continue
+        found = _QUOTED_RE.findall(line)
+        if found:
+            quoted.extend(found)
+        else:
+            bare.append(line)
+    bare_text = '\n'.join(bare)
+    for name in names:
+        if any(q == name or q.startswith(name + '/') for q in quoted):
+            return name
+        if bare_text and re.search(r'(?<![\w@./-])' + re.escape(name) + r'(?![\w-])', bare_text):
+            return name
+    return ''
+
+
+_ARCH_ENTRY_LIMIT = 200
+_ARCH_SCAN_DIR_LIMIT = 4000
+_ARCH_SCAN_DEPTH = 6
+_ARCH_NOTICE_LIMIT = 6
+_ARCH_SCAN_SKIP = frozenset({'node_modules', 'vendor', 'dist', 'build', 'target', 'out',
+                             '__pycache__', 'venv', 'coverage'})
+
+
+class ArchitectureMatch(NamedTuple):
+    skill: str
+    name: str
+    base: str
+    evidence: str
+
+
+def _architecture_rows(table: dict) -> list[dict]:
+    rows = table.get('architectures')
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict) and row.get('skill')]
+
+
+def _child_names(directory: str, limit: int) -> tuple[list[str], list[str]]:
+    """(subdirectories, files) directly inside `directory`, reading at most
+    `limit` entries. An unreadable directory has neither."""
+    dirs: list[str] = []
+    files: list[str] = []
+    try:
+        with os.scandir(directory) as entries:
+            for count, entry in enumerate(entries):
+                if count >= limit:
+                    break
+                try:
+                    (dirs if entry.is_dir(follow_symlinks=False) else files).append(entry.name)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return dirs, files
+
+
+def _module_evidence(container: str, row: dict, cache: dict[tuple[str, str], str]) -> str:
+    """'<module>/<entry>' for the first module of `container` with the row's
+    shape, '' when none has it."""
+    key = (container, str(row.get('name') or row.get('skill')))
+    if key in cache:
+        return cache[key]
+    wanted_dirs = {str(d) for d in row.get('module_dirs', ())}
+    patterns = [str(p) for p in row.get('module_files', ())]
+    evidence = ''
+    modules, _ = _child_names(container, _ARCH_ENTRY_LIMIT)
+    for module in sorted(modules):
+        subdirs, files = _child_names(os.path.join(container, module), _ARCH_ENTRY_LIMIT)
+        hit = (next((d for d in sorted(subdirs) if d in wanted_dirs), '')
+               or next((f for f in sorted(files)
+                        if any(fnmatch.fnmatchcase(f, p) for p in patterns)), ''))
+        if hit:
+            evidence = f'{module}/{hit}'
+            break
+    cache[key] = evidence
+    return evidence
+
+
+def _architecture_at(directory: str, row: dict, cache: dict[tuple[str, str], str]) -> str:
+    """What shows `directory` to be the base of the row's structure, '' if it is not."""
+    layers = [str(layer) for layer in row.get('layers', ())]
+    if layers:
+        if all(os.path.isdir(os.path.join(directory, layer)) for layer in layers):
+            return ', '.join(layers)
+        return ''
+    container = str(row.get('container') or '')
+    if container and os.path.basename(directory) == container:
+        hit = _module_evidence(directory, row, cache)
+        return f'{container}/{hit}' if hit else ''
+    return ''
+
+
+def _ancestors(path: str, root: str) -> list[str]:
+    """The directories above `path`, nearest first, up to and including `root`;
+    [] for a path outside it."""
+    base = os.path.realpath(root)
+    current = os.path.realpath(os.path.dirname(path))
+    if current != base and not current.startswith(base + os.sep):
+        return []
+    chain = [current]
+    while current != base:
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+        chain.append(current)
+    return chain
+
+
+def architecture_matches(path: str, root: str, table: dict) -> list[ArchitectureMatch]:
+    """Each architecture row whose structure holds the file at `path`, with the
+    nearest base for that row. A container row needs the file inside one of its
+    modules, so a file sitting directly in `modules/` matches none."""
+    cache: dict[tuple[str, str], str] = {}
+    chain = _ancestors(path, root or os.getcwd())
+    found: list[ArchitectureMatch] = []
+    for row in _architecture_rows(table):
+        for depth, directory in enumerate(chain):
+            if row.get('container') and depth == 0:
+                continue
+            evidence = _architecture_at(directory, row, cache)
+            if evidence:
+                found.append(ArchitectureMatch(str(row['skill']), str(row.get('name') or row['skill']),
+                                               directory, evidence))
+                break
+    return found
+
+
+def _scan_architectures(root: str) -> tuple[list[ArchitectureMatch], bool]:
+    """Every base of a known architecture in the tree under `root`, and whether
+    the scan stopped at its directory limit before seeing the whole tree."""
+    rows = _architecture_rows(skill_requirements())
+    if not rows:
+        return [], False
+    cache: dict[tuple[str, str], str] = {}
+    found: list[ArchitectureMatch] = []
+    stack = [(os.path.realpath(root), 0)]
+    visited = 0
+    while stack:
+        if visited >= _ARCH_SCAN_DIR_LIMIT:
+            return found, True
+        directory, depth = stack.pop()
+        visited += 1
+        for row in rows:
+            evidence = _architecture_at(directory, row, cache)
+            if evidence:
+                found.append(ArchitectureMatch(str(row['skill']), str(row.get('name') or row['skill']),
+                                               directory, evidence))
+        if depth >= _ARCH_SCAN_DEPTH:
+            continue
+        subdirs, _ = _child_names(directory, _ARCH_SCAN_DIR_LIMIT)
+        for name in sorted(subdirs, reverse=True):
+            if not name.startswith('.') and name not in _ARCH_SCAN_SKIP:
+                stack.append((os.path.join(directory, name), depth + 1))
+    return found, False
+
+
+def _shown_base(base: str, root: str) -> str:
+    where = _project_relative(base, root)
+    return 'the project root' if where == '.' else where
+
+
+def _contains(outer: str, inner: str) -> bool:
+    return inner == outer or inner.startswith(outer + os.sep)
+
+
+def architecture_notice(cwd: str) -> str:
+    """Session context naming each architecture found in the project and the
+    skill a write under it requires, '' when none is found. Two structures where
+    one sits inside the other are named as overlapping: a file under both needs
+    neither, so the model is told to confirm the architecture there."""
+    root = cwd or os.getcwd()
+    found, truncated = _scan_architectures(root)
+    if not found:
+        if truncated:
+            return (f'[playbook:architecture] The scan stopped after {_ARCH_SCAN_DIR_LIMIT} '
+                    'directories without finding a known architecture; the gate still checks '
+                    'each write against the structure above it.')
+        return ''
+
+    def shown(match: ArchitectureMatch) -> str:
+        return f'{match.name} at {_shown_base(match.base, root)} ({match.evidence})'
+
+    listed = found[:_ARCH_NOTICE_LIMIT]
+    skills = sorted({m.skill for m in found})
+    if len(skills) == 1:
+        text = (f'[playbook:architecture] Detected {"; ".join(shown(m) for m in listed)}. '
+                f'A source write under it requires {skills[0]}: load it before writing code there.')
+    else:
+        text = (f'[playbook:architecture] Architectures found: {"; ".join(shown(m) for m in listed)}. '
+                'A source write requires the skill of the structure it sits under.')
+    if len(found) > len(listed):
+        text += f' {len(found) - len(listed)} more not listed.'
+    overlaps = sorted({_project_relative(inner.base, root)
+                       for outer in found for inner in found
+                       if outer.skill != inner.skill and _contains(outer.base, inner.base)})
+    if overlaps:
+        text += (f' Overlapping structures at {", ".join(overlaps)}: a file there matches two '
+                 'architectures and the gate requires neither. Confirm with the user which one '
+                 'applies before changing the structure there.')
+    if truncated:
+        text += (f' The scan stopped after {_ARCH_SCAN_DIR_LIMIT} directories, so a structure '
+                 'deeper in the tree is not listed; the gate still checks each write.')
+    return text
+
+
+def _requirements_for_path(path: str, written: str, root: str, table: dict,
+                           manifest_cache: dict[str, object]) -> list[SkillRequirement]:
+    is_source = _ends_with_code_ext(path)
+    ext = os.path.splitext(path)[1].lower()
+    shown = _project_relative(path, root)
+    found: list[SkillRequirement] = []
+
+    language = ''
+    languages = table.get('languages')
+    if isinstance(languages, dict):
+        for name, row in languages.items():
+            if isinstance(row, dict) and ext in row.get('extensions', ()):
+                language = name
+                if is_source and row.get('skill'):
+                    found.append(SkillRequirement(str(row['skill']), f'{name} file {shown}'))
+                break
+    if is_source:
+        found[:0] = [SkillRequirement(str(s), 'every source write')
+                     for s in table.get('companions', ())]
+
+    frameworks: set[str] = set()
+    if is_source and language:
+        for row in table.get('frameworks', ()):
+            if not isinstance(row, dict) or language not in row.get('languages', ()):
+                continue
+            for manifest_name, deps in (row.get('manifests') or {}).items():
+                manifest = _nearest_manifest(os.path.dirname(path), manifest_name, root)
+                dep = next((d for d in deps if manifest and _manifest_declares(manifest, d, manifest_cache)), '')
+                if dep:
+                    frameworks.add(str(row['skill']))
+                    found.append(SkillRequirement(
+                        str(row['skill']), f'{dep} in {_project_relative(manifest, root)}'))
+                    break
+
+    if is_source:
+        matches = architecture_matches(path, root, table)
+        if len({m.skill for m in matches}) == 1:
+            match = matches[0]
+            found.append(SkillRequirement(
+                match.skill,
+                f'{match.name} layout at {_shown_base(match.base, root)} ({match.evidence})'))
+
+    text = (written + '\n' + _read_source(path)) if is_source else ''
+    for row in table.get('topics', ()):
+        if not isinstance(row, dict) or not (is_source or row.get('non_code')):
+            continue
+        if row.get('when_framework') and row['when_framework'] not in frameworks:
+            continue
+        reason = ''
+        for pattern in row.get('paths', ()):
+            target = shown if '/' in pattern else os.path.basename(path)
+            if fnmatch.fnmatchcase(target, pattern):
+                reason = f'{shown} matches {pattern}'
+                break
+        if not reason and text:
+            name = _imported_name(text, list(row.get('imports', ())))
+            if name:
+                reason = f'{shown} imports {name}'
+        if not reason and text:
+            for pattern in row.get('patterns', ()):
+                try:
+                    if re.search(pattern, text):
+                        reason = f'{shown} contains {pattern}'
+                        break
+                except re.error:
+                    continue
+        if reason:
+            found.append(SkillRequirement(str(row['skill']), reason))
+    return found
+
+
+def required_skills(tool_name: str, tool_input: dict, command: str, cwd: str) -> list[SkillRequirement]:
+    """The skills this write needs loaded, each with the reason it applies, in
+    table order and without repeats. Throwaway destinations (temp, git-ignored)
+    need none. See hooks/data/skill_requirements.json for the rows."""
+    table = skill_requirements()
+    if not table:
+        return []
+    root = cwd or os.getcwd()
+    written = _requirement_text(tool_name, tool_input, command)
+    manifest_cache: dict[str, object] = {}
+    seen: dict[str, SkillRequirement] = {}
+    for path in _write_paths(tool_name, tool_input, command, root):
+        found = _requirements_for_path(path, written, root, table, manifest_cache)
+        # Throwaway is checked last: it runs `git check-ignore`, and most shell
+        # redirects (a log, /dev/stderr) require nothing anyway.
+        if not found or is_throwaway_write(path, root):
+            continue
+        for req in found:
+            seen.setdefault(req.skill, req)
+    return list(seen.values())
 
 
 SUSPEND_SKILL = 'playbook-off'
@@ -1669,14 +2302,71 @@ def is_suspended(transcript_lines: list[str]) -> bool:
 
 
 AUTHORIZATION_HINT = (
-    'The block lifts for the turn in which the user authorizes it in their own words '
-    '(e.g. "pode apagar", "go ahead and delete it") — authorization does not carry to '
-    'later turns, and you cannot grant it to yourself.'
+    'Nothing typed in the chat lifts this block, and you cannot authorize it yourself.'
 )
 
 
-def _destructive_block(reason: str) -> dict:
-    return {'block': True, 'msg': f'[playbook:safety] {reason} {AUTHORIZATION_HINT}'}
+def _destructive_block(reason: str, effect: str, part: str = '') -> dict:
+    """`effect` names what the command destroys, for the text the user reads
+    (playbook_i18n `destroys_<effect>`); `part` is the simple command that
+    does it, shown to the user instead of the start of a longer command."""
+    return {'block': True, 'effect': effect, 'part': part,
+            'msg': f'[playbook:safety] {reason} {AUTHORIZATION_HINT}'}
+
+
+_RECURSIVE_RM_OPTION_RE = re.compile(r'-[a-zA-Z]*[rR][a-zA-Z]*')
+# Where the words of an `rm` run as an argument end: `find -exec rm -r {} ;`.
+_ARGUMENT_COMMAND_END = frozenset({';', '+', '--'})
+
+
+def _recursive_rm(words: list[str]) -> str:
+    """The `rm -r` in a simple command, as the words from `rm` on; '' when
+    there is none. The `rm` may be the program or run as an argument of it
+    (`find -exec`, `watch`, `flock f`, `docker exec ctr`), and only its own
+    options count: GNU rm reads them anywhere before `--`, so `rm dir -rf`
+    is recursive. A program that only prints or searches runs nothing."""
+    if words[0].rsplit('/', 1)[-1] in _TEXT_ONLY_WORDS:
+        return ''
+    for at, word in enumerate(words):
+        if word.rsplit('/', 1)[-1] != 'rm':
+            continue
+        for option in words[at + 1:]:
+            if option in _ARGUMENT_COMMAND_END:
+                break
+            if option == '--recursive' or _RECURSIVE_RM_OPTION_RE.fullmatch(option):
+                return shlex.join(words[at:])
+    return ''
+
+
+def token_deletion(command: str, disposable_root: str = '') -> tuple[str, str] | None:
+    """`(part, effect)` for a recursive `rm` or an `xargs rm` in `command`,
+    read per simple command, scripts handed to a shell (`sh -c`, `eval`)
+    included; None when there is none. Text that does not tokenize, the whole
+    command or a nested script, is read with DELETION_TEXT_RULES instead. An
+    `rm` inside `disposable_root` is left out: see `removes_only_under`."""
+    read = _raw_simple_commands(command)
+    texts = [command] if read is None else read[1]
+    for text in texts:
+        for pattern, effect in DELETION_TEXT_RULES:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(0).strip(), effect
+    if read is None:
+        return None
+    for segment, nested in read[0]:
+        words = command_words(segment)
+        if not words or words[0].rsplit('/', 1)[-1] in _TEXT_ONLY_WORDS:
+            continue
+        if (not nested and words == segment
+                and removes_only_under(segment, disposable_root)):
+            continue
+        bases = [word.rsplit('/', 1)[-1] for word in segment]
+        if 'xargs' in bases and 'rm' in bases[bases.index('xargs') + 1:]:
+            return shlex.join(segment), 'mass_delete'
+        part = _recursive_rm(words)
+        if part:
+            return part, 'delete_tree'
+    return None
 
 
 # Commands whose arguments are text being searched for, never a command: a
@@ -1718,100 +2408,109 @@ def removes_only_under(words: list[str], root: str) -> bool:
     return bool(operands)
 
 
-def _pattern_lines(command: str, disposable_root: str = '') -> list[str]:
-    """What the destructive patterns read: each simple command on a line of
-    its own, quotes removed, search tools left out; once as written (`xargs
-    rm` is a mass delete because of its wrapper) and once with wrappers and
-    git's global options dropped (`sudo git -C . reset --hard`). Read as one
-    line, `grep "find .*-exec"; grep "push --delete"` matched `find ...
-    -delete` across two commands' arguments. The raw text when the command
-    does not tokenize. An `rm` inside `disposable_root` is left out: see
-    `removes_only_under`."""
+def _pattern_lines(command: str) -> list[tuple[str, str]]:
+    """What the destructive patterns read, each with the simple command it
+    came from as the user is shown it: each simple command on a line of its
+    own, quotes removed, search tools left out; once as written and once with
+    wrappers and git's global options dropped (`sudo git -C . reset --hard`).
+    Read as one line, `grep "find .*-exec"; grep "push --delete"` matched
+    `find ... -delete` across two commands' arguments. The raw text when the
+    command does not tokenize."""
     segments = shell_segments(command)
     if segments is None:
-        return [command]
+        return [(command, command)]
     lines = []
     for segment in segments:
         words = command_words(segment)
-        if (words and not _searches_only(words)
-                and not (segment == words and removes_only_under(words, disposable_root))):
-            lines += [' '.join(segment), _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(words))]
+        if words and not _searches_only(words):
+            shown = shlex.join(segment)
+            lines += [(shown, ' '.join(segment)),
+                      (shown, _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(words)))]
     return lines
 
 
 def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 0,
                       disposable_root: str = '') -> dict | None:
-    """Deny a command that destroys work, until the user authorizes it.
+    """Flag a command that destroys work; the adapter decides how the user
+    approves it (Claude Code: a permission dialog; Codex: never in-session).
 
     `command` is the runnable command (heredoc bodies and inline scripts
-    stripped). Four readings of it, each closing a way past the one before:
+    stripped). Three readings of it, each closing a way past the one before:
 
-    1. the patterns, per simple command in its shell-normalized form, so
-       quoting the command word or adding git global options does not hide it;
-    2. a command whose program is decided at run time (`$x -rf`, `eval "$c"`),
-       which no pattern can read;
-    3. recursive deletion through an interpreter API in a `-c`/`-e` script,
+    1. the patterns and the `rm` tokens, per simple command in its
+       shell-normalized form, so quoting the command word or adding git global
+       options does not hide it; a variable command word is read as every
+       literal value the command gives it (`resolve_literal_commands`);
+    2. recursive deletion through an interpreter API in a `-c`/`-e` script,
        read in `raw` — the full command — because that source is stripped
        from `command` before step 1;
-    4. the scripts the command runs (`script_sources`): a Python or other
+    3. the scripts the command runs (`script_sources`): a Python or other
        interpreter script for the same APIs, a shell script as a command. Of
        the script files, only those git does not track: see `script_sources`.
 
-    Inside a script file (`_depth` > 0) step 2 is skipped: a variable command
-    word there (`exec "$@"`) is the script's own logic, and the command the
-    model typed was literal.
+    A program the command does not show (`$(...)`, `eval "$c"`, a variable with
+    no literal value) is not flagged: only what is shown to be destructive asks
+    (decided by the user for the auto-mode consent work). Inside a script file
+    (`_depth` > 0) variables are not resolved: a variable command word there
+    (`exec "$@"`) is the script's own logic.
 
     `disposable_root` is the session's own scratchpad: an `rm` of literal paths
     inside it deletes only what the session made there, and needs no consent
     (decided by the user for 4.0.0; a build directory or node_modules still
     does)."""
     command = strip_heredoc_bodies(command)
-    for line in _pattern_lines(command, disposable_root):
-        for pattern in DESTRUCTIVE_PATTERNS:
+    expanded = resolve_literal_commands(command) if _depth == 0 else command
+    for shown, line in _pattern_lines(expanded):
+        for pattern, effect in DESTRUCTIVE_RULES:
             match = re.search(pattern, line, re.IGNORECASE)
             if match:
                 return _destructive_block(
-                    f'Destructive operation detected (`{match.group(0).strip()}`). Confirm '
-                    'with the user explicitly before proceeding: show the exact command and '
-                    'what it destroys, and wait.')
-    unknown = unattestable_command(command) if _depth == 0 else ''
-    if unknown:
+                    f'Destructive operation detected (`{match.group(0).strip()}`). Show the '
+                    'user the exact command and what it destroys.', effect, shown)
+    deletion = token_deletion(expanded, disposable_root)
+    if deletion:
+        part, effect = deletion
         return _destructive_block(
-            f'Command decided at run time (`{unknown[:120]}`): its program comes from a '
-            'variable or a command substitution, so the destructive check cannot read what '
-            'it runs. Write the command literally; if it has to stay dynamic, show the user '
-            'what it expands to and wait.')
+            f'Destructive operation detected (`{part[:120]}`). Show the user the exact '
+            'command and what it destroys.', effect, part)
     # Heredoc bodies that are data (a PR body, a doc) are left out: one quoting
     # `node -e "fs.rmSync(dir, opts)"` is text. A heredoc fed to a shell stays.
     for payload in inline_payloads(strip_heredoc_bodies(raw or command)):
-        match = _RECURSIVE_DELETE_API_RE.search(payload)
-        if match:
+        call = _recursive_delete_in_text(payload)
+        if call:
             return _destructive_block(
-                f'Recursive deletion in an interpreter script (`{match.group(0).strip()}`). '
-                'Confirm with the user explicitly before proceeding: show what it deletes, '
-                'and wait.')
+                f'Recursive deletion in an interpreter script (`{call}`). '
+                'Show the user what it deletes.', 'script_delete')
     if _depth == 0:
         for line in interpreter_shell_commands(raw or command, cwd):
             inner = check_destructive(strip_heredoc_bodies(line), line, cwd, _SCRIPT_MAX_DEPTH)
             if inner:
-                return {**inner, 'msg': inner['msg'].replace(
+                # The part is a line of the script, not of the command the
+                # user is asked about: the dialog shows that command instead.
+                return {**inner, 'part': '', 'msg': inner['msg'].replace(
                     '[playbook:safety] ', '[playbook:safety] In a command an interpreter script '
                     'runs: ', 1)}
-    for source in script_sources(raw or command, cwd, untracked_only=True):
+    sources = script_sources(raw or command, cwd, untracked_only=True)
+    if expanded != command:
+        # `S=./clean.sh; $S` runs the script the literal names: read it too.
+        seen = {source.origin for source in sources}
+        sources += [source for source in script_sources(expanded, cwd, untracked_only=True)
+                    if source.origin not in seen]
+    for source in sources:
         if source.language == 'shell':
             if _depth >= _SCRIPT_MAX_DEPTH:
                 continue
             text = _shell_script_text(source.text)
             inner = check_destructive(strip_inline_payloads(text), text, cwd, _depth + 1)
             if inner:
-                return {**inner, 'msg': inner['msg'].replace(
+                return {**inner, 'part': '', 'msg': inner['msg'].replace(
                     '[playbook:safety] ', f'[playbook:safety] In the script `{source.origin}`: ', 1)}
             continue
         call = _recursive_delete_call(source)
         if call:
             return _destructive_block(
-                f'Recursive deletion in the script `{source.origin}` (`{call}`). Confirm with '
-                'the user explicitly before proceeding: show what it deletes, and wait.')
+                f'Recursive deletion in the script `{source.origin}` (`{call}`). Show the '
+                'user what it deletes.', 'script_delete')
     return None
 
 
@@ -2036,14 +2735,14 @@ def _time_left(timeout: float) -> float:
     return max(0.0, min(timeout, _hook_deadline - time.monotonic()))
 
 
-def _git_out(cwd: str, *args: str, timeout: float) -> str | None:
+def _git_out(cwd: str, *args: str, timeout: float, stdin: str | None = None) -> str | None:
     """stdout of a git command, or None when it failed, timed out, or the
     hook has no time left for it (the caller decides what None means)."""
     timeout = _time_left(timeout)
     if timeout <= 0:
         return None
     try:
-        done = subprocess.run(('git', '-C', cwd) + args,
+        done = subprocess.run(('git', '-C', cwd) + args, input=stdin,
                               capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -2114,28 +2813,77 @@ def pushed_tag_attribution(cwd: str, revs: list[str]) -> list[str] | None:
             if every_tag or name in named or target in commits][:_ATTRIBUTION_LISTED]
 
 
-# Options of `git push` that consume the next argument; every other option is
-# a flag or takes its value after `=`.
-_PUSH_VALUE_OPTS = frozenset({'-o', '--push-option', '--receive-pack', '--exec', '--repo'})
+class _PushOpt(Enum):
+    """What a `git push` option does to what the push publishes."""
+    NOTHING = auto()         # publishes what the refspecs name, no more
+    OPTIONAL_VALUE = auto()  # as NOTHING; a value only after `=`
+    VALUE = auto()           # as NOTHING; its value is the next word, or after `=`
+    DRY_RUN = auto()
+    DELETE = auto()
+    BRANCHES = auto()
+    TAGS = auto()
+    MIRROR = auto()
+
+
+# Every option the push gates read, spelled exactly as `git push -h` lists it.
+# Any other word starting with `-` makes the push unknown: no prefix
+# abbreviation (`--dr`), no short-flag bundle (`-fn`), no `--no-` negation
+# (`--no-verify` is an option of its own), so a dry run or a delete seen once
+# stays in effect. The cost is a denied push that a retry in plain spelling
+# passes. `--recurse-submodules` is left out: it pushes other repositories.
+# `--follow-tags` publishes no commit the refspecs do not; its tags are read by
+# `pushed_tag_attribution`, which misses one on an already-published commit,
+# as it does for `push.followTags`, which a plain push obeys anyway.
+_PUSH_OPTIONS: dict[str, _PushOpt] = {
+    **dict.fromkeys(('-v', '--verbose', '-q', '--quiet', '--porcelain', '--progress',
+                     '-u', '--set-upstream', '-f', '--force', '--force-if-includes',
+                     '--atomic', '--no-verify', '--verify', '--prune', '--thin',
+                     '--follow-tags', '-4', '--ipv4', '-6', '--ipv6'), _PushOpt.NOTHING),
+    **dict.fromkeys(('--force-with-lease', '--signed'), _PushOpt.OPTIONAL_VALUE),
+    **dict.fromkeys(('-o', '--push-option', '--receive-pack', '--exec', '--repo'),
+                    _PushOpt.VALUE),
+    '-n': _PushOpt.DRY_RUN, '--dry-run': _PushOpt.DRY_RUN,
+    '-d': _PushOpt.DELETE, '--delete': _PushOpt.DELETE,
+    '--all': _PushOpt.BRANCHES, '--branches': _PushOpt.BRANCHES,
+    '--tags': _PushOpt.TAGS,
+    '--mirror': _PushOpt.MIRROR,
+}
+_PUSH_RUN_TIME = 'a refspec is built at run time'
 # A shell redirection among the words (`2>/dev/null`, `> log`, `2>`). Not a
 # refspec: read as one, `git log` fails on it and the push fails closed.
 _REDIRECT_RE = re.compile(r'^\d*(?:>>?|<)')
 _REDIRECT_ONLY_RE = re.compile(r'^\d*(?:>>?|<)$')
 
 
+def _unknown_push_option(word: str) -> str:
+    return (f'it does not read the option `{word}`: spell each option in full and on its '
+            'own, as `git push -h` lists it (`-f -n`, not `-fn`; `--dry-run`, not `--dr`); '
+            'a `--no-` negation and `--recurse-submodules` are never read, so drop them or '
+            'ask the user to run the push')
+
+
 def push_revisions(args: list[str]) -> list[str] | None:
     """Revisions a `git push` with these arguments (the words after `push`)
-    would publish, as `git log` revision arguments.
+    would publish, as `git log` revision arguments; None when they cannot be
+    known before the shell runs it (`read_push` says why)."""
+    return read_push(args)[0]
+
+
+def read_push(args: list[str]) -> tuple[list[str] | None, str]:
+    """The revisions a push with these arguments publishes, or None with the
+    reason.
 
     No refspec means the current branch, which is what `push.default` simple,
     current and upstream all push. `src:dst` publishes `src`, `:dst` and
     `--delete` publish nothing, a bare `:` publishes every matching branch
-    (`--branches`), a glob goes through `--glob`, and so does a
-    dry run. None when an argument is built at run time (a variable or a
-    command substitution) and so cannot be known before the shell runs it."""
+    (`--branches`), a glob goes through `--glob`, and a dry run publishes
+    nothing. None for a word built at run time (a variable or a command
+    substitution), an option outside `_PUSH_OPTIONS`, and a refspec whose
+    source starts with `-` (after `--`, or behind `+`), which `git log` would
+    take as an option."""
     revs: list[str] = []
     positional: list[str] = []
-    deleting = skip_next = False
+    dry_run = deleting = skip_next = options_ended = False
     for arg in args:
         if skip_next:
             skip_next = False
@@ -2144,24 +2892,35 @@ def push_revisions(args: list[str]) -> list[str] | None:
             skip_next = bool(_REDIRECT_ONLY_RE.match(arg))  # `> file`: the file too
             continue
         if '$' in arg or '`' in arg:
-            return None
-        if arg in ('-n', '--dry-run'):
-            return []
-        if arg in _PUSH_VALUE_OPTS:
-            skip_next = True
-        elif arg in ('--all', '--branches'):
-            revs.append('--branches')
-        elif arg == '--mirror':
-            revs += ['--branches', '--tags']
-        elif arg == '--tags':
-            revs.append('--tags')
-        elif arg in ('-d', '--delete'):
-            deleting = True
-        elif not arg.startswith('-'):
+            return None, _PUSH_RUN_TIME
+        if options_ended or not arg.startswith('-'):
             positional.append(arg)
+            continue
+        if arg == '--':
+            options_ended = True
+            continue
+        name, equals, _ = arg.partition('=') if arg.startswith('--') else (arg, '', '')
+        meaning = _PUSH_OPTIONS.get(name)
+        if meaning is None or (equals and meaning not in (_PushOpt.VALUE,
+                                                          _PushOpt.OPTIONAL_VALUE)):
+            return None, _unknown_push_option(arg)
+        if meaning is _PushOpt.VALUE:
+            skip_next = not equals
+        elif meaning is _PushOpt.DRY_RUN:
+            dry_run = True
+        elif meaning is _PushOpt.DELETE:
+            deleting = True
+        elif meaning is _PushOpt.BRANCHES:
+            revs.append('--branches')
+        elif meaning is _PushOpt.TAGS:
+            revs.append('--tags')
+        elif meaning is _PushOpt.MIRROR:
+            revs += ['--branches', '--tags']
+    if dry_run:
+        return [], ''
     refspecs = positional[1:]  # positional[0] is the remote
     if deleting:
-        return revs
+        return revs, ''
     # `git push <remote> tag <name>` is git's spelling of refs/tags/<name>.
     specs: list[str] = []
     for at, spec in enumerate(refspecs):
@@ -2175,11 +2934,13 @@ def push_revisions(args: list[str]) -> list[str] | None:
             revs.append('--branches')
             continue
         src = bare.split(':', 1)[0]
+        if src.startswith('-'):
+            return None, f'the refspec `{spec}` starts with `-`'
         if src:
             revs.append(f'--glob={src}' if '*' in src else src)
     if revs or refspecs:  # refspecs that were all `:dst` deletions publish nothing
-        return revs
-    return ['HEAD']
+        return revs, ''
+    return ['HEAD'], ''
 
 
 def _attribution_listing(found: list[str]) -> str:
@@ -2219,9 +2980,8 @@ def push_targets(command: str, cwd: str) -> list[PushTarget]:
         if call.repo is None:
             targets.append(PushTarget(None, None, call.reason))
             continue
-        revs = push_revisions(call.args)
-        targets.append(PushTarget(call.repo, revs, '' if revs is not None
-                                  else 'a refspec is built at run time'))
+        revs, reason = read_push(call.args)
+        targets.append(PushTarget(call.repo, revs, reason))
     return targets
 
 
@@ -2278,6 +3038,210 @@ def check_push_attribution(command: str, cwd: str) -> dict | None:
             ),
         }
     return None
+
+
+_REVIEW_LOG_TIMEOUT = 4.0
+_OBJECT_NAME_RE = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?')
+
+
+def _in_repository(cwd: str) -> bool | None:
+    """Whether `cwd` is inside a git repository; None when git could not say."""
+    timeout = _time_left(2)
+    if timeout <= 0 or not os.path.isdir(cwd):
+        return None
+    try:
+        done = subprocess.run(('git', '-C', cwd, 'rev-parse', '--git-dir'),
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.returncode == 0
+
+
+def _existing_objects(repo: str, names: list[str]) -> list[str] | None:
+    """The commits and tags among `names` that `repo` holds."""
+    names = [name for name in names if _OBJECT_NAME_RE.fullmatch(name)]
+    if not names:
+        return []
+    listing = _git_out(repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
+                       stdin='\n'.join(names) + '\n', timeout=2)
+    if listing is None:
+        return None
+    return [name for name, _, kind in (line.partition(' ') for line in listing.splitlines())
+            if kind in ('commit', 'tag')]
+
+
+SNAPSHOT_MAX_PATHS = 2000
+# Commits checked one by one against what a review read; a longer push is
+# credited by HEAD only, so the check stays inside the hook's git budget.
+_CONTENT_CHECK_MAX_COMMITS = 50
+_NULL_OBJECT_RE = re.compile(r'0{40}(?:0{24})?')
+_UNHASHABLE = '?'
+
+
+class ReviewedTree(NamedTuple):
+    """The working tree of a repository as a review read it: the HEAD it sat
+    on and the blob of every path it changed against that HEAD ('' for a path
+    it deleted, '?' for one hashed differently from how git stores it)."""
+    head: str
+    blobs: dict[str, str]
+
+
+class Unreviewed(NamedTuple):
+    count: int
+    changed_after_review: list[str]
+
+
+def reads_working_tree(diff_args: list[str]) -> bool:
+    """Whether `git diff <diff_args>` prints the working tree: no `--cached`,
+    and at most one revision, so the other side is the files on disk. A word
+    before `--` that may be a path counts as a revision, so an ambiguous read
+    is taken as one of commits only."""
+    words = diff_args[:diff_args.index('--')] if '--' in diff_args else diff_args
+    if any(word in ('--cached', '--staged', '--no-index') for word in words):
+        return False
+    revisions = [word for word in words if not word.startswith('-')]
+    return len(revisions) <= 1 and not any('..' in word for word in revisions)
+
+
+def working_tree_blobs(repo: str) -> dict[str, str] | None:
+    """Blob of every path the working tree of `repo` (its top-level directory)
+    changes against HEAD, untracked files included, hashed without writing to
+    the object store. None when git fails or runs out of time, or when more
+    than SNAPSHOT_MAX_PATHS paths changed."""
+    changed = _git_out(repo, 'diff', '--name-only', '--no-renames', '-z', 'HEAD', timeout=2)
+    # Trade-off: `git diff` never prints an untracked file, yet one is credited
+    # as read. Leaving them out made every new file of a change reviewed before
+    # its first commit a second review; the gate already credits a whole HEAD
+    # for a read limited to some paths, and this keeps the same granularity.
+    untracked = _git_out(repo, 'ls-files', '--others', '--exclude-standard', '-z', timeout=2)
+    if changed is None or untracked is None:
+        return None
+    paths = list(dict.fromkeys(path for path in (changed + untracked).split('\0') if path))
+    if len(paths) > SNAPSHOT_MAX_PATHS:
+        return None
+    blobs: dict[str, str] = {}
+    to_hash: list[str] = []
+    for path in paths:
+        full = os.path.join(repo, path)
+        if not os.path.lexists(full):
+            blobs[path] = ''
+        elif '\n' in path or os.path.islink(full) or not os.path.isfile(full):
+            blobs[path] = _UNHASHABLE
+        else:
+            to_hash.append(path)
+    if to_hash:
+        out = _git_out(repo, 'hash-object', '--stdin-paths',
+                       stdin='\n'.join(to_hash) + '\n', timeout=3)
+        ids = out.split() if out is not None else []
+        if len(ids) != len(to_hash):
+            return None
+        blobs.update(zip(to_hash, ids))
+    return blobs
+
+
+def _commit_changes(repo: str, parent: str, commit: str) -> dict[str, str] | None:
+    """Path -> blob the commit leaves there ('' when it deletes the path, '?'
+    for a submodule or a symlink)."""
+    out = _git_out(repo, 'diff-tree', '-r', '--no-renames', '-z', parent, commit, timeout=2)
+    if out is None:
+        return None
+    fields = out.split('\0')
+    changes: dict[str, str] = {}
+    for meta, path in zip(fields[0::2], fields[1::2]):
+        parts = meta.lstrip(':').split()
+        if len(parts) < 5:
+            return None
+        mode, blob = parts[1], parts[3]
+        if _NULL_OBJECT_RE.fullmatch(blob):
+            changes[path] = ''
+        elif mode in ('160000', '120000'):
+            changes[path] = _UNHASHABLE
+        else:
+            changes[path] = blob
+    return changes
+
+
+def _blobs_at(repo: str, head: str, paths: list[str]) -> dict[str, str] | None:
+    """Blob of each path in `head` ('' when `head` does not have it)."""
+    asked = [path for path in paths if '\n' not in path]
+    out = _git_out(repo, 'cat-file', '--batch-check=%(objectname)',
+                   stdin=''.join(f'{head}:{path}\n' for path in asked), timeout=2)
+    if out is None:
+        return None
+    lines = out.splitlines()
+    if len(lines) != len(asked):
+        return None
+    found = {path: ('' if line.endswith(' missing') else line.strip())
+             for path, line in zip(asked, lines)}
+    return {path: found.get(path, _UNHASHABLE) for path in paths}
+
+
+def _differs_from_tree(repo: str, changes: dict[str, str], tree: ReviewedTree) -> list[str] | None:
+    """Paths the commit leaves with content other than the reviewed tree had.
+    A path the tree did not change held what its HEAD holds."""
+    unlisted = [path for path in changes if path not in tree.blobs]
+    at_head = _blobs_at(repo, tree.head, unlisted) if unlisted else {}
+    if at_head is None:
+        return None
+    differing = []
+    for path, blob in changes.items():
+        seen = tree.blobs[path] if path in tree.blobs else at_head[path]
+        if blob == _UNHASHABLE or seen == _UNHASHABLE or blob != seen:
+            differing.append(path)
+    return differing
+
+
+def unreviewed_commits(repo: str, revs: list[str], reviewed: list[str],
+                       trees: list[ReviewedTree] | None = None) -> Unreviewed | None:
+    """The commits a push of `revs` from `repo` publishes that no
+    remote-tracking ref has and no review covers, and the paths whose content
+    changed after a review read them.
+
+    A review covers a commit a reviewed HEAD contains, and a commit with one
+    parent that is covered and whose every changed path holds what a reviewed
+    working tree held: the review read the change before it was committed. A
+    merge is covered by a reviewed HEAD only. 0 commits for an empty `revs` (a
+    deletion or a dry run) and outside a repository, where nothing is
+    published. None when that cannot be established: `repo` does not exist
+    yet, git failed or timed out, or the hook has no time left."""
+    if not revs:
+        return Unreviewed(0, [])
+    inside = _in_repository(repo)
+    if not inside:
+        return None if inside is None else Unreviewed(0, [])
+    known = _existing_objects(repo, reviewed)
+    if known is None:
+        return None
+    out = _git_out(repo, 'rev-list', '--reverse', '--parents', *revs, '--not', '--remotes',
+                   *known, '--', timeout=_REVIEW_LOG_TIMEOUT)
+    if out is None:
+        return None
+    commits = [line.split() for line in out.splitlines() if line.strip()]
+    if not trees or len(commits) > _CONTENT_CHECK_MAX_COMMITS:
+        return Unreviewed(len(commits), [])
+    pending = {commit[0] for commit in commits}
+    covered: set[str] = set()
+    changed_after: list[str] = []
+    for sha, *parents in commits:
+        if len(parents) != 1 or (parents[0] in pending and parents[0] not in covered):
+            continue
+        changes = _commit_changes(repo, parents[0], sha)
+        if changes is None:
+            return None
+        closest: list[str] | None = None
+        for tree in trees:
+            differing = _differs_from_tree(repo, changes, tree)
+            if differing is None:
+                return None
+            if closest is None or len(differing) < len(closest):
+                closest = differing
+            if not differing:
+                break
+        if closest:
+            changed_after += [path for path in closest if path not in changed_after]
+        else:
+            covered.add(sha)
+    return Unreviewed(len(commits) - len(covered), changed_after)
 
 
 def check_new_commit_attribution(command: str, cwd: str) -> str | None:
@@ -2651,6 +3615,12 @@ def check_push_secrets(command: str, cwd: str = '') -> dict | None:
     return None
 
 
+def project_key(cwd: str) -> str:
+    """Stable name for a project's state files: the same directory, reached by
+    any path or symlink, gets the same key."""
+    return hashlib.sha256(os.path.realpath(cwd).encode()).hexdigest()[:16]
+
+
 def state_path(state_dir: str, session_id: str = '', cwd: str | None = None,
                agent_id: str = '') -> str:
     """Session-scoped state file path under state_dir. Falls back to a slug
@@ -2733,19 +3703,495 @@ CORRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Explicit, user-authored opt-out of the pre-push review gate. Only the user's
-# own prompt is scanned for these — the model must never be able to clear its
-# own gate by writing the phrase in its response.
-# Every form names the review it waives: "pode pushar", "deixa assim" and "no
-# review comments so far" are about the push or the code, and read as a waiver
-# they skipped a review nobody declined.
-REVIEW_BYPASS_RE = re.compile(
-    r'\bsem\s+(?:review|revis[ãa]o|revisar)\b'
-    r'|\bpul(?:a|ar|e)\s+(?:o\s+)?(?:review|revis[ãa]o)\b'
-    r'|\b(?:skip|bypass|without)\s+(?:the\s+)?(?:code\s+)?review\b'
-    r'|\bno\s+(?:code\s+)?review\s+(?:needed|required)\b',
-    re.IGNORECASE,
+# Text that reaches a prompt hook or the transcript as a "user" message without
+# the user having typed it: harness reminders, background-task notifications,
+# local command output, and the report a subagent hands back.
+NON_PROMPT_RE = re.compile(
+    r'^\s*(?:<system-reminder|<task-notification|<local-command|<agent-message|\[SYSTEM NOTIFICATION)'
 )
+# A block the user pasted from somewhere else. An unclosed block runs to the end.
+_PASTED_BLOCK_RE = re.compile(r'<pasted_content\b[^>]*>.*?(?:</pasted_content[^>]*>|\Z)', re.DOTALL)
+
+
+def typed_words(prompt: str) -> str:
+    """What the user wrote themselves in `prompt`: '' for a message they did
+    not write at all, and the message without its pasted blocks otherwise.
+
+    A correction is something the user says. A subagent report that quotes
+    "that's wrong", or a pasted document that contains "reverte", says nothing
+    about the previous turn (measured: 34 of 59 journaled corrections were
+    subagent reports or notifications)."""
+    if NON_PROMPT_RE.match(prompt):
+        return ''
+    return _PASTED_BLOCK_RE.sub(' ', prompt)
+
+
+# ─── Consent in the chat (auto mode) ─────────────────────────────────────────
+#
+# In auto mode a destructive command is denied without a dialog and queued
+# here, per session; the model goes on with the rest of the work and asks the
+# user in its message. The user's own words, read from the UserPromptSubmit
+# payload (never the transcript), approve it, and the model then runs the
+# exact command once.
+
+CONSENT_PENDING_MAX = 20
+_CONSENT_MAX_AGE_S = 7 * 24 * 3600
+_CONSENT_COMMAND_KEPT = 2000
+
+_DELETE_INFINITIVE = r'(?:apagar|remover|deletar|excluir|tirar|limpar|borrar|eliminar|quitar)'
+_DELETE_IMPERATIVE = (r'(?:apag(?:a|ue)|remov[ae]|delet[ae]|exclu[ai]|tir[ae]|limp[ae]'
+                      r'|borr[ae]|elimin[ae]|quit[ae])')
+_DELETE_EN = r'(?:delete|remove|erase|wipe|drop)'
+_OBJECT_WORD = (r'(?:isso|isto|ele|ela|eles|elas|ess[ea]s?|est[ea]s?|aquilo|tudo|os\s+dois|as\s+duas'
+                r'|tod[oa]s|it|them|that|those|this|these|both|all|eso|esto|todo)')
+# A consent names the deletion: "pode apagar", "apaga isso", "yes, delete it".
+# A bare verb is not one: "remova o import" while a removal is queued is an
+# instruction about code, not an answer to the queue.
+CONSENT_RE = re.compile(
+    rf'\bpode[ms]?\s+(?:sim\s+)?(?:j[áa]\s+)?{_DELETE_INFINITIVE}\b'
+    rf'|\bpuedes?\s+(?:s[ií]\s+)?{_DELETE_INFINITIVE}\b'
+    rf'|\b{_DELETE_IMPERATIVE}\s+{_OBJECT_WORD}\b'
+    rf'|\bsim[,!.]?\s+(?:pode\s+)?{_DELETE_IMPERATIVE}\b'
+    rf'|\b(?:you\s+)?(?:can|may)\s+{_DELETE_EN}\b'
+    rf'|\byes[,!.]?\s+(?:please\s+)?{_DELETE_EN}\b'
+    rf'|\b{_DELETE_EN}\s+{_OBJECT_WORD}\b',
+    re.IGNORECASE)
+# A negation just before the consent words turns them into a refusal.
+_CONSENT_NEGATION_RE = re.compile(
+    r"\b(?:n[ãa]o|nem|nunca|jamais|no|not|never|don'?t|do\s+not)\b[^.!?\n]{0,25}$",
+    re.IGNORECASE)
+_CONSENT_ID_RE = re.compile(r'#(\d{1,4})\b')
+
+
+class ConsentReading(NamedTuple):
+    approves: bool
+    refuses: bool
+    ids: frozenset[int]
+
+
+def read_consent(text: str) -> ConsentReading:
+    """What the user's own words say about the queued removals: an approval,
+    a refusal (a negated consent), both, or neither; and the `#n` numbers they
+    name, which narrow an approval to those."""
+    approves = refuses = False
+    for match in CONSENT_RE.finditer(text):
+        if text[match.end():match.end() + 2].lstrip().startswith('?'):
+            continue  # "pode apagar?" asks, it does not answer
+        if _CONSENT_NEGATION_RE.search(text[:match.start()]):
+            refuses = True
+        else:
+            approves = True
+    return ConsentReading(approves, refuses,
+                          frozenset(int(n) for n in _CONSENT_ID_RE.findall(text)))
+
+
+_CONSENT_FILE_PREFIX = '.consent-'
+COMMAND_SHOWN_CHARS = 300
+
+
+def shown_command(command: str) -> str:
+    """A command as the user is shown it: cut, with an ellipsis, past
+    COMMAND_SHOWN_CHARS."""
+    if len(command) <= COMMAND_SHOWN_CHARS:
+        return command
+    return command[:COMMAND_SHOWN_CHARS] + '…'
+
+
+def consent_path(state_dir: str, session_id: str) -> str:
+    return os.path.join(state_dir, f'{_CONSENT_FILE_PREFIX}{session_id}.json')
+
+
+_TEMPORARY_DATA_PART = '/temporary-data/'
+
+
+def touches_consent_queue(tool_name: str, tool_input: dict) -> bool:
+    """Whether a tool call names the consent queue's files or the Temporary
+    data folder. The queue is the user's answer, and each Temporary data item
+    is a command the user's press runs: the model writing either could approve
+    itself or plant one. A path the shell computes (`.con"sent"-`) is not
+    seen: a known gap."""
+    if tool_name == 'Bash':
+        command = str(tool_input.get('command') or '')
+        return _CONSENT_FILE_PREFIX in command or _TEMPORARY_DATA_PART in command
+    path = str(tool_input.get('file_path') or tool_input.get('notebook_path') or '')
+    return (os.path.basename(path).startswith(_CONSENT_FILE_PREFIX)
+            or _TEMPORARY_DATA_PART in path.replace('\\', '/'))
+
+
+@contextlib.contextmanager
+def _file_lock(path: str):
+    """An exclusive lock on `path`.lock where the platform has flock: the gate
+    queuing a command and the prompt hook approving it may run at once."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    with open(path + '.lock', 'a') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _command_key(command: str) -> str:
+    return hashlib.sha256(command.encode('utf-8', 'replace')).hexdigest()
+
+
+def _prune_consent_files(state_dir: str) -> None:
+    cutoff = time.time() - _CONSENT_MAX_AGE_S
+    for path in glob.glob(os.path.join(glob.escape(state_dir), f'{_CONSENT_FILE_PREFIX}*.json')):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                if os.path.exists(path + '.lock'):
+                    os.remove(path + '.lock')
+        except OSError:
+            continue
+
+
+def _consent_entries(data: dict, key: str) -> list[dict]:
+    entries = data.get(key)
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+
+
+def consent_request(state_dir: str, session_id: str, command: str, effect: str,
+                    cwd: str = '') -> int:
+    """Queue `command` for the user's approval and return its number; the same
+    command queued again keeps its number. `cwd` is where the model's shell
+    was: the button runs the command there."""
+    os.makedirs(state_dir, exist_ok=True)
+    _prune_consent_files(state_dir)
+    path = consent_path(state_dir, session_id)
+    key = _command_key(command)
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        for entry in pending:
+            if entry.get('key') == key:
+                return _consent_number(entry)
+        next_id = data.get('next_id')
+        number = next_id if isinstance(next_id, int) and next_id > 0 else 1
+        # A cut command is kept for showing; the button never runs it (`is_cut`).
+        pending.append({'id': number, 'key': key, 'command': command[:_CONSENT_COMMAND_KEPT],
+                        'is_cut': len(command) > _CONSENT_COMMAND_KEPT,
+                        'effect': effect, 'cwd': cwd, 'ts': time.time()})
+        data['pending'] = pending[-CONSENT_PENDING_MAX:]
+        data['next_id'] = number + 1
+        save_state(path, data)
+    return number
+
+
+def consent_take(state_dir: str, session_id: str, command: str, use: bool = True) -> bool:
+    """Whether the user approved `command` in the chat. With `use`, the
+    approval is used up by this call, so the command runs once; without it
+    the approval is only looked at, for a caller that may still deny."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return False
+    key = _command_key(command)
+    with _file_lock(path):
+        data = load_state(path)
+        approved = _consent_entries(data, 'approved')
+        if not any(entry.get('key') == key for entry in approved):
+            return False
+        if use:
+            data['approved'] = [entry for entry in approved if entry.get('key') != key]
+            save_state(path, data)
+    return True
+
+
+def consent_mark_turn_end(state_dir: str, session_id: str) -> None:
+    """Record that a turn of the main session ended: what was queued before it
+    is what the model could have listed to the user in that turn's messages,
+    and what a command of it made is released to Temporary data."""
+    os.makedirs(state_dir, exist_ok=True)
+    path = consent_path(state_dir, session_id)
+    with _file_lock(path):
+        data = load_state(path)
+        data['turn_end'] = time.time()
+        save_state(path, data)
+
+
+def _consent_number(entry: dict) -> int:
+    value = entry.get('id')
+    return value if isinstance(value, int) else 0
+
+
+class ConsentAnswer(NamedTuple):
+    approved: list[dict]
+    still_pending: list[dict]
+    ambiguous: bool
+
+
+def consent_answer(state_dir: str, session_id: str, text: str) -> ConsentAnswer:
+    """Apply what the user wrote (`text`, their own words) to the queue: an
+    approval moves the queued commands it covers to approved — all of those
+    queued before the last turn ended (the ones the model could have shown the
+    user), or the `#n` named among them. A message that both approves and
+    refuses, or names a number not among them, approves nothing."""
+    path = consent_path(state_dir, session_id)
+    if not text or not os.path.exists(path):
+        return ConsentAnswer([], [], False)
+    reading = read_consent(text)
+    if not reading.approves:
+        return ConsentAnswer([], [], False)
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        if not pending:
+            return ConsentAnswer([], [], False)
+        turn_end = data.get('turn_end')
+        shown = [entry for entry in pending if isinstance(turn_end, (int, float))
+                 and isinstance(entry.get('ts'), (int, float)) and entry['ts'] <= turn_end]
+        if reading.refuses or not shown:
+            return ConsentAnswer([], pending, True)
+        chosen = [entry for entry in shown
+                  if not reading.ids or _consent_number(entry) in reading.ids]
+        if not chosen or (reading.ids - {_consent_number(entry) for entry in shown}):
+            return ConsentAnswer([], pending, True)
+        chosen_ids = {entry.get('id') for entry in chosen}
+        data['pending'] = [entry for entry in pending if entry.get('id') not in chosen_ids]
+        data['approved'] = (_consent_entries(data, 'approved') + chosen)[-CONSENT_PENDING_MAX:]
+        save_state(path, data)
+    return ConsentAnswer(chosen, data['pending'], False)
+
+
+# ─── The answer from the button above the chat, and Temporary data ──────────
+#
+# The playbook's mod (hooks/temporary_data.tsx) shows each queued command with
+# Approve and Decline; scripts/temporary_data.py carries the answer out here,
+# under the queue's lock. A declined deletion is kept in Temporary data, one
+# file per item and one folder per project, so each writer creates its own
+# file and nothing is rewritten under another writer. Only a deletion is kept:
+# a declined reset or force push has no later moment where it would make sense.
+
+DELETION_EFFECTS = frozenset({'delete_tree', 'mass_delete', 'script_delete', 'worktree_remove'})
+TEMPORARY_DATA_DIR = 'temporary-data'
+TEMPORARY_DATA_MAX = 200
+_ITEM_ID_RE = re.compile(r'[0-9a-f]{12}')
+
+
+def consent_turn_end(state_dir: str, session_id: str) -> float:
+    """When the last turn of `session_id` ended; 0 before the first."""
+    value = load_state(consent_path(state_dir, session_id)).get('turn_end')
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def consent_pending(state_dir: str, session_id: str) -> list[dict]:
+    """The commands of `session_id` still waiting for the user's answer."""
+    return _consent_entries(load_state(consent_path(state_dir, session_id)), 'pending')
+
+
+def consent_decide(state_dir: str, session_id: str, number: int) -> dict | None:
+    """Take `#number` out of the queue for the answer the user gave on the
+    button; the entry, or None when it is no longer waiting (answered in the
+    chat, or already by another press)."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return None
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        entry = next((one for one in pending if _consent_number(one) == number), None)
+        if entry is None:
+            return None
+        data['pending'] = [one for one in pending if one is not entry]
+        save_state(path, data)
+    return entry
+
+
+def temporary_data_dir(state_dir: str, project_dir: str) -> str:
+    """The folder of one project's Temporary data: the project's real path,
+    every character but letters and digits as `-`, as Claude Code names its
+    own per-project folders."""
+    key = re.sub(r'[^A-Za-z0-9]', '-', os.path.realpath(project_dir))
+    return os.path.join(state_dir, TEMPORARY_DATA_DIR, key)
+
+
+TEMPORARY_KINDS = frozenset({'declined', 'created', 'registered'})
+
+
+def temporary_data_add(state_dir: str, project_dir: str, *, command: str, cwd: str,
+                       effect: str, origin: str, kind: str = 'declined',
+                       what: dict | None = None, target: dict | None = None) -> dict:
+    """Keep a deletion the user has not run yet; the item written.
+
+    `kind`: `declined` on the button, `created` by a command the hook read
+    (`created_temporaries`), `registered` by the model. `what` names it for
+    the person (`{key, name}` for a playbook_i18n text, `{text}` as written);
+    `target` is what the deletion removes (`{kind: path | container | volume
+    | network, value}`), so an item whose target is gone leaves the panel."""
+    if kind not in TEMPORARY_KINDS:
+        raise ValueError(f'not a Temporary data kind: {kind!r}')
+    folder = temporary_data_dir(state_dir, project_dir)
+    os.makedirs(folder, exist_ok=True)
+    item = {'id': os.urandom(6).hex(), 'command': command, 'cwd': cwd, 'effect': effect,
+            'origin': origin, 'ts': time.time(), 'kind': kind, 'what': what or {},
+            'target': target or {}}
+    save_state(os.path.join(folder, f"{item['id']}.json"), item)
+    return item
+
+
+class Temporary(NamedTuple):
+    """Something a command made that outlives it: what it is (a playbook_i18n
+    key and the name), the command that removes it, and what to check for
+    whether it still exists."""
+    what_key: str
+    name: str
+    command: str
+    cwd: str
+    target_kind: str
+    target: str
+
+
+_DOCKER_CREATES = {('volume', 'create'): 'volume', ('network', 'create'): 'network'}
+
+
+def _docker_created(words: list[str], cwd: str) -> Temporary | None:
+    """A named container `docker run --name` starts without `--rm`, or a
+    volume or network `docker volume|network create <name>` makes."""
+    args = words[1:]
+    if args[:1] == ['run'] or args[:2] == ['container', 'run']:
+        if '--rm' in args:
+            return None
+        name = ''
+        for at, word in enumerate(args):
+            if word == '--name' and at + 1 < len(args):
+                name = args[at + 1]
+            elif word.startswith('--name='):
+                name = word.split('=', 1)[1]
+        if not _is_literal_path(name) or not name:
+            return None
+        return Temporary('tmp_what_container', name, f'docker rm -f {shlex.quote(name)}', cwd,
+                         'container', name)
+    kind = _DOCKER_CREATES.get(tuple(args[:2]))
+    if kind is None:
+        return None
+    names = [word for word in args[2:] if not word.startswith('-')]
+    if len(names) != 1 or not _is_literal_path(names[0]):
+        return None
+    return Temporary(f'tmp_what_{kind}', names[0], f'docker {kind} rm {shlex.quote(names[0])}',
+                     cwd, kind, names[0])
+
+
+def _mktemp_created(words: list[str], stdout: str, cwd: str) -> Temporary | None:
+    """What `mktemp` made, read from its output: only when the command was
+    `mktemp` alone, so the output is its path and nothing else."""
+    path = stdout.strip()
+    if '\n' in path or not os.path.isabs(path):
+        return None
+    is_dir = any(word in ('-d', '--directory') or re.fullmatch(r'-[a-zA-Z]*d[a-zA-Z]*', word)
+                 for word in words[1:] if word.startswith('-'))
+    return Temporary('tmp_what_tempdir' if is_dir else 'tmp_what_tempfile', path,
+                     f"rm -{'rf' if is_dir else 'f'} {shlex.quote(path)}", cwd, 'path', path)
+
+
+def _worktree_created(call: GitCall) -> Temporary | None:
+    """The worktree `git worktree add <path>` made, in a repository the
+    command names literally."""
+    if call.repo is None or call.sub != 'worktree' or call.args[:1] != ['add']:
+        return None
+    operands: list[str] = []
+    skip = False
+    for word in call.args[1:]:
+        if skip:
+            skip = False
+        elif word in ('-b', '-B', '--reason'):
+            skip = True
+        elif not word.startswith('-'):
+            operands.append(word)
+    if not operands or not _is_literal_path(operands[0]):
+        return None
+    path = os.path.normpath(os.path.join(call.repo, os.path.expanduser(operands[0])))
+    return Temporary('tmp_what_worktree', path,
+                     f'git worktree remove --force {shlex.quote(path)}', call.repo, 'path', path)
+
+
+def created_temporaries(command: str, stdout: str, cwd: str, disposable_root: str = ''
+                        ) -> list[Temporary]:
+    """What a command that ran made and leaves behind, read from its words:
+    a git worktree, a named Docker container, volume or network, and what a
+    lone `mktemp` printed. Anything inside `disposable_root` (the session's
+    scratchpad) is left out: the session's own clean-up removes it. What the
+    words do not name literally (a path from a variable, `$(mktemp -d)`) is
+    not read: the model registers it (scripts/temporary_data.py register)."""
+    read = _simple_commands(strip_heredoc_bodies(command))
+    if read is None:
+        return []
+    commands = read[0]
+    found: list[Temporary] = []
+    for words in commands:
+        base = words[0].rsplit('/', 1)[-1]
+        if base == 'docker':
+            made = _docker_created(words, cwd)
+        elif base == 'mktemp' and len(commands) == 1:
+            made = _mktemp_created(words, stdout, cwd)
+        else:
+            made = None
+        if made is not None:
+            found.append(made)
+    found += [made for made in map(_worktree_created, git_calls(command, cwd) or [])
+              if made is not None]
+    if disposable_root:
+        root = os.path.realpath(disposable_root)
+        found = [made for made in found if made.target_kind != 'path'
+                 or os.path.commonpath((os.path.realpath(made.target), root)) != root]
+    return found
+
+
+def temporary_data_note_created(state_dir: str, project_dir: str, made: list[Temporary],
+                                origin: str) -> int:
+    """Keep what a command made in Temporary data, once per target; how many
+    were added."""
+    if not made:
+        return 0
+    known = {(item['target'].get('kind'), item['target'].get('value'))
+             for item in temporary_data_items(state_dir, project_dir)
+             if isinstance(item.get('target'), dict)}
+    added = 0
+    for one in made:
+        if (one.target_kind, one.target) in known:
+            continue
+        known.add((one.target_kind, one.target))
+        temporary_data_add(state_dir, project_dir, command=one.command, cwd=one.cwd,
+                           effect='worktree_remove' if one.what_key == 'tmp_what_worktree'
+                           else 'delete_tree', origin=origin, kind='created',
+                           what={'key': one.what_key, 'name': one.name},
+                           target={'kind': one.target_kind, 'value': one.target})
+        added += 1
+    return added
+
+
+def _is_item(value: object) -> bool:
+    return (isinstance(value, dict) and isinstance(value.get('id'), str)
+            and bool(_ITEM_ID_RE.fullmatch(value['id']))
+            and isinstance(value.get('command'), str) and isinstance(value.get('cwd'), str)
+            and isinstance(value.get('ts'), (int, float)) and not isinstance(value.get('ts'), bool))
+
+
+def temporary_data_items(state_dir: str, project_dir: str) -> list[dict]:
+    """One project's Temporary data, oldest first, at most TEMPORARY_DATA_MAX;
+    a file that is not an item is left out."""
+    folder = temporary_data_dir(state_dir, project_dir)
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    items = [load_state(os.path.join(folder, name)) for name in names
+             if _ITEM_ID_RE.fullmatch(name.removesuffix('.json')) and name.endswith('.json')]
+    kept = [item for item in items if _is_item(item)]
+    kept.sort(key=lambda item: item['ts'])
+    return kept[:TEMPORARY_DATA_MAX]
+
+
+def temporary_data_drop(state_dir: str, project_dir: str, item_id: str) -> None:
+    if not _ITEM_ID_RE.fullmatch(item_id):
+        raise ValueError(f'not an item id: {item_id!r}')
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(os.path.join(temporary_data_dir(state_dir, project_dir), f'{item_id}.json'))
+
 
 GIT_PUSH_RE = re.compile(_GIT_PREFIX + r'push\b', re.IGNORECASE)
 
@@ -2753,10 +4199,6 @@ GIT_PUSH_RE = re.compile(_GIT_PREFIX + r'push\b', re.IGNORECASE)
 # attribution in local history however that message was assembled.
 _HISTORY_WRITE_SUBS = frozenset({'commit', 'commit-tree', 'merge', 'pull', 'cherry-pick',
                                  'rebase', 'revert', 'am'})
-
-# A push that only inspects or tests the remote changes nothing — gating it
-# would block the very command used to check what a push would do.
-PUSH_NOOP_RE = re.compile(r'--dry-run\b|--porcelain\b', re.IGNORECASE)
 
 # Skill invocations that count as a review for the pre-push gate: the playbook's
 # own review skill, and Claude Code's built-in /code-review.
@@ -2792,19 +4234,18 @@ def journal_path(state_dir: str, session_id: str = '', cwd: str | None = None,
     return path.replace('.state-', '.learn-').replace('.json', '.jsonl')
 
 
-def append_incident(path: str, record: dict) -> None:
-    """Append one failure record, trimming the journal to its last
-    JOURNAL_MAX_LINES. Never raises — a journal write must not be able to fail
-    a tool call."""
+def append_incident(path: str, record: dict, max_lines: int = JOURNAL_MAX_LINES) -> None:
+    """Append one record, trimming the journal to its last `max_lines`. Never
+    raises — a journal write must not be able to fail a tool call."""
     try:
         line = json.dumps(record, separators=(',', ':'), default=str)
         with open(path, 'a') as f:
             f.write(line + '\n')
         with open(path) as f:
             lines = f.readlines()
-        if len(lines) > JOURNAL_MAX_LINES * 2:
+        if len(lines) > max_lines * 2:
             with open(path, 'w') as f:
-                f.writelines(lines[-JOURNAL_MAX_LINES:])
+                f.writelines(lines[-max_lines:])
     except Exception:
         pass
 
@@ -2825,6 +4266,102 @@ def read_incidents(path: str, limit: int = 50) -> list[dict]:
         if isinstance(obj, dict):
             out.append(obj)
     return out
+
+
+# ─── Deviations from a playbook rule ─────────────────────────────────────────
+#
+# A model that does not follow a skill rule, or follows one it believes wrong,
+# reports it in a block of its response text; the Stop hook records it. The
+# journal is one file for every project and kept across sessions: the rule
+# belongs to the playbook, and it is the playbook that gets fixed.
+
+DEVIATION_OPEN = '[PLAYBOOK-DEVIATION]'
+DEVIATION_CLOSE = '[/PLAYBOOK-DEVIATION]'
+DEVIATION_FIELDS = ('skill', 'rule', 'action', 'instead', 'why')
+DEVIATION_ACTIONS = ('deviated', 'followed')
+DEVIATION_MAX_LINES = 500
+DEVIATION_FIELD_MAX_CHARS = 2000
+DEVIATION_JOURNAL_ENV = 'PLAYBOOK_DEVIATION_JOURNAL'
+
+
+def marker_block_re(open_marker: str, close_marker: str) -> re.Pattern[str]:
+    """The text between two markers that each sit alone on their line. A
+    sentence that only names the markers ("write between `[HANDOFF]` and
+    `[/HANDOFF]`") is not a block. Accepted cost: a response that shows the
+    format with the markers on their own lines, fenced or not, is read as a
+    block; for a deviation the user sees it in the notice."""
+    return re.compile(
+        r'^[ \t]*' + re.escape(open_marker) + r'[ \t]*\n(.*?)^[ \t]*'
+        + re.escape(close_marker) + r'[ \t]*$',
+        re.DOTALL | re.MULTILINE,
+    )
+
+
+DEVIATION_RE = marker_block_re(DEVIATION_OPEN, DEVIATION_CLOSE)
+_DEVIATION_FIELD_RE = re.compile(
+    r'^[ \t]*[-*]?[ \t]*(' + '|'.join(DEVIATION_FIELDS) + r')[ \t]*:[ \t]*(.*)$', re.IGNORECASE)
+_SKILLS_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'skills')
+
+
+class Deviation(NamedTuple):
+    fields: dict[str, str]
+    incomplete: tuple[str, ...]
+    block: str
+
+
+def _deviation_skill(value: str) -> str:
+    return value.strip().strip('`').rsplit(':', 1)[-1].strip()
+
+
+def parse_deviations(text: str) -> list[Deviation]:
+    """Every deviation block in `text`, in order. A line that does not start a
+    field continues the previous one. `incomplete` names the fields that are
+    missing or hold a value the format does not allow (`instead` is required
+    only when the rule was not followed)."""
+    found: list[Deviation] = []
+    for body in DEVIATION_RE.findall(text or ''):
+        fields: dict[str, str] = {}
+        current = ''
+        for line in body.splitlines():
+            match = _DEVIATION_FIELD_RE.match(line)
+            if match:
+                current = match.group(1).lower()
+                fields[current] = match.group(2).strip()
+            elif current and line.strip():
+                fields[current] = (fields[current] + ' ' + line.strip()).strip()
+        if 'skill' in fields:
+            fields['skill'] = _deviation_skill(fields['skill'])
+        if 'action' in fields:
+            fields['action'] = fields['action'].strip().strip('`').lower()
+        fields = {k: scrub_secrets(v)[:DEVIATION_FIELD_MAX_CHARS] for k, v in fields.items()}
+        required = ['skill', 'rule', 'action', 'why']
+        if fields.get('action') != 'followed':
+            required.append('instead')
+        incomplete = [f for f in required if not fields.get(f)]
+        if fields.get('action') and fields['action'] not in DEVIATION_ACTIONS:
+            incomplete.append('action')
+        found.append(Deviation(fields, tuple(incomplete), body.strip()))
+    return found
+
+
+def deviation_journal_path(state_dir: str) -> str:
+    """The journal every project writes to; the environment variable moves it
+    (tests, a shared location)."""
+    return os.environ.get(DEVIATION_JOURNAL_ENV) or os.path.join(state_dir, '.deviations.jsonl')
+
+
+def skill_version(name: str) -> str:
+    """The `version:` of the installed skill, '' when the playbook has no skill
+    by that name: the record says which text of the rule the model read."""
+    if not re.fullmatch(r'[\w-]+', name or ''):
+        return ''
+    try:
+        with open(os.path.join(_SKILLS_ROOT, name, 'SKILL.md'), encoding='utf-8') as f:
+            head = f.read(2048)
+    except OSError:
+        return ''
+    match = re.search(r'^version:\s*([^\s]+)', head, re.MULTILINE)
+    return match.group(1) if match else 'unversioned'
 
 
 # ─── User preferences ─────────────────────────────────────────────────────────
@@ -2887,11 +4424,22 @@ PREFS_DEFAULTS: dict = {
     # up and hand off. 0 = off. Not a window limit: on a 1M window the percentage
     # thresholds only speak at 700k, long after the cost has been paid — every call
     # re-reads the whole context, so a session's cost grows with its size squared.
-    'context_budget': 0,
+    # 550k: the handoff and /clear come before the 700k warning on a 1M window;
+    # on a smaller window the 70% guard speaks first and this never fires.
+    'context_budget': 550_000,
     # Language of the fixed text the settings menu shows (playbook_i18n). 'auto'
     # follows the system locale; replies follow the language the user writes in.
     'language': 'auto',
+    # Deviation reports to the maintainer (hooks/deviation_report.py). Off until
+    # the user turns them on: a user who installed before the setting existed
+    # never saw the first-run offer, and sending is never assumed.
+    'reports': False,
+    # Declined deletions kept in the Temporary data panel (hooks/temporary_data.tsx)
+    # instead of dropped, so a leftover the user did not remove right away is
+    # not forgotten by them or the model.
+    'temporary_data': True,
 }
+PREF_FLAGS = ('watch', 'reports', 'temporary_data')
 
 MEMORY_FILE = 'CLAUDE.md'
 
@@ -2926,8 +4474,9 @@ def load_prefs(state_dir: str) -> dict:
         return prefs
     if stored.get('prose') in PROSE_LEVELS:
         prefs['prose'] = stored['prose']
-    if isinstance(stored.get('watch'), bool):
-        prefs['watch'] = stored['watch']
+    for flag in PREF_FLAGS:
+        if isinstance(stored.get(flag), bool):
+            prefs[flag] = stored[flag]
     budget = stored.get('claude_md_budget')
     if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 0:
         prefs['claude_md_budget'] = budget
@@ -2960,13 +4509,13 @@ def set_pref(state_dir: str, key: str, value: str) -> tuple[dict, str | None]:
         if raw not in PROSE_LEVELS:
             return prefs, f'prose must be one of {", ".join(PROSE_LEVELS)} — got {value!r}'
         prefs['prose'] = raw
-    elif key == 'watch':
+    elif key in PREF_FLAGS:
         if raw in ('on', 'true', '1', 'yes'):
-            prefs['watch'] = True
+            prefs[key] = True
         elif raw in ('off', 'false', '0', 'no'):
-            prefs['watch'] = False
+            prefs[key] = False
         else:
-            return prefs, f'watch must be on or off — got {value!r}'
+            return prefs, f'{key} must be on or off — got {value!r}'
     elif key == 'claude_md_budget':
         if raw in ('off', 'none'):
             prefs['claude_md_budget'] = 0

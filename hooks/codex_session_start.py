@@ -52,7 +52,8 @@ _SECTION_RE = re.compile(r'(?m)^## .+')
 # Everything not listed is dropped — see module docstring for why.
 _KEEP_SECTIONS = {
     'engineering-playbook': ('Non-negotiable rules', 'Skill routing'),
-    'engineering-governance': ('Mandatory companion skills', 'Spec gate', 'Validation checklist'),
+    'engineering-governance': ('Mandatory companion skills', 'Spec gate', 'Decision ownership',
+                               'Obligations', 'Validation checklist'),
 }
 
 

@@ -15,6 +15,7 @@ The review gate shells out to git, so its tests build a real repository with a
 real upstream — a mocked one would not exercise the fail-open paths (no repo,
 nothing ahead of upstream) that decide whether the gate is safe to ship.
 """
+import importlib.util
 import json
 import os
 import shutil
@@ -30,10 +31,12 @@ _GUARD = os.path.join(_ROOT, 'hooks', 'context_guard.py')
 _LEARN = os.path.join(_ROOT, 'hooks', 'learn_guard.py')
 _COMPACT = os.path.join(_ROOT, 'hooks', 'compact_guard.py')
 _SESSION_START = os.path.join(_ROOT, 'hooks', 'session_start.py')
+_CONSENT = os.path.join(_ROOT, 'hooks', 'consent_guard.py')
 _PYTHON = sys.executable
 
 sys.path.insert(0, os.path.join(_ROOT, 'hooks'))
 import playbook_core  # noqa: E402
+import playbook_i18n  # noqa: E402
 
 _HOOK_DIR = os.path.expanduser('~/.claude/hooks')
 
@@ -44,7 +47,8 @@ def _run(script: str, payload: dict, env: dict | None = None) -> subprocess.Comp
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        env={**os.environ, 'PLAYBOOK_CONTEXT_LIMIT': '200000', **(env or {})},
+        env={**os.environ, 'PLAYBOOK_CONTEXT_LIMIT': '200000', 'CLAUDE_PROJECT_DIR': '',
+             **(env or {})},
     )
 
 
@@ -56,7 +60,7 @@ def _out(result: subprocess.CompletedProcess) -> dict:
 
 
 def _ul(text: str) -> str:
-    return json.dumps({'type': 'user', 'message': {'content': text}}) + '\n'
+    return json.dumps({'type': 'user', 'origin': {'kind': 'human'}, 'message': {'content': text}}) + '\n'
 
 
 def _al(text: str) -> str:
@@ -66,6 +70,25 @@ def _al(text: str) -> str:
 def _skill(name: str) -> str:
     block = {'type': 'tool_use', 'name': 'Skill', 'input': {'skill': name}}
     return json.dumps({'type': 'assistant', 'message': {'content': [block]}}) + '\n'
+
+
+# Turn fixtures, shaped after the entries Claude Code records in a session
+# transcript: what closes a turn, what starts one the user did not, and what it
+# injects into a turn still running.
+
+def _entry(**fields) -> str:
+    return json.dumps(fields) + '\n'
+
+
+def _typed(text: str, prompt_id: str = 'p-user', source: str = 'typed') -> str:
+    return _entry(type='user', promptId=prompt_id, origin={'kind': 'human'}, promptSource=source,
+                  turnOrigin='human', message={'role': 'user', 'content': text})
+
+
+def _typed_mid_turn(text: str) -> str:
+    return _entry(type='attachment', attachment={
+        'type': 'queued_command', 'commandMode': 'prompt', 'origin': {'kind': 'human'},
+        'humanTurn': True, 'prompt': text})
 
 
 class _Base(unittest.TestCase):
@@ -116,14 +139,18 @@ class _Base(unittest.TestCase):
             **payload,
         })
 
-    def _stop(self, active: bool = False) -> subprocess.CompletedProcess:
-        return _run(_GUARD, {
+    def _stop(self, active: bool = False, final: str | None = None, cwd: str | None = None,
+              env: dict | None = None) -> subprocess.CompletedProcess:
+        payload = {
             'session_id': self.session_id,
             'transcript_path': self.transcript,
             'hook_event_name': 'Stop',
-            'cwd': self.dir,
+            'cwd': cwd or self.dir,
             'stop_hook_active': active,
-        })
+        }
+        if final is not None:
+            payload['last_assistant_message'] = final
+        return _run(_GUARD, payload, env=env)
 
 
 # ── Failure capture ───────────────────────────────────────────────────────────
@@ -195,6 +222,36 @@ class TestCorrectionDetection(_Base):
         self._learn('UserPromptSubmit', prompt="that's wrong, not what I asked for")
         self.assertTrue(self._state().get('learn_pending'))
 
+    def test_text_the_user_did_not_type_is_not_a_correction(self):
+        """A subagent report, a notification and local command output reach the
+        hook as prompts. One per form: each quotes a correction phrase."""
+        for prompt in (
+            '<agent-message from="a1b2c3">\n[Subagent hand-back] the earlier claim is wrong; that\'s incorrect',
+            '<task-notification>\n<summary>build still failing</summary>\n</task-notification>',
+            '<system-reminder>\nreverte isso\n</system-reminder>',
+            '<local-command-stdout>undo that</local-command-stdout>',
+            '[SYSTEM NOTIFICATION - NOT USER INPUT]\nyou assumed the wrong file',
+        ):
+            with self.subTest(prompt=prompt[:24]):
+                result = self._learn('UserPromptSubmit', prompt=prompt)
+                self.assertEqual(result.stdout.strip(), '')
+                self.assertFalse(self._state().get('learn_pending'))
+
+    def test_a_pasted_block_is_not_the_users_words(self):
+        pasted = '<pasted_content id="ab12">\nstep 3: reverte o deploy; não é isso\n</pasted_content id="ab12">'
+        result = self._learn('UserPromptSubmit', prompt=f'segue o runbook\n\n{pasted}')
+        self.assertEqual(result.stdout.strip(), '')
+        self.assertFalse(self._state().get('learn_pending'))
+
+    def test_an_unclosed_pasted_block_runs_to_the_end(self):
+        self._learn('UserPromptSubmit', prompt='veja o log\n<pasted_content id="ab12">\nstill failing')
+        self.assertFalse(self._state().get('learn_pending'))
+
+    def test_a_correction_typed_around_a_pasted_block_still_counts(self):
+        pasted = '<pasted_content id="ab12">\nTraceback ...\n</pasted_content id="ab12">'
+        self._learn('UserPromptSubmit', prompt=f'não é isso, olha o erro:\n{pasted}')
+        self.assertTrue(self._state().get('learn_pending'))
+
     def test_state_claims_the_transcript_so_the_guard_does_not_reset_it(self):
         # context_guard resets state whenever session_file does not match the
         # live transcript. A flag written before the first tool call must survive.
@@ -205,6 +262,13 @@ class TestCorrectionDetection(_Base):
 # ── Learn gate (Stop) ─────────────────────────────────────────────────────────
 
 class TestLearnGate(_Base):
+
+    def test_the_token_only_in_the_message_that_ended_the_turn_clears_the_gate(self):
+        self._write(_ul('não é isso'))
+        self._set_state(learn_pending=True)
+        result = self._stop(final=f'{playbook_core.LEARNED_TOKEN} the rule is in CLAUDE.md')
+        self.assertNotEqual(_out(result).get('decision') if result.stdout.strip() else None, 'block')
+        self.assertFalse(self._state().get('learn_pending'))
 
     def test_stop_blocks_until_the_lesson_is_distilled(self):
         self._write(_ul('isso está errado') + _al('fixed it'))
@@ -262,17 +326,51 @@ class TestCarryover(_Base):
             'cwd': self.dir,
         })
 
-    def _session_start(self, source: str, session_id: str | None = None) -> str:
+    def _session_start(self, source: str, session_id: str | None = None,
+                       env: dict | None = None) -> str:
         result = _run(_SESSION_START, {
             'session_id': session_id or self.session_id,
             'source': source,
             'cwd': self.dir,
-        })
+        }, env=env)
         return _out(result)['hookSpecificOutput']['additionalContext']
 
-    def _after_clear(self) -> str:
+    def _after_clear(self, env: dict | None = None) -> str:
         """A /clear starts a NEW session_id -- measured on real transcripts."""
-        return self._session_start('clear', f'pbtest-{uuid.uuid4().hex[:12]}')
+        return self._session_start('clear', f'pbtest-{uuid.uuid4().hex[:12]}', env=env)
+
+    def _subdir(self) -> str:
+        sub = os.path.join(self.dir, 'app', 'src')
+        os.makedirs(sub)
+        return sub
+
+    def test_a_handoff_written_after_a_cd_reaches_the_clear(self):
+        """Measured on a real run: after `cd sub` the Stop payload carries
+        cwd=sub while CLAUDE_PROJECT_DIR stays the launch directory, and the
+        /clear's SessionStart arrives with cwd=launch directory."""
+        launch = {'CLAUDE_PROJECT_DIR': self.dir}
+        self._write(_ul('build it') + _al('[HANDOFF]\nnext: the retries\n[/HANDOFF]'))
+        self._stop(cwd=self._subdir(), env=launch)
+        self.assertIn('next: the retries', self._after_clear(env=launch))
+
+    def test_a_carryover_written_after_a_cd_reaches_the_clear(self):
+        launch = {'CLAUDE_PROJECT_DIR': self.dir}
+        self._write(_ul('build the payment webhook') + _al('ok'))
+        self._set_state(budget_level=1)
+        self._stop(cwd=self._subdir(), env=launch)
+        self.assertIn('build the payment webhook', self._after_clear(env=launch))
+
+    def test_a_crossed_budget_refreshes_the_carryover_below_the_warn(self):
+        """The budget asks for the /clear at 55% of a 1M window, before the warn."""
+        self._write(_ul('build the payment webhook') + _al('ok'))
+        self._set_state(budget_level=1)
+        self._stop()
+        self.assertIn('build the payment webhook', open(self.project_note).read())
+
+    def test_no_carryover_below_the_warn_and_the_budget(self):
+        self._write(_ul('build the payment webhook') + _al('ok'))
+        self._stop()
+        self.assertFalse(os.path.exists(self.project_note))
 
     def test_note_keeps_the_original_request(self):
         self._write(_ul('build the payment webhook') + _al('ok') * 3
@@ -303,6 +401,11 @@ class TestCarryover(_Base):
                     + _al('Done with the parser.\n[HANDOFF]\nNext: wire retries in '
                           'src/webhook.ts\n[/HANDOFF]\nRun /clear.'))
         self._stop()
+        self.assertIn('wire retries in src/webhook.ts', open(self.handoff).read())
+
+    def test_a_handoff_only_in_the_message_that_ended_the_turn_is_saved(self):
+        self._write(_ul('build the payment webhook'))
+        self._stop(final='Parser done.\n[HANDOFF]\nNext: wire retries in src/webhook.ts\n[/HANDOFF]\nRun /clear.')
         self.assertIn('wire retries in src/webhook.ts', open(self.handoff).read())
 
     def test_an_inline_mention_of_the_markers_is_not_saved(self):
@@ -417,10 +520,14 @@ class TestReviewGate(_RepoBase):
         self._commit('src/extra.ts', 'sneaked in')
         self.assertTrue(self._denied(self._push()))
 
-    def test_user_bypass_phrase_allows_the_push(self):
+    def test_a_waiver_typed_in_the_chat_does_not_allow_the_push(self):
         self._commit('src/app.ts', 'unreviewed')
-        self._write(_ul('pode pushar direto, sem review'))
-        self.assertFalse(self._denied(self._push()))
+        for waiver in ('pode pushar direto, sem review', 'skip review', 'no review needed'):
+            with self.subTest(waiver=waiver):
+                self._write(_ul(waiver))
+                result = self._push()
+                self.assertTrue(self._denied(result))
+                self.assertIn('Nothing written in the chat', _out(result).get('systemMessage', ''))
 
     def test_model_cannot_write_its_own_bypass(self):
         # The phrase only counts in the user's message; assistant text must not clear it.
@@ -435,6 +542,39 @@ class TestReviewGate(_RepoBase):
     def test_dry_run_is_not_gated(self):
         self._commit('src/app.ts', 'unreviewed')
         self.assertFalse(self._denied(self._push('git push --dry-run origin main')))
+        self.assertFalse(self._denied(self._push('git push -q -n origin main')))
+
+    def test_a_publishing_push_chained_with_a_dry_run_is_denied(self):
+        """The dry run is read per push: the other push of the command still publishes."""
+        self._commit('src/app.ts', 'unreviewed')
+        for command in ('git push --dry-run origin main && git push origin main',
+                        'git push origin main; git push --dry-run origin main'):
+            with self.subTest(command=command):
+                result = self._push(command)
+                self.assertTrue(self._denied(result))
+                self.assertIn('review-gate', _out(result).get('systemMessage', ''))
+
+    def test_porcelain_push_is_gated(self):
+        """`--porcelain` changes the output; the push still happens."""
+        self._commit('src/app.ts', 'unreviewed')
+        self.assertTrue(self._denied(self._push('git push --porcelain origin main')))
+
+    def test_a_dry_run_inside_another_program_is_read_per_push(self):
+        """The forms the whole-command `--dry-run` match exempted by accident."""
+        self._commit('src/app.ts', 'unreviewed')
+        for command in ('echo main | xargs git push --dry-run origin',
+                        "sh -c 'git push --dry-run origin main'",
+                        'eval git push --dry-run origin main'):
+            with self.subTest(command=command):
+                self.assertFalse(self._denied(self._push(command)))
+        for command in ('echo main | xargs git push --dry-run origin && git push origin main',
+                        "sh -c 'git push --dry-run origin main && git push origin main'",
+                        'eval "git push --dry-run origin main; git push origin main"',
+                        r'find . -maxdepth 0 -exec git push --dry-run origin main \;',
+                        'watch git push --dry-run origin main',
+                        'flock /tmp/l git push --dry-run origin main'):
+            with self.subTest(command=command):
+                self.assertTrue(self._denied(self._push(command)))
 
     def test_push_that_only_deletes_is_not_gated(self):
         self._commit('src/app.ts', 'unreviewed')
@@ -463,6 +603,406 @@ class TestReviewGate(_RepoBase):
         self._commit('src/app.ts', 'unreviewed')
         self._write(_skill('playbook-off'))
         self.assertFalse(self._denied(self._push()))
+
+
+class TestReviewGateAcrossWorktrees(_RepoBase):
+    """The session's directory is the main checkout; the push runs in another
+    worktree of the same repository."""
+
+    def setUp(self):
+        super().setUp()
+        self.worktree = os.path.join(self.dir, 'wt')
+        self._git('worktree', 'add', '-q', '-b', 'feat', self.worktree)
+
+    def _commit_in(self, root: str, name: str, text: str):
+        path = os.path.join(root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+        self._git('add', '-A', cwd=root)
+        self._git('commit', '-q', '-m', text, cwd=root)
+
+    def _review(self):
+        self._write(_skill('engineering-code-review'))
+        self._push('git status')
+
+    def _push_from_worktree(self, env=None):
+        return self._push(f'cd {self.worktree} && git push origin feat', env=env)
+
+    def test_a_commit_in_the_worktree_after_the_review_is_denied(self):
+        self._commit_in(self.worktree, 'src/app.ts', 'reviewed')
+        self._review()
+        self._commit_in(self.worktree, 'src/extra.ts', 'sneaked in')
+        result = self._push_from_worktree()
+        self.assertTrue(self._denied(result))
+        self.assertIn('review-gate', _out(result).get('systemMessage', ''))
+
+    def test_the_reviewed_worktree_is_allowed_when_only_the_session_directory_moved(self):
+        self._commit_in(self.worktree, 'src/app.ts', 'reviewed')
+        self._review()
+        self._commit('src/unrelated.ts', 'made elsewhere')
+        self.assertFalse(self._denied(self._push_from_worktree()))
+
+    def test_a_branch_no_review_contains_is_denied_while_head_is_reviewed(self):
+        self._commit_in(self.worktree, 'src/app.ts', 'never reviewed')
+        self._git('worktree', 'remove', '--force', self.worktree)
+        self._commit('src/app.ts', 'reviewed')
+        self._review()
+        self.assertFalse(self._denied(self._push()))
+        self.assertTrue(self._denied(self._push('git push origin feat')))
+
+    def test_a_push_whose_directory_is_computed_fails_closed(self):
+        # The attribution and secret gates deny this push before the review
+        # gate runs, so the review gate is called on its own here.
+        self._commit_in(self.worktree, 'src/app.ts', 'reviewed')
+        self._review()
+        self.assertTrue(self._denied(self._push('cd "$WT" && git push origin feat')))
+        spec = importlib.util.spec_from_file_location('context_guard_review', _GUARD)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        guard._CWD = self.repo
+        for command in ('cd "$WT" && git push origin feat', 'git push origin "$BRANCH"',
+                        f'cd {self.dir}/not-yet && git push origin feat'):
+            verdict = guard._check_push_gate(self._state(), command)
+            self.assertTrue(verdict and verdict['block'], command)
+            self.assertIn('could not determine', verdict['msg'])
+        self.assertIsNone(guard._check_push_gate(
+            self._state(), f'cd {self.worktree} && git push origin feat'))
+
+
+class TestReviewCreditAcrossRepositories(_Base):
+    """The session runs in a folder that holds two repositories and is not one
+    itself, as a workspace with a back end and a front end side by side: the
+    review is credited to the repository whose code it read."""
+
+    def setUp(self):
+        super().setUp()
+        self.ws = os.path.join(self.dir, 'ws')
+        self.core = self._repo('core')
+        self.front = self._repo('front')
+        self._commit(self.core, 'unpushed core')
+        self._commit(self.front, 'unpushed front')
+
+    def _git(self, repo: str, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(('git', '-C', repo) + args, capture_output=True, text=True, check=False)
+
+    def _repo(self, name: str) -> str:
+        repo = os.path.join(self.ws, name)
+        remote = os.path.join(self.dir, f'{name}.git')
+        subprocess.run(('git', 'init', '-q', '--bare', remote), capture_output=True, check=True)
+        subprocess.run(('git', 'init', '-q', '-b', 'main', repo), capture_output=True, check=True)
+        self._git(repo, 'config', 'user.email', 'test@example.com')
+        self._git(repo, 'config', 'user.name', 'test')
+        self._commit(repo, 'first')
+        self._git(repo, 'remote', 'add', 'origin', remote)
+        self._git(repo, 'push', '-q', '-u', 'origin', 'main')
+        return repo
+
+    def _commit(self, repo: str, text: str) -> None:
+        with open(os.path.join(repo, f'{uuid.uuid4().hex[:6]}.ts'), 'w') as f:
+            f.write(text)
+        self._git(repo, 'add', '-A')
+        self._git(repo, 'commit', '-q', '-m', text)
+
+    def _post(self, tool_name: str, tool_input: dict, response: dict | None = None) -> None:
+        _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PostToolUse', 'cwd': self.ws,
+            'tool_name': tool_name, 'tool_input': tool_input, 'tool_response': response or {},
+        })
+
+    def _review(self) -> None:
+        self._post('Skill', {'skill': 'engineering-playbook:engineering-code-review'})
+
+    def _read(self, command: str, response: dict | None = None) -> None:
+        self._post('Bash', {'command': command}, response)
+
+    def _denied(self, repo: str) -> bool:
+        result = _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PreToolUse', 'cwd': self.ws,
+            'tool_name': 'Bash', 'tool_input': {'command': f'cd {repo} && git push origin main'},
+        })
+        return _out(result).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny'
+
+    def test_the_repository_whose_diff_the_review_read_is_credited(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        self.assertFalse(self._denied(self.core))
+
+    def test_a_sibling_repository_the_review_did_not_read_stays_denied(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        self.assertTrue(self._denied(self.front))
+
+    def test_both_repositories_read_are_both_credited(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD && cd {self.front} && git --no-pager diff HEAD~1')
+        self.assertFalse(self._denied(self.core))
+        self.assertFalse(self._denied(self.front))
+
+    def test_a_diff_read_before_the_review_is_not_credited(self):
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        time.sleep(0.01)
+        self._review()
+        self.assertTrue(self._denied(self.core))
+
+    def test_a_diff_read_in_a_later_turn_is_not_credited(self):
+        self._review()
+        time.sleep(0.01)
+        self._stop()
+        time.sleep(0.01)
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        self.assertTrue(self._denied(self.core))
+
+    def test_a_commit_after_the_read_is_not_credited(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD')
+        self._commit(self.core, 'sneaked in')
+        self.assertTrue(self._denied(self.core))
+
+    def test_git_log_with_patches_is_a_read(self):
+        self._review()
+        self._read(f'git -C {self.core} log -p origin/main..HEAD')
+        self.assertFalse(self._denied(self.core))
+
+    def test_git_log_without_patches_is_not_a_read(self):
+        self._review()
+        self._read(f'git -C {self.core} log --oneline origin/main..HEAD')
+        self.assertTrue(self._denied(self.core))
+
+    def test_a_failed_diff_is_not_a_read(self):
+        self._review()
+        self._read(f'git -C {self.core} diff origin/main...HEAD', {'is_error': True})
+        self.assertTrue(self._denied(self.core))
+
+    def test_a_diff_whose_directory_is_computed_is_not_a_read(self):
+        self._review()
+        self._read('git -C "$REPO" diff origin/main...HEAD')
+        self.assertTrue(self._denied(self.core))
+
+    def test_the_working_tree_each_review_read_is_credited_in_its_own_repository(self):
+        # The session runs in the folder above both, the review reads the
+        # uncommitted change of each, then both are committed.
+        for repo in (self.core, self.front):
+            with open(os.path.join(repo, 'change.ts'), 'w') as f:
+                f.write('reviewed before the commit')
+        self._review()
+        self._read(f'git -C {self.core} diff && git -C {self.front} diff HEAD')
+        for repo in (self.core, self.front):
+            self._git(repo, 'add', '-A')
+            self._git(repo, 'commit', '-q', '-m', 'reviewed change')
+        self.assertFalse(self._denied(self.core))
+        self.assertFalse(self._denied(self.front))
+
+
+class TestReviewCreditByContent(_RepoBase):
+    """The review reads the change before it is committed: the commit that
+    holds exactly what it read is covered, and what changed after the read is
+    not."""
+
+    def _post(self, tool_name: str, tool_input: dict) -> None:
+        _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PostToolUse', 'cwd': self.repo,
+            'tool_name': tool_name, 'tool_input': tool_input, 'tool_response': {},
+        })
+
+    def _review(self, read: str = 'git diff HEAD') -> None:
+        self._post('Skill', {'skill': 'engineering-playbook:engineering-code-review'})
+        self._post('Bash', {'command': read})
+
+    def _put(self, name: str, text: str) -> None:
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+
+    def _commit_staged(self, *paths: str) -> None:
+        self._git('add', '-A', '--', *paths)
+        self._git('commit', '-q', '-m', 'commit after the review')
+
+    def _message(self) -> str:
+        return _out(self._push()).get('systemMessage', '')
+
+    def test_a_commit_of_what_the_review_read_is_allowed(self):
+        self._put('README.md', 'changed')
+        self._put('src/new.ts', 'a new file the diff does not list')
+        self._review()
+        self._commit_staged('.')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_plain_diff_of_the_working_tree_is_a_read_of_it(self):
+        self._put('src/app.ts', 'new')
+        self._review('git diff --stat -- src')
+        self._commit_staged('.')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_committing_part_of_what_was_read_is_allowed(self):
+        self._put('src/app.ts', 'reviewed')
+        self._put('local.yml', 'a local setting that stays out of the commit')
+        self._review()
+        self._commit_staged('src')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_what_was_read_split_into_two_commits_is_allowed(self):
+        self._put('src/a.ts', 'first part')
+        self._put('src/b.ts', 'second part')
+        self._review()
+        self._commit_staged('src/a.ts')
+        self._commit_staged('src/b.ts')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_deletion_the_review_read_is_allowed(self):
+        os.remove(os.path.join(self.repo, 'README.md'))
+        self._review()
+        self._commit_staged('.')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_an_edit_after_the_read_is_denied_and_named(self):
+        self._put('src/app.ts', 'reviewed')
+        self._put('src/dto.ts', 'reviewed')
+        self._review()
+        self._put('src/dto.ts', 'changed after the review read it')
+        self._commit_staged('.')
+        message = self._message()
+        self.assertIn('review-gate', message)
+        self.assertIn('src/dto.ts', message)
+        self.assertNotIn('src/app.ts', message)
+        self.assertIn('-- src/dto.ts', message)
+
+    def test_a_review_of_only_the_files_changed_after_the_read_allows_the_push(self):
+        self._put('src/app.ts', 'reviewed')
+        self._review()
+        self._put('src/app.ts', 'changed after the review read it')
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+        self._stop()
+        time.sleep(0.01)
+        self._review('git diff origin/main...HEAD -- src/app.ts')
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_file_added_after_the_read_is_denied(self):
+        self._put('src/app.ts', 'reviewed')
+        self._review()
+        self._put('src/extra.ts', 'not there when the review read the tree')
+        self._commit_staged('.')
+        self.assertIn('src/extra.ts', self._message())
+
+    def test_a_read_of_commits_only_does_not_cover_the_working_tree(self):
+        self._commit('src/app.ts', 'committed before the review')
+        self._put('src/later.ts', 'uncommitted, not printed by the read')
+        self._review('git diff origin/main...HEAD')
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_read_of_the_index_does_not_cover_the_working_tree(self):
+        self._put('src/app.ts', 'unstaged')
+        self._review('git diff --cached')
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_read_before_the_review_does_not_cover_the_working_tree(self):
+        self._put('src/app.ts', 'read too early')
+        self._post('Bash', {'command': 'git diff HEAD'})
+        time.sleep(0.01)
+        self._post('Skill', {'skill': 'engineering-code-review'})
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_read_in_a_later_turn_does_not_cover_the_working_tree(self):
+        self._put('src/app.ts', 'read after the review turn ended')
+        self._post('Skill', {'skill': 'engineering-code-review'})
+        time.sleep(0.01)
+        self._stop()
+        time.sleep(0.01)
+        self._post('Bash', {'command': 'git diff HEAD'})
+        self._commit_staged('.')
+        self.assertTrue(self._denied(self._push()))
+
+    def test_a_merge_is_not_covered_by_content(self):
+        self._git('checkout', '-q', '-b', 'side')
+        self._commit('src/side.ts', 'never reviewed')
+        self._git('checkout', '-q', 'main')
+        self._put('src/app.ts', 'reviewed')
+        self._review()
+        self._commit_staged('.')
+        self._git('merge', '-q', '--no-ff', '--no-edit', 'side')
+        self.assertTrue(self._denied(self._push()))
+
+
+class TestReviewSeenAtTheSkillCall(_RepoBase):
+    """The assistant record carrying the Skill call is not on disk when the next
+    tool's hook reads the transcript, so the review is taken from the Skill
+    call's own PostToolUse."""
+
+    def test_a_push_right_after_the_review_is_allowed_on_the_first_try(self):
+        self._commit('src/app.ts', 'reviewed')
+        _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PostToolUse', 'cwd': self.repo,
+            'tool_name': 'Skill', 'tool_input': {'skill': 'engineering-code-review'}, 'tool_response': {},
+        })
+        self.assertFalse(self._denied(self._push()))
+
+    def test_a_commit_after_that_review_re_arms_the_gate(self):
+        self._commit('src/app.ts', 'reviewed')
+        _run(_GUARD, {
+            'session_id': self.session_id, 'transcript_path': self.transcript,
+            'hook_event_name': 'PostToolUse', 'cwd': self.repo,
+            'tool_name': 'Skill', 'tool_input': {'skill': 'engineering-code-review'}, 'tool_response': {},
+        })
+        self._commit('src/extra.ts', 'after the review')
+        self.assertTrue(self._denied(self._push()))
+
+
+class TestUnknownPushOption(_RepoBase):
+    """A push option outside the closed set the gates read is denied by each
+    of the three push gates, naming the word; the plain spelling passes."""
+
+    UNKNOWN = ('git push -fn origin main', 'git push --dr origin main',
+               'git push -n --no-dry-run origin main', 'git push -d --no-delete origin main',
+               'git push --mir origin', 'git push --future-flag origin main')
+
+    def _msg(self, result) -> str:
+        return _out(result).get('systemMessage', '')
+
+    def test_the_attribution_gate_denies_it(self):
+        self._commit('src/app.ts', 'clean')
+        self._write(_skill('engineering-code-review'))
+        for command in self.UNKNOWN:
+            with self.subTest(command=command):
+                result = self._push(command)
+                self.assertTrue(self._denied(result))
+                self.assertIn('[playbook:commit]', self._msg(result))
+                self.assertIn('does not read the option', self._msg(result))
+        self.assertFalse(self._denied(self._push('git push -q -n origin main')))
+
+    def test_the_secrets_gate_denies_it(self):
+        self._commit('src/app.ts', 'clean')
+        self._write(_skill('engineering-code-review'))
+        allow = {playbook_core.ATTRIBUTION_ALLOW_ENV: '1'}
+        result = self._push('git push --dr origin main', env=allow)
+        self.assertTrue(self._denied(result))
+        self.assertIn('[playbook:secrets]', self._msg(result))
+        self.assertIn('`--dr`', self._msg(result))
+        self.assertFalse(self._denied(self._push('git push --dry-run origin main', env=allow)))
+
+    def test_the_review_gate_denies_it(self):
+        # The attribution and secret gates deny first through the hook, so the
+        # review gate is called on its own.
+        self._commit('src/app.ts', 'unreviewed')
+        spec = importlib.util.spec_from_file_location('context_guard_review', _GUARD)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        guard._CWD = self.repo
+        for command in self.UNKNOWN:
+            with self.subTest(command=command):
+                verdict = guard._check_push_gate(self._state(), command)
+                self.assertTrue(verdict and verdict['block'])
+                self.assertIn('[playbook:review-gate]', verdict['msg'])
+                self.assertIn('does not read the option', verdict['msg'])
+        self.assertIsNone(guard._check_push_gate(self._state(), 'git push --dry-run origin main'))
 
 
 class TestAttributionInHistory(_RepoBase):
@@ -648,64 +1188,269 @@ class TestAttributionInHistory(_RepoBase):
         self.assertFalse(self._denied(self._pre_bash('git commit -F msg.txt')))
 
 
-# ── Destructive-command authorization ─────────────────────────────────────────
+# ── Destructive-command consent: the harness's permission dialog ──────────────
 
-class TestDestructiveAuthorization(_Base):
-    """The destructive guard blocked even when the user had just authorized the
-    command, with no way to say yes — which reads as arbitrary and intermittent,
-    because whether it fired depended only on how the command happened to be
-    spelled."""
+class TestDestructiveConsentByDialog(_Base):
+    """Consent to a destructive command is never text read from the
+    transcript. In Manual it is the user's answer to the harness's permission
+    dialog. In auto mode the command is denied and queued, and the user's own
+    words in the UserPromptSubmit payload approve it (2026-11-19: a dialog in
+    auto stopped a run the user had left to finish on its own). Everywhere
+    else the command is denied and handed to the user to run.
 
-    def _bash(self, command: str):
-        return _run(_GUARD, {
-            'session_id': self.session_id,
-            'transcript_path': self.transcript,
-            'hook_event_name': 'PreToolUse',
-            'cwd': self.dir,
-            'tool_name': 'Bash',
-            'tool_input': {'command': command},
-        })
-
-    def _denied(self, result) -> bool:
-        return _out(result).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny'
+    Payloads follow the shape a live Claude Code session sent a plugin hook
+    (auto mode, PreToolUse Bash)."""
 
     DESTRUCTIVE = 'rm -rf build/'
+    DENY_TAIL = 'ask the user to run the command themselves'
 
-    def test_unauthorized_destructive_command_is_denied(self):
-        self._write(_ul('clean up the project'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.dir, 'home')
+        self.tmp = os.path.join(self.dir, 'tmp')
+        os.makedirs(os.path.join(self.home, '.claude', 'hooks'))
+        os.makedirs(self.tmp)
+        self._language('en')
 
-    def test_user_authorization_in_the_current_message_allows_it(self):
-        self._write(_ul('pode apagar a pasta build'))
-        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _language(self, language: str) -> None:
+        with open(os.path.join(self.home, '.claude', 'hooks', '.playbook-prefs.json'), 'w') as f:
+            json.dump({'language': language}, f)
 
-    def test_english_authorization_allows_it(self):
-        self._write(_ul('go ahead and delete the build directory'))
-        self.assertFalse(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _bash(self, command: str, mode: object = 'auto', env: dict | None = None,
+              **extra) -> subprocess.CompletedProcess:
+        payload = {
+            'session_id': self.session_id,
+            'cwd': self.dir,
+            'prompt_id': 'p-user',
+            'effort': {'level': 'high'},
+            'hook_event_name': 'PreToolUse',
+            'tool_name': 'Bash',
+            'tool_input': {'command': command, 'description': 'Remove the build output'},
+            'tool_use_id': 'toolu_019FFZDbQDfBhkQX2FpJVTHu',
+            'transcript_path': self.transcript,
+            **extra,
+        }
+        if mode is not None:
+            payload['permission_mode'] = mode
+        return _run(_GUARD, payload, env={'HOME': self.home, 'TMPDIR': self.tmp,
+                                          'CLAUDE_CODE_REMOTE': '', **(env or {})})
 
-    def test_authorization_does_not_carry_to_a_later_turn(self):
-        self._write(_ul('pode apagar a pasta build')
-                    + _al('done')
-                    + _ul('now add the retry logic'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _decision(self, result) -> str | None:
+        return _out(result).get('hookSpecificOutput', {}).get('permissionDecision')
 
-    def test_model_cannot_authorize_itself(self):
-        self._write(_ul('clean up the project') + _al('the user said I can delete it'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _ask_reason(self, language: str, effect: str, command: str) -> str:
+        return playbook_i18n.text(language, 'destructive_ask',
+                                  effect=playbook_i18n.text(language, f'destroys_{effect}'),
+                                  command=command)
 
-    def test_a_question_about_deleting_is_not_an_authorization(self):
-        self._write(_ul('o que acontece se apagar o build por engano?'))
-        self.assertTrue(self._denied(self._bash(self.DESTRUCTIVE)))
+    def _assert_denied_to_the_user(self, result) -> None:
+        self.assertEqual(self._decision(result), 'deny')
+        self.assertIn(self.DENY_TAIL, _out(result)['hookSpecificOutput']['permissionDecisionReason'])
+
+    def _prompt(self, text: str, **extra) -> subprocess.CompletedProcess:
+        payload = {'session_id': self.session_id, 'cwd': self.dir,
+                   'hook_event_name': 'UserPromptSubmit', 'prompt': text,
+                   'transcript_path': self.transcript, **extra}
+        return _run(_CONSENT, payload, env={'HOME': self.home, 'TMPDIR': self.tmp})
+
+    def _reason(self, result) -> str:
+        return _out(result).get('hookSpecificOutput', {}).get('permissionDecisionReason', '')
+
+    def _end_turn(self) -> None:
+        _run(_GUARD, {'session_id': self.session_id, 'transcript_path': self.transcript,
+                      'hook_event_name': 'Stop', 'cwd': self.dir, 'stop_hook_active': True},
+             env={'HOME': self.home, 'TMPDIR': self.tmp})
+
+    def _queue(self, *commands: str) -> None:
+        for command in commands:
+            self._bash(command, 'auto')
+        self._end_turn()
+
+    def test_manual_asks_with_the_exact_shape(self):
+        self.assertEqual(_out(self._bash(self.DESTRUCTIVE, 'default')), {'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse',
+            'permissionDecision': 'ask',
+            'permissionDecisionReason': self._ask_reason('en', 'delete_tree', self.DESTRUCTIVE),
+        }})
+
+    def test_the_dialog_shows_the_part_that_destroys_not_the_start(self):
+        """Cut at 300 characters, the dialog showed a `git diff --stat` and hid
+        the `git checkout --` after it."""
+        command = ('git diff --stat ' + 'docs/module/notes.md ' * 20
+                   + "&& git stash drop 'stash@{1}' && npm test")
+        reason = self._reason(self._bash(command, 'default'))
+        self.assertIn("`git stash drop 'stash@{1}'`", reason)
+        self.assertNotIn('git diff --stat', reason)
+        self.assertIn(playbook_i18n.text('en', 'destructive_part'), reason)
+
+    def test_auto_denies_and_queues_without_a_dialog(self):
+        result = self._bash(self.DESTRUCTIVE, 'auto')
+        self.assertEqual(self._decision(result), 'deny')
+        reason = self._reason(result)
+        self.assertIn("queued for the user's approval as #1", reason)
+        self.assertIn('Do not stop or wait for it', reason)
+        self.assertIn('#2', self._reason(self._bash('git reset --hard', 'auto')))
+        self.assertIn('#1', self._reason(self._bash(self.DESTRUCTIVE, 'auto')))
+
+    def test_the_users_words_approve_the_queued_command_once(self):
+        self._queue(self.DESTRUCTIVE)
+        context = _out(self._prompt('ok, pode apagar'))['hookSpecificOutput']['additionalContext']
+        self.assertIn(f'#1 `{self.DESTRUCTIVE}`', context)
+        self.assertIsNone(self._decision(self._bash(self.DESTRUCTIVE, 'auto')))
+        again = self._bash(self.DESTRUCTIVE, 'auto')
+        self.assertEqual(self._decision(again), 'deny')
+        self.assertIn('#2', self._reason(again))
+
+    def test_words_before_the_turn_that_listed_it_ended_approve_nothing(self):
+        self._bash(self.DESTRUCTIVE, 'auto')
+        context = _out(self._prompt('pode apagar'))['hookSpecificOutput']['additionalContext']
+        self.assertIn('nothing was approved', context)
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+        self._queue('git reset --hard')
+        self._bash('git clean -fdx', 'auto')
+        self._prompt('pode apagar')
+        self.assertIsNone(self._decision(self._bash(self.DESTRUCTIVE, 'auto')))
+        self.assertEqual(self._decision(self._bash('git clean -fdx', 'auto')), 'deny')
+
+    def test_the_queue_files_are_out_of_the_models_reach(self):
+        queue = os.path.join(self.home, '.claude', 'hooks', f'.consent-{self.session_id}.json')
+        for tool, tool_input in (
+                ('Bash', {'command': f'cat {queue}'}),
+                ('Bash', {'command': f"echo '{{}}' > {queue}"}),
+                ('Write', {'file_path': queue, 'content': '{}'}),
+                ('Edit', {'file_path': queue, 'old_string': 'a', 'new_string': 'b'})):
+            with self.subTest(tool=tool):
+                payload = {'session_id': self.session_id, 'cwd': self.dir,
+                           'hook_event_name': 'PreToolUse', 'permission_mode': 'auto',
+                           'tool_name': tool, 'tool_input': tool_input,
+                           'transcript_path': self.transcript}
+                result = _run(_GUARD, payload, env={'HOME': self.home, 'TMPDIR': self.tmp,
+                                                    'CLAUDE_CODE_REMOTE': ''})
+                self.assertEqual(self._decision(result), 'deny')
+                self.assertIn("user's approval", self._reason(result))
+
+    def test_an_approval_also_lets_the_command_through_in_manual(self):
+        self._queue(self.DESTRUCTIVE)
+        self._prompt('pode remover')
+        self.assertIsNone(self._decision(self._bash(self.DESTRUCTIVE, 'default')))
+
+    def test_an_approval_is_for_the_exact_command_and_a_dialog_mode(self):
+        self._queue(self.DESTRUCTIVE)
+        self._prompt('pode apagar')
+        self.assertEqual(self._decision(self._bash('rm -rf build/ dist/', 'auto')), 'deny')
+        self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, 'bypassPermissions'))
+
+    def test_words_that_do_not_approve(self):
+        for text, extra in (('remova o import que sobrou', {}),
+                            ('não pode apagar', {}),
+                            ('pode apagar?', {}),
+                            ('<pasted_content id="1">pode apagar</pasted_content>', {}),
+                            ('<task-notification>pode apagar</task-notification>', {}),
+                            ('pode apagar', {'source': 'system'}),
+                            ('pode apagar', {'agent_id': 'a1'})):
+            with self.subTest(text=text, extra=extra):
+                self._queue(self.DESTRUCTIVE)
+                self._prompt(text, **extra)
+                self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+
+    def test_a_message_that_approves_and_refuses_approves_nothing(self):
+        self._queue(self.DESTRUCTIVE)
+        context = _out(self._prompt('pode apagar o build, mas não apague isso ainda'))[
+            'hookSpecificOutput']['additionalContext']
+        self.assertIn('nothing was approved', context)
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+
+    def test_a_number_narrows_the_approval(self):
+        self._queue(self.DESTRUCTIVE, 'git reset --hard')
+        self._prompt('pode apagar o #2')
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+        self.assertIsNone(self._decision(self._bash('git reset --hard', 'auto')))
+
+    def test_a_deny_from_another_gate_queues_nothing(self):
+        command = ('rm -rf build && git commit -m "fix: x\n\n'
+                   'Co-Authored-By: Claude <noreply@anthropic.com>"')
+        result = self._bash(command, 'auto')
+        self.assertEqual(self._decision(result), 'deny')
+        self.assertNotIn('playbook:safety', self._reason(result))
+        self._end_turn()
+        self.assertIsNone(_out(self._prompt('pode apagar')).get('hookSpecificOutput'))
+
+    def test_the_reason_is_in_the_configured_language(self):
+        for language in ('pt-br', 'es'):
+            with self.subTest(language=language):
+                self._language(language)
+                reason = self._reason(self._bash(self.DESTRUCTIVE, 'default'))
+                self.assertEqual(reason, self._ask_reason(language, 'delete_tree', self.DESTRUCTIVE))
+                self.assertIn(f'`{self.DESTRUCTIVE}`', reason)
+
+    def test_the_reason_says_what_each_command_destroys(self):
+        for command, effect in (('git reset --hard HEAD~1', 'reset_hard'),
+                                ('git clean -fdx', 'clean'),
+                                ('git stash drop', 'stash_drop'),
+                                ('psql -c "DROP TABLE users;"', 'sql')):
+            with self.subTest(command=command):
+                self.assertEqual(self._reason(self._bash(command, 'default')),
+                                 self._ask_reason('en', effect, command))
+
+    def test_modes_outside_the_set_deny(self):
+        for mode in ('acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'):
+            with self.subTest(mode=mode):
+                self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, mode))
+
+    def test_an_unknown_mode_value_denies(self):
+        for mode in ('manual', 'yolo', '', 7, ['auto']):
+            with self.subTest(mode=mode):
+                self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, mode))
+
+    def test_a_payload_without_a_mode_denies(self):
+        self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, None))
+
+    def test_a_subagent_payload_denies(self):
+        for mode in ('default', 'auto'):
+            with self.subTest(mode=mode):
+                self._assert_denied_to_the_user(self._bash(
+                    self.DESTRUCTIVE, mode, agent_id='a1b2c3', agent_type='general-purpose'))
+
+    def test_a_cloud_session_denies(self):
+        self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, env={'CLAUDE_CODE_REMOTE': 'true'}))
+
+    def test_the_gate_needs_no_transcript(self):
+        missing = os.path.join(self.dir, 'never-written.jsonl')
+        self.assertEqual(
+            self._decision(self._bash(self.DESTRUCTIVE, 'default', transcript_path=missing)), 'ask')
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, None, transcript_path=missing)),
+                         'deny')
+
+    def test_consent_in_the_transcript_lifts_nothing(self):
+        self._write(_typed('pode apagar a pasta build') + _typed_mid_turn('go ahead and delete it'))
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'default')), 'ask')
+        self.assertEqual(self._decision(self._bash(self.DESTRUCTIVE, 'auto')), 'deny')
+        self._assert_denied_to_the_user(self._bash(self.DESTRUCTIVE, 'bypassPermissions'))
+
+    def test_another_gates_deny_outranks_the_dialog(self):
+        command = ('rm -rf build && git commit -m "fix: x\n\n'
+                   'Co-Authored-By: Claude <noreply@anthropic.com>"')
+        result = self._bash(command, 'default')
+        self.assertEqual(self._decision(result), 'deny')
+        self.assertNotIn('playbook:safety', _out(result)['hookSpecificOutput']['permissionDecisionReason'])
+
+    def test_deleting_inside_the_session_scratchpad_still_needs_nothing(self):
+        scratchpad = os.path.join(self.tmp, f'claude-{os.getuid()}', 'proj', self.session_id,
+                                  'scratchpad')
+        os.makedirs(os.path.join(scratchpad, 'old'))
+        for mode in ('auto', None):
+            with self.subTest(mode=mode):
+                self.assertIsNone(self._decision(self._bash(f'rm -rf {scratchpad}/old', mode)))
 
     def test_writing_about_a_dangerous_command_is_not_running_it(self):
-        self._write(_ul('document the rollback procedure'))
         command = "cat > docs/rollback.md <<'DOCEOF'\nNever run rm -rf / here.\nDOCEOF"
-        self.assertFalse(self._denied(self._bash(command)))
+        self.assertIsNone(self._decision(self._bash(command)))
 
     def test_a_shell_heredoc_is_still_inspected(self):
-        self._write(_ul('clean up the project'))
         command = "bash <<'SHEOF'\nrm -rf /tmp/whatever\nSHEOF"
-        self.assertTrue(self._denied(self._bash(command)))
+        self.assertEqual(self._decision(self._bash(command, 'default')), 'ask')
+        self.assertEqual(self._decision(self._bash(command, 'auto')), 'deny')
+        self._assert_denied_to_the_user(self._bash(command, 'dontAsk'))
 
 
 # ── Review findings feed the learn loop ───────────────────────────────────────
@@ -726,6 +1471,17 @@ class TestReviewFeedsLearning(_Base):
         result = self._stop()
         self.assertEqual(_out(result).get('decision'), 'block')
         self.assertIn('playbook:learn', _out(result).get('reason', ''))
+
+    def test_findings_only_in_the_message_that_ended_the_turn_arm_the_gate(self):
+        self._write(_ul('review and push'))
+        self._set_state(review_turn=True, reviewed_head='abc1234')
+        result = self._stop(final=self.REVIEW_OUTPUT)
+        self.assertIn('playbook:learn', _out(result).get('reason', ''))
+
+    def test_findings_on_disk_and_in_the_event_are_counted_once(self):
+        self._write(_ul('review and push') + _al(self.REVIEW_OUTPUT))
+        self._set_state(review_turn=True, reviewed_head='abc1234')
+        self.assertIn('reported 2 ', _out(self._stop(final=self.REVIEW_OUTPUT)).get('reason', ''))
 
     def test_findings_are_journaled_for_engineering_learn(self):
         self._write(_ul('review and push') + _al(self.REVIEW_OUTPUT))

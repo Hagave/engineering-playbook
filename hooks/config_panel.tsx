@@ -20,13 +20,15 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ConfigSetting, ConfigSnapshot, MenuScreen, PanelNotice, PanelText } from './config_panel_state'
+import { panelPrompt, registerTemporaryData } from './temporary_data'
 
 const COMMAND = 'playbook-config'
 const EXIT = '0'
 const DIGIT_RE = /^\s*(\d)\s*$/
 const ENGLISH = 'en'
-// Settings shown on the main screen: with Status, Learn, red-lab-playbook and
-// Diff panel after them, five fill the digits 1-9.
+// Setting rows on the main screen (a group of settings is one row): with
+// Status, Learn, red-lab-playbook and Diff panel after them, five fill the
+// digits 1-9.
 const MAX_SETTING_ROWS = 5
 // A gate's denial starts with its tag, sometimes behind the engine's own
 // prefix; a command whose output merely mentions a tag is not a denial.
@@ -35,7 +37,7 @@ const GATE_TAG_RE = /^(?:PreToolUse:\S+ hook error: )?\[playbook:([\w-]+)\]/
 // Change the tag when a stored value's fields change: an earlier version's
 // value is then read as the initial one instead of a wrong shape.
 const snapshot = atom({ plugin: 'engineering-playbook', key: 'snapshot' } as const, null, {
-  shape: 'snapshot-2',
+  shape: 'snapshot-4',
 })
 const notice = atom({ plugin: 'engineering-playbook', key: 'notice' } as const, null, {
   shape: 'notice-1',
@@ -43,8 +45,9 @@ const notice = atom({ plugin: 'engineering-playbook', key: 'notice' } as const, 
 const filterReport = atom({ plugin: 'engineering-playbook', key: 'filterReport' } as const, null, {
   shape: 'filter-report-1',
 })
+// temporary_data.tsx reads the same value: change the shape in both files.
 const screen = atom({ plugin: 'engineering-playbook', key: 'screen' } as const, null, {
-  shape: 'screen-2',
+  shape: 'screen-3',
 })
 
 // Status, Learn and the red-lab-playbook steps need the model: the session's
@@ -57,6 +60,11 @@ const screen = atom({ plugin: 'engineering-playbook', key: 'screen' } as const, 
 // language to answer in.
 const ASK_STATUS = 'Show the engineering playbook session status (playbook-config, Status).'
 const ASK_LEARN = 'Run the engineering-learn skill for this project (playbook-config, Learn).'
+
+// A typed value cannot be a button: the model asks for the number and runs `set`.
+function askCustom(key: string): string {
+  return `Set the engineering playbook setting ${key} to a custom value (playbook-config, Settings): ask me for the value, then apply it.`
+}
 
 type LabStep = 'setup' | 'passive' | 'active' | 'sqlmap' | 'uninstall'
 
@@ -76,6 +84,7 @@ function askLab(step: LabStep): string {
 // functions, so one switch (`run`) turns an action into calls.
 type Action =
   | { kind: 'open'; key: string }
+  | { kind: 'group'; group: string }
   | { kind: 'set'; key: string; value: string }
   | { kind: 'lab' }
   | { kind: 'back' }
@@ -96,10 +105,11 @@ function isSnapshot(value: unknown): value is ConfigSnapshot {
   if (typeof value !== 'object' || value === null) {
     return false
   }
-  const fields = value as { settings?: unknown; ui?: unknown; language_name?: unknown }
+  const fields = value as { settings?: unknown; groups?: unknown; ui?: unknown; language_name?: unknown }
 
   return (
     Array.isArray(fields.settings) &&
+    Array.isArray(fields.groups) &&
     typeof fields.ui === 'object' &&
     fields.ui !== null &&
     typeof fields.language_name === 'string'
@@ -180,8 +190,34 @@ function heading(current: MenuScreen, loaded: ConfigSnapshot): { title: string; 
       return { title: shown.label, help: shown.help }
     }
   }
+  if (current.kind === 'group') {
+    const group = loaded.groups.find((one): boolean => one.key === current.group)
+    if (group) {
+      return { title: group.label, help: group.help }
+    }
+  }
 
   return { title: ui.title, help: undefined }
+}
+
+// The main screen's setting rows: a setting of its own, or one row per group,
+// placed where the group's first setting comes.
+function mainRows(loaded: ConfigSnapshot): { label: string; action: Action }[] {
+  const rows: { label: string; action: Action }[] = []
+  const placed = new Set<string>()
+  for (const setting of loaded.settings) {
+    if (setting.group === '') {
+      rows.push({ label: settingLine(setting, loaded.ui), action: { kind: 'open', key: setting.key } })
+      continue
+    }
+    const group = loaded.groups.find((one): boolean => one.key === setting.group)
+    if (group && !placed.has(group.key)) {
+      placed.add(group.key)
+      rows.push({ label: group.label, action: { kind: 'group', group: group.key } })
+    }
+  }
+
+  return rows
 }
 
 function noEntry(ui: PanelText, digit: string): string {
@@ -205,8 +241,29 @@ function entries(current: MenuScreen, loaded: ConfigSnapshot): Entry[] {
         action: { kind: 'set', key: setting.key, value: choice.value },
       }),
     )
+    if (setting.custom) {
+      picks.push({
+        digit: String(picks.length + 1),
+        label: ui.custom,
+        action: { kind: 'ask', text: askText(askCustom(setting.key), loaded) },
+      })
+    }
 
     return [...picks, back]
+  }
+  if (current.kind === 'group') {
+    const members: Entry[] = settings
+      .filter((setting): boolean => setting.group === current.group)
+      .slice(0, 9)
+      .map(
+        (setting, index): Entry => ({
+          digit: String(index + 1),
+          label: settingLine(setting, ui),
+          action: { kind: 'open', key: setting.key },
+        }),
+      )
+
+    return [...members, back]
   }
   if (current.kind === 'lab') {
     const steps: Entry[] = LAB_STEPS.map(
@@ -219,13 +276,9 @@ function entries(current: MenuScreen, loaded: ConfigSnapshot): Entry[] {
 
     return [...steps, back]
   }
-  const rows: Entry[] = settings.slice(0, MAX_SETTING_ROWS).map(
-    (setting, index): Entry => ({
-      digit: String(index + 1),
-      label: settingLine(setting, ui),
-      action: { kind: 'open', key: setting.key },
-    }),
-  )
+  const rows: Entry[] = mainRows(loaded)
+    .slice(0, MAX_SETTING_ROWS)
+    .map((row, index): Entry => ({ digit: String(index + 1), ...row }))
   const after = rows.length + 1
 
   return [
@@ -242,6 +295,9 @@ async function run($: EngineInterface, action: Action): Promise<void> {
   switch (action.kind) {
     case 'open':
       await update($, screen, (): MenuScreen => ({ kind: 'setting', key: action.key }))
+      return
+    case 'group':
+      await update($, screen, (): MenuScreen => ({ kind: 'group', group: action.group }))
       return
     case 'set':
       await apply($, action.key, action.value)
@@ -315,9 +371,12 @@ export const register: Register = on => {
   // sent closes the menu and goes on as typed, so a later digit meant for the
   // model (an answer to its numbered question) is never taken by a forgotten
   // menu.
+  // The Temporary data panel answers the same way while it is open.
   on('prompt.submit', async ($, e, next) => {
     if ((await read($, screen)) === null) {
-      return next(e)
+      const panel = await panelPrompt($, e.text, e.command !== undefined)
+
+      return panel === 'pass' ? await next(e) : panel
     }
     const digit = DIGIT_RE.exec(e.text)?.[1]
     if (digit === undefined || e.command !== undefined) {
@@ -391,4 +450,6 @@ export const register: Register = on => {
       </Box>
     )
   })
+
+  registerTemporaryData(on)
 }

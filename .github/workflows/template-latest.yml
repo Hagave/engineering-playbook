@@ -1,0 +1,79 @@
+name: template-latest
+
+# The playbook follows the current release of every package its code templates
+# use: the LTS line where one is published, else the `latest` tag when it is
+# stable, else the newest stable release ("Dependency versions" in
+# engineering-governance). Each template's real test resolves what a new
+# project installs today (no pinned versions) and runs the template; when a
+# release breaks one, this opens an issue, or comments on the open one, with
+# the versions it resolved.
+# Scheduled workflows run from the default branch, so this checks the skills
+# users install.
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: template-latest
+  cancel-in-progress: false
+
+jobs:
+  templates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - tests.e2e.test_nest_security_template
+          - tests.e2e.test_nest_config_template
+          - tests.e2e.test_docker_node_template
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 'lts/*'
+      - name: Real run against the latest releases
+        id: run
+        env:
+          PLAYBOOK_TEMPLATE_IT: '1'
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -o pipefail
+          python3 -m unittest "$SUITE" -v 2>&1 | tee run.log
+      - name: Open or update the issue
+        if: failure() && steps.run.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SUITE: ${{ matrix.suite }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Template broken on latest: $SUITE"
+          {
+            echo "The scheduled real run of \`$SUITE\` failed against the latest package releases."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '```'
+            tail -n 120 run.log
+            echo '```'
+          } > body.md
+          number=$(gh issue list --state open --search "in:title $title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | first | .number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

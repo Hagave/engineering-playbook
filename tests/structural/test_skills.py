@@ -191,13 +191,15 @@ class TestGovernanceChanges(unittest.TestCase):
         self.assertIsNotNone(m)
         section = m.group(1)
         for skill in [
-            'engineering-typescript',
             'engineering-security',
             'engineering-concurrency',
             'engineering-error-handling',
             'engineering-performance',
         ]:
             self.assertIn(skill, section, f'Companion skill missing: {skill}')
+        self.assertIn('the language opt-in for the code you write', section)
+        for lang_skill in ('engineering-typescript', 'engineering-go', 'engineering-java'):
+            self.assertIn(lang_skill, section)
 
     def test_spec_gate_section_exists(self):
         self.assertIn('## Spec gate', self.content)
@@ -216,6 +218,163 @@ class TestGovernanceChanges(unittest.TestCase):
         m = re.search(r'## Spec gate(.*?)(?=\n## |\Z)', self.content, re.DOTALL)
         self.assertIsNotNone(m)
         self.assertIn('single-line fix', m.group(1))
+
+
+class TestDecisionOwnership(unittest.TestCase):
+    """One rule decides when to ask: who owns the decision. It replaced a list of
+    stop triggers repeated in every skill, which made a model stop for
+    confirmation even when the request delegated the decisions, and never told it
+    that a delegation does not cover changing what the request fixed."""
+
+    def setUp(self):
+        self.governance = read_skill('engineering-governance')
+        m = re.search(r'## Decision ownership(.*?)(?=\n## |\Z)', self.governance, re.DOTALL)
+        self.section = m.group(1) if m else ''
+
+    def test_governance_owns_the_rule(self):
+        self.assertTrue(self.section, 'engineering-governance has no "## Decision ownership"')
+        self.assertNotIn('## When to stop and ask', self.governance)
+
+    def test_every_decision_has_one_of_three_owners(self):
+        for owner in ('**Fixed:**', '**Delegated:**', '**Open:**'):
+            self.assertIn(owner, self.section)
+
+    def test_delegation_is_the_confirmation(self):
+        self.assertIn('the delegation is that confirmation', self.section)
+
+    def test_delegation_never_covers_a_fixed_decision(self):
+        self.assertIn('Changing it is never your decision, whatever the request delegates', self.section)
+        self.assertIn('never a fixed one', self.section)
+
+    def test_delegation_never_lifts_a_hook_gate(self):
+        self.assertIn('A delegation never lifts a hook gate', self.section)
+
+    def test_rule_governs_every_skill_stop_step(self):
+        self.assertIn('Any step in a skill that stops to ask or waits for confirmation', self.section)
+
+    def test_spec_gate_accepts_delegated_decisions(self):
+        m = re.search(r'## Spec gate(.*?)(?=\n## |\Z)', self.governance, re.DOTALL)
+        self.assertIn('[SPEC CONFIRMED] — decisions delegated by the request.', m.group(1))
+
+    def test_shared_blocks_point_to_the_rule(self):
+        for path in all_skill_files():
+            with open(path) as f:
+                content = f.read()
+            for block_name in ('RULE-ANCHOR', 'OUTPUT-DISCIPLINE'):
+                block = extract_block(content, block_name)
+                if not block:
+                    continue
+                with self.subTest(skill=skill_name(path), block=block_name):
+                    self.assertNotIn('stop and confirm', block)
+                    self.assertNotIn('When ambiguous: stop', block)
+                    self.assertIn('delegat', block)
+
+    def test_no_skill_keeps_an_unconditional_stop_trigger(self):
+        retired = ('When ambiguous: stop', 'Stop and ask when ambiguous', 'stop-and-ask protocol',
+                   'UNTIL THE USER HAS ANSWERED ALL 13', 'mark it explicitly and ask before acting on it')
+        for path in all_skill_files():
+            with open(path) as f:
+                content = f.read()
+            for phrase in retired:
+                with self.subTest(skill=skill_name(path), phrase=phrase):
+                    self.assertNotIn(phrase, content)
+
+    def test_implement_and_scaffold_gates_accept_a_delegation(self):
+        implement = read_skill('engineering-implement')
+        stop = re.search(r'## STOP — Spec confirmation required(.*?)(?=\n## |\Z)', implement, re.DOTALL)
+        self.assertIn('A delegation is permission the user stated', stop.group(1))
+        scaffold = read_skill('engineering-scaffold')
+        self.assertIn('ALL 13 ROWS HAVE AN ANSWER FROM THEIR OWNER', scaffold)
+        self.assertIn('When no row is open, show the filled table and proceed', scaffold)
+
+    def test_antigravity_adapter_carries_the_rule(self):
+        path = os.path.join(_ROOT, 'adapters', 'antigravity', 'AGENTS.template.md')
+        with open(path) as f:
+            template = f.read()
+        self.assertIn('**Decision ownership.**', template)
+        self.assertNotIn('Stop and ask when ambiguous', template)
+        self.assertNotIn('state it and ask before acting.', template)
+
+
+class TestObligations(unittest.TestCase):
+    """The defects the obligations table targets (a limit shared by two flows,
+    an input checked only for format) were caught by every model when it was
+    asked to review a snippet, and missed while implementing. The table makes
+    the question part of the work: one row per state written and per input
+    accepted, each with its proof."""
+
+    def setUp(self):
+        governance = read_skill('engineering-governance')
+        m = re.search(r'## Obligations(.*?)(?=\n## |\Z)', governance, re.DOTALL)
+        self.section = m.group(1) if m else ''
+
+    def test_governance_owns_the_table(self):
+        self.assertTrue(self.section, 'engineering-governance has no "## Obligations"')
+
+    def test_stored_state_row_requires_every_writer(self):
+        self.assertIn('writes a stored state', self.section)
+        self.assertIn('every writer of it in the codebase, existing and new', self.section)
+        self.assertIn('runs the writers interleaved', self.section)
+
+    def test_input_row_is_an_allowlist_domain(self):
+        self.assertIn('accepts an input', self.section)
+        self.assertIn('valid domain as an allowlist', self.section)
+        self.assertIn('relation to now and to the state it refers to', self.section)
+        self.assertIn('read from its current source, never from memory', self.section)
+        self.assertIn('each boundary of the domain, on both sides', self.section)
+
+    def test_invariants_belong_to_the_state(self):
+        self.assertIn('Invariants belong to the state, not to the flow', self.section)
+
+    def test_every_consumer_points_to_the_table(self):
+        for skill in ('engineering-implement', 'engineering-security', 'engineering-testing',
+                      'engineering-code-review'):
+            with self.subTest(skill=skill):
+                self.assertIn('Obligations in `engineering-governance`'
+                              if skill != 'engineering-implement'
+                              else 'obligations table from `engineering-governance`',
+                              read_skill(skill))
+
+    def test_security_drops_the_format_only_rule(self):
+        security = read_skill('engineering-security')
+        self.assertNotIn('Validate format and type before processing', security)
+        fiche_path = os.path.join(_SKILLS_DIR, 'engineering-security', 'references', 'business-logic.md')
+        with open(fiche_path) as f:
+            fiche = f.read()
+        self.assertNotIn('- Numeric edges:', fiche)
+        self.assertIn('A rule is an invariant of the stored state, not of the flow', fiche)
+
+    def test_cost_row_bounds_work_by_the_change(self):
+        self.assertIn('runs work over data', self.section)
+        self.assertIn('never by the total size of a table, an aggregate or a response', self.section)
+        performance = read_skill('engineering-performance')
+        self.assertIn('## Cost bound', performance)
+        self.assertIn('deleting its children and inserting them all again', performance)
+
+    def test_declaration_row_covers_consumers_and_varying_inputs(self):
+        self.assertIn('everything declared has a consumer in the change', self.section)
+        self.assertIn('reaches the domain and application layers as an input', self.section)
+        self.assertIn('may come from the native runtime', self.section)
+        self.assertIn('Nothing declared without a consumer', read_skill('engineering-code-economy'))
+        self.assertIn('enters as an input: a parameter or a port', read_skill('engineering-architecture'))
+
+    def test_review_checks_every_row(self):
+        review = read_skill('engineering-code-review')
+        m = re.search(r'### Obligations(.*?)(?=\n### |\Z)', review, re.DOTALL)
+        self.assertIsNotNone(m)
+        for phrase in ('whose other writers were not found', 'no declared domain',
+                       'cost grows with the total size', 'read directly in the domain or application layer',
+                       'declared with no consumer'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, m.group(1))
+
+    def test_audit_validation_asks_for_the_domain(self):
+        import json
+        path = os.path.join(_SKILLS_DIR, 'engineering-code-review', 'references', 'audit-dimensions.json')
+        with open(path) as f:
+            dims = {d['id']: d for d in json.load(f)['dimensions']}
+        self.assertIn('valid domain', dims['validation']['question'])
+        self.assertIn('invariants belong to the stored state', dims['concurrency']['question'])
 
 
 # ── 5. engineering-implement changes ──────────────────────────────────────────
@@ -253,9 +412,9 @@ class TestImplementChanges(unittest.TestCase):
 
     def test_ambiguities_resolved_before_stop(self):
         """F2 fix: ambiguity identification (Step 3) must come before the STOP gate."""
-        ambiguities = self.content.find('## Step 3 — Identify ambiguities')
+        ambiguities = self.content.find('## Step 3 — Settle who owns each decision')
         stop = self.content.find('## STOP')
-        self.assertGreater(ambiguities, -1, 'Step 3 — Identify ambiguities not found')
+        self.assertGreater(ambiguities, -1, 'Step 3 — Settle who owns each decision not found')
         self.assertGreater(stop, ambiguities, 'STOP must come after ambiguity resolution')
 
     def test_step2_anchors_companion_skills_before_step3(self):

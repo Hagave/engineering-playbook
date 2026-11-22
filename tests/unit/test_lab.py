@@ -9,6 +9,7 @@ PLAYBOOK_LAB_IT=1 (it downloads the scanner image).
 import copy
 import importlib.util
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -55,8 +56,8 @@ class _LabCase(unittest.TestCase):
         return lab.build_lab_config(copy.deepcopy(base or BASE), self.target,
                                     'redlab-shop', self.report_dir, 2)
 
-    def problems(self, config, allow_bind=False):
-        return lab.validate_lab_config(config, 'app', self.report_dir, allow_bind)
+    def problems(self, config, project_root='/work/shop'):
+        return lab.validate_lab_config(config, 'app', self.report_dir, project_root)
 
 
 class TestTarget(unittest.TestCase):
@@ -213,7 +214,7 @@ class TestSqlmap(_LabCase):
 
     def test_the_sqlmap_scanner_is_as_isolated_as_the_zap_one(self):
         config = self.build_sqlmap()
-        self.assertEqual(lab.validate_lab_config(config, 'app', self.report_dir, False,
+        self.assertEqual(lab.validate_lab_config(config, 'app', self.report_dir, '/work/shop',
                                                  lab.SQLMAP_IMAGE), [])
         scanner = config['services'][lab.SCANNER]
         self.assertEqual(scanner['cap_drop'], ['ALL'])
@@ -223,7 +224,8 @@ class TestSqlmap(_LabCase):
     def test_a_tampered_sqlmap_image_is_refused(self):
         config = self.build_sqlmap()
         config['services'][lab.SCANNER]['image'] = 'sqlmap:evil'
-        problems = lab.validate_lab_config(config, 'app', self.report_dir, False, lab.SQLMAP_IMAGE)
+        problems = lab.validate_lab_config(config, 'app', self.report_dir, '/work/shop',
+                                           lab.SQLMAP_IMAGE)
         self.assertTrue(any('pinned' in p for p in problems), problems)
 
     def test_results_csv_lists_injectable_parameters(self):
@@ -264,9 +266,9 @@ class TestSqlmap(_LabCase):
 
         args = lab.argparse.Namespace(
             service='app', port=8080, path='/', minutes=1, startup_seconds=0,
-            project_dir='.', compose_file=None, allow_bind_mounts=False, active=False,
+            project_dir='.', compose_file=['compose.yml'],  active=False,
             active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=True, endpoint='/items?id=1',
-            level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC)
+            level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
@@ -360,32 +362,77 @@ class TestValidation(_LabCase):
         config['services']['postgres']['network_mode'] = 'host'
         self.assertRefused(config, 'network_mode')
 
-    def test_bind_mounts_are_refused_unless_allowed(self):
+    def test_a_writable_bind_is_dropped_so_the_lab_never_writes_to_the_host(self):
+        """A read-write bind would write to the developer's files. build drops
+        it (the image's own content stands in), so the config that starts holds
+        no such mount and validate passes."""
         base = copy.deepcopy(BASE)
         base['services']['postgres']['volumes'] = [
             {'type': 'bind', 'source': '/work/shop/data', 'target': '/var/lib/postgresql/data'}]
         config = self.build(base)
-        problems = self.problems(config)
-        self.assertTrue(any('/work/shop/data' in p and '--allow-bind-mounts' in p
-                            for p in problems), problems)
-        self.assertEqual(self.problems(config, allow_bind=True), [])
+        self.assertEqual(lab.host_mounts(config), [])
+        self.assertEqual(self.problems(config), [])
 
-    def test_named_volume_bound_to_a_host_path_counts_as_a_bind_mount(self):
+    def test_a_writable_bind_reaching_validation_is_refused(self):
+        """build should have dropped it; if an unresolved form reaches validate,
+        it is refused rather than run."""
+        config = self.build()
+        config['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/work/shop/data', 'target': '/var/lib/postgresql/data'}]
+        self.assertRefused(config, 'is writable')
+
+    def test_a_read_only_bind_inside_the_project_is_kept_and_allowed(self):
+        base = copy.deepcopy(BASE)
+        base['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/work/shop/init', 'target': '/docker-entrypoint-initdb.d',
+             'read_only': True}]
+        config = self.build(base)
+        self.assertEqual([m.target for m in lab.host_mounts(config)],
+                         ['/docker-entrypoint-initdb.d'])
+        self.assertEqual(self.problems(config), [])
+
+    def test_a_read_only_bind_outside_the_project_is_refused(self):
+        base = copy.deepcopy(BASE)
+        base['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/etc/ssl', 'target': '/etc/ssl', 'read_only': True}]
+        config = self.build(base)
+        self.assertRefused(config, '/etc/ssl')
+        self.assertTrue(any('outside the project' in p for p in self.problems(config)))
+
+    def test_a_sibling_path_is_not_inside_the_project(self):
+        """`/work/shop-data` shares a prefix with `/work/shop` but is not under
+        it; the separator check must not treat it as inside."""
+        base = copy.deepcopy(BASE)
+        base['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/work/shop-data', 'target': '/data', 'read_only': True}]
+        config = self.build(base)
+        self.assertRefused(config, '/work/shop-data')
+
+    def test_a_writable_host_bound_volume_becomes_a_fresh_volume(self):
         # `docker compose config` keeps it as `type: volume`; only driver_opts shows the host path.
         base = copy.deepcopy(BASE)
         base['volumes']['pgdata']['driver_opts'] = {
             'type': 'none', 'o': 'bind', 'device': '/home/dev/pgdata'}
         config = self.build(base)
-        problems = self.problems(config)
-        self.assertTrue(any('/home/dev/pgdata' in p and '--allow-bind-mounts' in p
-                            for p in problems), problems)
-        self.assertEqual(self.problems(config, allow_bind=True), [])
+        self.assertNotIn('driver_opts', config['volumes']['pgdata'])
+        self.assertEqual(lab.host_mounts(config), [])
+        self.assertEqual(self.problems(config), [])
+
+    def test_a_read_only_host_bound_volume_inside_the_project_is_kept(self):
+        base = copy.deepcopy(BASE)
+        base['volumes']['pgdata']['driver_opts'] = {
+            'type': 'none', 'o': 'bind', 'device': '/work/shop/seed'}
+        base['services']['postgres']['volumes'][0]['read_only'] = True
+        config = self.build(base)
+        self.assertEqual(config['volumes']['pgdata']['driver_opts']['device'], '/work/shop/seed')
+        self.assertEqual(self.problems(config), [])
+        # Same mount, project root elsewhere: now outside the project, refused.
+        self.assertTrue(any('/work/shop/seed' in p for p in self.problems(config, project_root='/other')))
 
     def test_volumes_of_a_container_outside_the_lab_are_refused(self):
         config = self.build()
         config['services']['postgres']['volumes_from'] = ['container:shop-postgres']
         self.assertRefused(config, 'shop-postgres')
-        self.assertTrue(self.problems(config, allow_bind=True))
         config = self.build()
         config['services']['postgres']['volumes_from'] = ['app']  # a lab service: fine
         self.assertEqual(self.problems(config), [])
@@ -483,6 +530,246 @@ class TestValidation(_LabCase):
             'volumes', [{'type': 'bind', 'source': '/var/run/docker.sock',
                          'target': '/var/run/docker.sock'}], 'Docker socket')
 
+    def test_config_or_secret_from_a_host_file_outside_the_project(self):
+        """A `configs:`/`secrets:` entry sourced from `file:` mounts a file of
+        this computer; outside the project it is refused, as a bind mount is."""
+        for kind in ('configs', 'secrets'):
+            config = self.build()
+            config[kind] = {'app_conf': {'file': '/etc/app.conf'}}
+            with self.subTest(kind=kind):
+                self.assertRefused(config, '/etc/app.conf')
+
+    def test_config_or_secret_from_a_host_file_inside_the_project_is_allowed(self):
+        for kind in ('configs', 'secrets'):
+            config = self.build()
+            config[kind] = {'app_conf': {'file': '/work/shop/app.conf'}}
+            with self.subTest(kind=kind):
+                self.assertEqual(self.problems(config), [])
+
+    def test_external_config_or_secret(self):
+        for kind in ('configs', 'secrets'):
+            config = self.build()
+            config[kind] = {'app_conf': {'external': True}}
+            with self.subTest(kind=kind):
+                self.assertRefused(config, 'is external')
+
+    def test_a_config_or_secret_without_a_host_source_is_allowed(self):
+        """An env-var-sourced config carries no file of this computer."""
+        config = self.build()
+        config['configs'] = {'app_conf': {'environment': 'APP_CONF'}}
+        self.assertEqual(self.problems(config), [])
+
+    def test_service_extra_hosts_host_gateway(self):
+        """`host.docker.internal:host-gateway` reaches the host; compose may
+        render extra_hosts as a mapping or as a list of `host:addr`."""
+        self.assertServiceRefused(
+            'extra_hosts', {'host.docker.internal': 'host-gateway'}, 'host-gateway')
+        self.assertServiceRefused(
+            'extra_hosts', ['host.docker.internal:host-gateway'], 'host-gateway')
+
+    def test_service_extra_hosts_to_a_fixed_address_is_allowed(self):
+        """A pinned address is not routable on the lab's internal network, and
+        is not predictable since the lab strips fixed subnets."""
+        self.assertServiceAllowed('extra_hosts', {'api.internal': '10.5.0.9'})
+
+    # The lab keeps `build:` and builds on the host daemon, so a build that
+    # reaches files of this computer is a host reach too. One test per field.
+
+    def test_service_build_forwards_ssh(self):
+        self.assertServiceRefused('build', {'context': '/work/shop', 'ssh': ['default']}, 'build.ssh')
+
+    def test_service_build_context_outside_the_project(self):
+        self.assertServiceRefused('build', {'context': '/home/dev/other'},
+                                  'context outside the project')
+
+    def test_service_build_context_inside_the_project_is_allowed(self):
+        self.assertServiceAllowed('build', {'context': '/work/shop/api'})
+
+    def test_service_build_additional_context_outside_the_project(self):
+        for extra in ({'seed': '/home/dev/private'}, ['seed=/home/dev/private']):
+            with self.subTest(form=type(extra).__name__):
+                self.assertServiceRefused('build',
+                                          {'context': '/work/shop', 'additional_contexts': extra},
+                                          'extra context outside')
+
+    def test_service_build_additional_context_inside_or_an_image_is_allowed(self):
+        self.assertServiceAllowed('build', {'context': '/work/shop', 'additional_contexts': {
+            'seed': '/work/shop/seed', 'base': 'docker-image://alpine:3.20'}})
+
+    def test_a_host_volume_used_rw_anywhere_is_freshened_for_every_user(self):
+        """`freshen` is keyed by volume name, so a host-bound volume used
+        read-write by one service loses its host binding for the read-only
+        user too: that consumer gets a fresh empty volume, not the seed data.
+        Fails closed (no host write); documented here."""
+        base = copy.deepcopy(BASE)
+        base['volumes']['shared'] = {
+            'driver_opts': {'type': 'none', 'o': 'bind', 'device': '/work/shop/shared'}}
+        base['services']['app']['volumes'] = [{'type': 'volume', 'source': 'shared', 'target': '/a'}]
+        base['services']['postgres']['volumes'].append(
+            {'type': 'volume', 'source': 'shared', 'target': '/b', 'read_only': True})
+        config = self.build(base)
+        self.assertNotIn('driver_opts', config['volumes']['shared'])
+        self.assertEqual(self.problems(config), [])
+
+
+class TestDiscovery(unittest.TestCase):
+    """find_compose_stacks over a temporary tree. Every start is nested at
+    least one level inside the tree, so the walk's parent and ancestors stay
+    within it and the result does not depend on what sits in the real /tmp."""
+
+    def _tree(self, *dirs_with_compose: str) -> str:
+        base = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base, True)
+        for rel in dirs_with_compose:
+            path = os.path.join(base, rel)
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, 'docker-compose.yml'), 'w', encoding='utf-8') as fh:
+                fh.write('services: {}\n')
+        return base
+
+    def _primaries(self, start: str) -> list[str]:
+        return [stack[0] for stack in lab.find_compose_stacks(start)]
+
+    def test_finds_a_compose_in_the_starting_directory(self):
+        base = self._tree('ws/app')
+        self.assertIn(os.path.join(base, 'ws/app/docker-compose.yml'),
+                      self._primaries(os.path.join(base, 'ws/app')))
+
+    def test_finds_a_compose_in_a_descendant(self):
+        base = self._tree('ws/app/observability')
+        self.assertIn(os.path.join(base, 'ws/app/observability/docker-compose.yml'),
+                      self._primaries(os.path.join(base, 'ws/app')))
+
+    def test_a_sibling_of_the_start_is_not_searched(self):
+        """Discovery is downward only: a compose beside the start directory is
+        not found (climbing would list every project under a shared workspace).
+        Run from the directory that contains the stack instead."""
+        base = self._tree('ws/local-env')
+        os.makedirs(os.path.join(base, 'ws/repo'))
+        self.assertEqual(self._primaries(os.path.join(base, 'ws/repo')), [])
+        # From the directory above both, descent finds it.
+        self.assertIn(os.path.join(base, 'ws/local-env/docker-compose.yml'),
+                      self._primaries(os.path.join(base, 'ws')))
+
+    def test_several_stacks_are_all_returned_sorted(self):
+        base = self._tree('ws/app', 'ws/local-env')
+        primaries = self._primaries(os.path.join(base, 'ws'))
+        self.assertEqual(primaries, sorted(primaries))
+        self.assertGreaterEqual(len(primaries), 2)
+
+    def test_a_denylisted_directory_is_not_searched(self):
+        base = self._tree('ws/app/node_modules/x')
+        self.assertEqual(self._primaries(os.path.join(base, 'ws/app')), [])
+
+    def test_below_the_depth_limit_is_not_searched(self):
+        base = self._tree('ws/app/a/b/c/d')  # deeper than _DISCOVERY_MAX_DOWN
+        self.assertEqual(self._primaries(os.path.join(base, 'ws/app')), [])
+
+    def test_a_compose_exactly_at_the_depth_limit_is_found(self):
+        base = self._tree('ws/app/a/b/c')  # depth _DISCOVERY_MAX_DOWN (3) from ws/app
+        self.assertIn(os.path.join(base, 'ws/app/a/b/c/docker-compose.yml'),
+                      self._primaries(os.path.join(base, 'ws/app')))
+
+    def test_override_files_ride_with_their_primary(self):
+        base = self._tree('ws/app')
+        for name in ('compose.yaml', 'compose.override.yaml'):
+            with open(os.path.join(base, 'ws/app', name), 'w', encoding='utf-8') as fh:
+                fh.write('services: {}\n')
+        stack = next(s for s in lab.find_compose_stacks(os.path.join(base, 'ws/app'))
+                     if s[0].endswith('ws/app/compose.yaml'))
+        self.assertEqual(stack, [os.path.join(base, 'ws/app/compose.yaml'),
+                                 os.path.join(base, 'ws/app/compose.override.yaml')])
+
+
+class TestTargetDetection(unittest.TestCase):
+
+    def _service(self, **fields: object) -> dict:
+        return fields
+
+    def _config(self, services: dict) -> dict:
+        return {'services': services}
+
+    def test_a_service_built_from_inside_the_project_is_a_target(self):
+        config = self._config({
+            'api': self._service(build={'context': '/work/shop/api'}, ports=[
+                {'mode': 'ingress', 'target': 8080, 'published': '8080', 'protocol': 'tcp'}]),
+            'db': self._service(image='postgres:17')})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual(problems, [])
+        self.assertEqual([(t.service, t.port, t.path) for t in targets], [('api', 8080, '/')])
+
+    def test_a_service_built_outside_the_project_is_not_a_target(self):
+        config = self._config({'api': self._service(
+            build={'context': '/elsewhere/api'}, ports=[{'target': 8080}])})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual((targets, problems), ([], []))
+
+    def test_an_image_only_service_is_not_a_target(self):
+        config = self._config({'db': self._service(image='postgres:17', ports=[{'target': 5432}])})
+        self.assertEqual(lab.detect_targets(config, '/work/shop'), ([], []))
+
+    def test_the_port_comes_from_expose_when_there_is_no_ports(self):
+        config = self._config({'api': self._service(
+            build={'context': '/work/shop'}, expose=['9000'])})
+        targets, _ = lab.detect_targets(config, '/work/shop')
+        self.assertEqual([(t.service, t.port) for t in targets], [('api', 9000)])
+
+    def test_the_container_side_of_a_short_form_port_is_used(self):
+        config = self._config({'api': self._service(
+            build='/work/shop', ports=['127.0.0.1:8081:8081'])})
+        targets, _ = lab.detect_targets(config, '/work/shop')
+        self.assertEqual([t.port for t in targets], [8081])
+
+    def test_the_container_port_is_used_not_the_published_one(self):
+        """The lab scans the service on its internal port; the host-published
+        port is stripped. Long and short form, with the two differing."""
+        for ports in ([{'target': 8080, 'published': '18080'}], ['127.0.0.1:9000:8080']):
+            config = self._config({'api': self._service(build='/work/shop', ports=ports)})
+            targets, _ = lab.detect_targets(config, '/work/shop')
+            with self.subTest(ports=ports):
+                self.assertEqual([t.port for t in targets], [8080])
+
+    def test_a_protocol_suffix_is_stripped(self):
+        config = self._config({'api': self._service(build='/work/shop', expose=['8080/tcp'])})
+        targets, _ = lab.detect_targets(config, '/work/shop')
+        self.assertEqual([t.port for t in targets], [8080])
+
+    def test_a_port_range_reads_as_more_than_one_port(self):
+        """A range is not a single port; it must be reported ambiguous, never
+        silently dropped (which would skip the service as having no port)."""
+        for ports in (['8000-8005'], ['127.0.0.1:8000-8005:8000-8005'],
+                      [{'target': '8000-8005'}]):
+            config = self._config({'api': self._service(build='/work/shop', ports=ports)})
+            targets, problems = lab.detect_targets(config, '/work/shop')
+            with self.subTest(ports=ports):
+                self.assertEqual(targets, [])
+                self.assertTrue(any('more than one port' in p for p in problems), problems)
+
+    def test_a_degenerate_range_is_a_single_port(self):
+        self.assertEqual(lab._port_ints('8080-8080'), [8080])
+
+    def test_more_than_one_port_is_ambiguous_and_refused(self):
+        config = self._config({'api': self._service(
+            build={'context': '/work/shop'}, ports=[{'target': 8080}, {'target': 9090}])})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual(targets, [])
+        self.assertTrue(any('more than one port' in p for p in problems), problems)
+
+    def test_a_built_service_with_no_port_is_refused(self):
+        config = self._config({'api': self._service(build={'context': '/work/shop'})})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual(targets, [])
+        self.assertTrue(any('no port' in p for p in problems), problems)
+
+    def test_two_targets_in_one_stack(self):
+        config = self._config({
+            'api': self._service(build={'context': '/work/shop/api'}, expose=['8081']),
+            'web': self._service(build={'context': '/work/shop/web'}, expose=['80']),
+            'db': self._service(image='postgres:17')})
+        targets, problems = lab.detect_targets(config, '/work/shop')
+        self.assertEqual(problems, [])
+        self.assertEqual(sorted((t.service, t.port) for t in targets), [('api', 8081), ('web', 80)])
+
 
 class TestReport(unittest.TestCase):
 
@@ -537,7 +824,7 @@ class TestEnvironment(unittest.TestCase):
     def test_scan_without_the_image_points_to_setup(self):
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=False):
-            code = lab.main(['--service', 'app', '--port', '8080'])
+            code = lab.main(['--service', 'app', '--port', '8080', '--compose-file', 'c.yml'])
         self.assertEqual(code, lab.EXIT_REFUSED)
 
     def test_a_failed_teardown_still_removes_the_resolved_config(self):
@@ -558,11 +845,11 @@ class TestEnvironment(unittest.TestCase):
             return self._completed(1, err='up failed')
 
         args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
-                                      startup_seconds=0, project_dir='.', compose_file=None,
-                                      allow_bind_mounts=False, active=False,
+                                      startup_seconds=0, project_dir='.', compose_file=['compose.yml'],
+                                       active=False,
                                       active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
                                       endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
-                                      time_sec=lab.SQLMAP_TIME_SEC)
+                                      time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
         with mock.patch.object(lab, 'check_docker'), \
                 mock.patch.object(lab, 'image_present', return_value=True), \
                 mock.patch.object(lab, 'resolved_config', return_value={}), \
@@ -574,6 +861,137 @@ class TestEnvironment(unittest.TestCase):
                 lab.scan(args)
         self.assertEqual(len(made), 1)
         self.assertFalse(os.path.exists(made[0]))
+
+    def _scan_with(self, compose: object) -> list[tuple[str, ...]]:
+        """Run `scan` with Docker replaced by `compose`; the compose verbs it
+        was called with, in order. A LabError from the scan is swallowed: the
+        tests read what ran, and what did not."""
+        calls: list[tuple[str, ...]] = []
+
+        def recording(project: str, config: str, *args: str, timeout: float = 900) -> object:
+            calls.append(args)
+            return compose(project, config, *args, timeout=timeout)
+
+        args = lab.argparse.Namespace(service='app', port=8080, path='/', minutes=1,
+                                      startup_seconds=0, project_dir='.', compose_file=['compose.yml'],
+                                       active=False,
+                                      active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False,
+                                      endpoint=None, level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK,
+                                      time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'resolved_config', return_value={}), \
+                mock.patch.object(lab, 'build_lab_config', return_value={}), \
+                mock.patch.object(lab, 'validate_lab_config', return_value=[]), \
+                mock.patch.object(lab, '_compose', side_effect=recording), \
+                mock.patch.object(lab.sys, 'stderr', io.StringIO()):
+            try:
+                lab.scan(args)
+            except lab.LabError:
+                pass
+        return calls
+
+    def test_a_leftover_of_a_killed_run_is_removed_before_the_lab_starts(self):
+        """A run killed before its teardown (SIGKILL) left its containers,
+        volumes and images behind, and nothing ever removed them."""
+        def compose(_p: str, _c: str, *args: str, timeout: float = 900) -> mock.Mock:
+            if 'config' in args:
+                return self._completed(out='{}')
+            return self._completed(0 if 'down' in args else 1, err='up failed')
+        verbs = [next(a for a in call if a in ('config', 'down', 'up')) for call in self._scan_with(compose)]
+        self.assertEqual(verbs, ['config', 'down', 'up', 'down'])
+
+    def test_a_leftover_that_cannot_be_removed_starts_nothing(self):
+        def compose(_p: str, _c: str, *args: str, timeout: float = 900) -> mock.Mock:
+            if 'config' in args:
+                return self._completed(out='{}')
+            return self._completed(1, err='network in use')
+        calls = self._scan_with(compose)
+        self.assertFalse(any('up' in call for call in calls), calls)
+
+    def test_a_second_run_of_the_same_project_is_refused_while_one_runs(self):
+        """Two sessions share the project's lab name; without the lock the
+        second would tear down the first one's lab as a leftover."""
+        held = lab.acquire_lab_lock(lab._project_name('.'))
+        try:
+            def compose(*_args: str, timeout: float = 900) -> mock.Mock:
+                raise AssertionError('Docker must not be called while another run holds the lab')
+            with mock.patch.object(lab, 'check_docker'), \
+                    mock.patch.object(lab, 'image_present', return_value=True), \
+                    mock.patch.object(lab, 'resolved_config', return_value={}), \
+                    mock.patch.object(lab, '_compose', side_effect=compose), \
+                    mock.patch.object(lab.sys, 'stderr', io.StringIO()) as err:
+                code = lab.main(['--service', 'app', '--port', '8080', '--compose-file', 'c.yml'])
+            self.assertEqual(code, lab.EXIT_REFUSED)
+            self.assertIn('in progress', err.getvalue())
+        finally:
+            os.close(held)
+
+    def test_the_lock_is_released_when_a_run_ends(self):
+        def compose(_p: str, _c: str, *args: str, timeout: float = 900) -> mock.Mock:
+            return self._completed(out='{}') if 'config' in args else self._completed(1)
+        self._scan_with(compose)
+        os.close(lab.acquire_lab_lock(lab._project_name('.')))  # raises if still held
+
+    def _private_tmp(self) -> str:
+        """A temporary directory the lab sees as the system one for this test."""
+        private = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, private, True)
+        patcher = mock.patch.object(lab.tempfile, 'tempdir', private)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return private
+
+    def test_a_killed_runs_work_dir_is_removed_before_the_next_run(self):
+        """A run killed before its `finally` kept its work dir, and with it
+        compose.json and the environment values resolved into it. Another
+        project whose name extends this one, and a link, are left alone."""
+        private = self._private_tmp()
+        project = lab._project_name('.')
+        stale = os.path.join(private, f'{project}.killed')
+        other = os.path.join(private, f'{project}-v2.running')
+        elsewhere = os.path.join(private, 'elsewhere')
+        for path in (stale, other, elsewhere):
+            os.mkdir(path)
+            with open(os.path.join(path, 'compose.json'), 'w', encoding='utf-8') as fh:
+                fh.write('{}')
+        os.symlink(elsewhere, os.path.join(private, f'{project}.link'))
+
+        def compose(_p: str, _c: str, *args: str, timeout: float = 900) -> mock.Mock:
+            return self._completed(out='{}') if 'config' in args else self._completed(1)
+        self._scan_with(compose)
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.exists(os.path.join(other, 'compose.json')))
+        self.assertTrue(os.path.exists(os.path.join(elsewhere, 'compose.json')))
+        # The run's own work dir went too: only the lock file is new.
+        self.assertEqual(set(os.listdir(private)),
+                         {os.path.basename(other), 'elsewhere', f'{project}.link',
+                          f'{project}-{os.getuid()}.lock'})
+
+    def test_the_lock_does_not_follow_a_link_planted_at_its_path(self):
+        private = self._private_tmp()
+        project = lab._project_name('.')
+        victim = os.path.join(private, 'victim')
+        open(victim, 'w', encoding='utf-8').close()
+        os.symlink(victim, os.path.join(private, f'{project}-{os.getuid()}.lock'))
+        with self.assertRaises(lab.LabError):
+            lab.acquire_lab_lock(project)
+
+    def test_a_lock_file_another_user_created_is_refused(self):
+        self._private_tmp()
+        with mock.patch.object(lab.os, 'fstat',
+                               return_value=mock.Mock(st_uid=os.getuid() + 1)), \
+                self.assertRaises(lab.LabError) as ctx:
+            lab.acquire_lab_lock(lab._project_name('.'))
+        self.assertIn('another user', str(ctx.exception))
+
+    def test_without_fcntl_the_lab_points_to_wsl(self):
+        """A top-level `import fcntl` failed on native Windows before any
+        message could say where the lab runs."""
+        with mock.patch.dict(lab.sys.modules, {'fcntl': None}), \
+                self.assertRaises(lab.LabError) as ctx:
+            lab.acquire_lab_lock('redlab-x')
+        self.assertIn('WSL 2', str(ctx.exception))
 
     def test_the_outer_timeout_covers_every_phase_zap_bounds(self):
         """Ultra review of 4.0.0: zap-baseline applies -T to its start-up wait
@@ -636,7 +1054,7 @@ class TestEnvironment(unittest.TestCase):
                     mock.patch.object(lab, 'validate_lab_config', return_value=[]), \
                     mock.patch.object(lab, '_compose', side_effect=compose), \
                     mock.patch.object(lab.sys, 'stderr', err):
-                code = lab.main(['--service', 'app', '--port', '8080', '--startup-seconds', '0'])
+                code = lab.main(['--service', 'app', '--port', '8080', '--startup-seconds', '0', '--compose-file', 'c.yml'])
             self.assertEqual(code, lab.EXIT_ERROR)
             return err.getvalue()
         self.assertIn('the lab was removed', run(0))
@@ -647,6 +1065,336 @@ class TestEnvironment(unittest.TestCase):
     def test_version_parsing(self):
         self.assertEqual(lab.parse_version('v2.29.7-desktop.1'), (2, 29, 7))
         self.assertEqual(lab.parse_version('garbage'), (0, 0, 0))
+
+
+class TestScanOrchestration(unittest.TestCase):
+    """scan()'s target resolution and the multi-target loop, with the per-target
+    scan and the environment mocked."""
+
+    def _args(self, **over: object) -> "lab.argparse.Namespace":
+        base = dict(service=None, port=None, path='/', minutes=1, startup_seconds=0,
+                    project_dir='.', compose_file=['c.yml'], active=False,
+                    active_minutes=lab.ACTIVE_SCAN_MINUTES, sqlmap=False, endpoint=None,
+                    level=lab.SQLMAP_LEVEL, risk=lab.SQLMAP_RISK, time_sec=lab.SQLMAP_TIME_SEC, gate=False, commit=None)
+        base.update(over)
+        return lab.argparse.Namespace(**base)
+
+    def _run_scan(self, targets: list, outcomes: dict) -> tuple[int, list[str]]:
+        scanned: list[str] = []
+
+        def scan_target(target, *_a: object, **_k: object) -> int:
+            scanned.append(target.service)
+            result = outcomes[target.service]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'acquire_lab_lock',
+                                  return_value=os.open(os.devnull, os.O_RDONLY)), \
+                mock.patch.object(lab, 'remove_stale_workdirs'), \
+                mock.patch.object(lab, '_resolve_targets', return_value=({}, targets)), \
+                mock.patch.object(lab, '_scan_target', side_effect=scan_target), \
+                mock.patch.object(lab.sys, 'stderr', io.StringIO()):
+            return lab.scan(self._args()), scanned
+
+    def test_the_worst_exit_code_across_targets_is_returned(self):
+        targets = [lab.parse_target('api', 8081, '/'), lab.parse_target('web', 80, '/')]
+        code, scanned = self._run_scan(targets, {'api': lab.EXIT_FINDINGS, 'web': lab.EXIT_CLEAN})
+        self.assertEqual(code, lab.EXIT_FINDINGS)
+        self.assertEqual(scanned, ['api', 'web'])
+
+    def test_an_error_on_one_target_does_not_stop_the_others(self):
+        targets = [lab.parse_target('api', 8081, '/'), lab.parse_target('web', 80, '/')]
+        code, scanned = self._run_scan(
+            targets, {'api': lab.LabError('boom', lab.EXIT_ERROR), 'web': lab.EXIT_FINDINGS})
+        self.assertEqual(scanned, ['api', 'web'])
+        self.assertEqual(code, lab.EXIT_ERROR)  # worst of error(3) and findings(1)
+
+    def test_a_refusal_aborts_the_whole_run(self):
+        targets = [lab.parse_target('api', 8081, '/'), lab.parse_target('web', 80, '/')]
+        with self.assertRaises(lab.LabError):
+            self._run_scan(targets, {'api': lab.LabError('not isolated'),  # default EXIT_REFUSED
+                                     'web': lab.EXIT_CLEAN})
+
+    def test_a_single_target_error_propagates_unchanged(self):
+        with self.assertRaises(lab.LabError):
+            self._run_scan([lab.parse_target('api', 8081, '/')],
+                           {'api': lab.LabError('boom', lab.EXIT_ERROR)})
+
+    def test_gate_mode_scans_the_commit_records_it_and_removes_the_worktrees(self):
+        targets = [lab.parse_target('api', 8081, '/')]
+        recorded: dict = {}
+        removed: list[str] = []
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'acquire_lab_lock',
+                                  return_value=os.open(os.devnull, os.O_RDONLY)), \
+                mock.patch.object(lab, 'remove_stale_workdirs'), \
+                mock.patch.object(lab, '_resolve_targets', return_value=({}, targets)), \
+                mock.patch.object(lab, '_git_commit', return_value='deadbeef'), \
+                mock.patch.object(lab, '_prepare_worktrees', return_value={'/proj': '/wt'}) as prepare, \
+                mock.patch.object(lab, '_scan_target', return_value=lab.EXIT_FINDINGS) as scan_one, \
+                mock.patch.object(lab, '_remove_worktree', side_effect=lambda r, w: removed.append(w)), \
+                mock.patch.object(lab, 'write_gate_result',
+                                  side_effect=lambda root, c, t, v: recorded.update(commit=c, verdict=v)), \
+                mock.patch.object(lab.sys, 'stderr', io.StringIO()):
+            code = lab.scan(self._args(gate=True))
+        self.assertEqual(code, lab.EXIT_FINDINGS)
+        self.assertEqual(recorded, {'commit': 'deadbeef', 'verdict': lab.EXIT_FINDINGS})
+        self.assertEqual(removed, ['/wt'])  # the worktree is always removed
+        # The worktree map reached the per-target build.
+        self.assertEqual(scan_one.call_args.args[-1], {'/proj': '/wt'})
+        # The worktrees carry the project prefix, so a killed run's leftover is
+        # swept by remove_stale_workdirs (which matches `<project>.`).
+        prefix = prepare.call_args.args[-1]
+        self.assertTrue(prefix.endswith('.wt-') and prefix.startswith('redlab-'), prefix)
+
+    def test_gate_worktrees_are_removed_even_when_a_target_raises(self):
+        removed: list[str] = []
+        with mock.patch.object(lab, 'check_docker'), \
+                mock.patch.object(lab, 'image_present', return_value=True), \
+                mock.patch.object(lab, 'acquire_lab_lock',
+                                  return_value=os.open(os.devnull, os.O_RDONLY)), \
+                mock.patch.object(lab, 'remove_stale_workdirs'), \
+                mock.patch.object(lab, '_resolve_targets',
+                                  return_value=({}, [lab.parse_target('api', 8081, '/')])), \
+                mock.patch.object(lab, '_git_commit', return_value='sha'), \
+                mock.patch.object(lab, '_prepare_worktrees', return_value={'/proj': '/wt'}), \
+                mock.patch.object(lab, '_scan_target',
+                                  side_effect=lab.LabError('boom', lab.EXIT_ERROR)), \
+                mock.patch.object(lab, '_remove_worktree', side_effect=lambda r, w: removed.append(w)), \
+                mock.patch.object(lab, 'write_gate_result'), \
+                mock.patch.object(lab.sys, 'stderr', io.StringIO()):
+            with self.assertRaises(lab.LabError):
+                lab.scan(self._args(gate=True))
+        self.assertEqual(removed, ['/wt'])
+
+
+class TestResolveTargets(unittest.TestCase):
+
+    def _args(self, **over: object) -> "lab.argparse.Namespace":
+        base = dict(service=None, port=None, path='/', project_dir='.', compose_file=[],
+                    endpoint=None)
+        base.update(over)
+        return lab.argparse.Namespace(**base)
+
+    def test_a_named_service_is_the_only_target_and_discovery_is_skipped(self):
+        with mock.patch.object(lab, 'resolved_config', return_value={}) as resolved, \
+                mock.patch.object(lab, 'find_compose_stacks') as find:
+            base, targets = lab._resolve_targets(
+                self._args(service='api', port=8081, compose_file=['c.yml']), '/root', 'zap')
+        find.assert_not_called()
+        resolved.assert_called_once()
+        self.assertEqual([(t.service, t.port) for t in targets], [('api', 8081)])
+
+    def test_a_named_service_without_a_port_is_refused(self):
+        with mock.patch.object(lab, 'resolved_config', return_value={}):
+            with self.assertRaises(lab.LabError):
+                lab._resolve_targets(self._args(service='api', compose_file=['c.yml']), '/r', 'zap')
+
+    def test_detected_targets_when_no_service_is_named(self):
+        config = {'services': {'api': {'build': {'context': '/r/api'},
+                                       'ports': [{'target': 8081}]}}}
+        with mock.patch.object(lab, 'resolved_config', return_value=config), \
+                mock.patch.object(lab, 'find_compose_stacks', return_value=[['/r/c.yml']]):
+            _base, targets = lab._resolve_targets(self._args(), '/r', 'zap')
+        self.assertEqual([(t.service, t.port) for t in targets], [('api', 8081)])
+
+    def test_nothing_to_scan_is_refused(self):
+        with mock.patch.object(lab, 'resolved_config', return_value={'services': {}}), \
+                mock.patch.object(lab, 'find_compose_stacks', return_value=[['/r/c.yml']]):
+            with self.assertRaises(lab.LabError) as ctx:
+                lab._resolve_targets(self._args(), '/r', 'zap')
+        self.assertIn('Nothing to scan', str(ctx.exception))
+
+    def test_more_than_one_stack_is_refused_with_the_list(self):
+        with mock.patch.object(lab, 'find_compose_stacks',
+                               return_value=[['/a/compose.yml'], ['/b/compose.yml']]):
+            with self.assertRaises(lab.LabError) as ctx:
+                lab._resolve_targets(self._args(), '/r', 'zap')
+        self.assertIn('/a/compose.yml', str(ctx.exception))
+        self.assertIn('/b/compose.yml', str(ctx.exception))
+
+    def test_no_stack_found_is_refused(self):
+        with mock.patch.object(lab, 'find_compose_stacks', return_value=[]):
+            with self.assertRaises(lab.LabError) as ctx:
+                lab._resolve_targets(self._args(), '/r', 'zap')
+        self.assertIn('No compose file', str(ctx.exception))
+
+    def test_sqlmap_needs_a_service_port_and_endpoint(self):
+        with mock.patch.object(lab, 'resolved_config', return_value={}):
+            with self.assertRaises(lab.LabError):
+                lab._resolve_targets(self._args(service='api', port=8081, compose_file=['c.yml']),
+                                     '/r', 'sqlmap')  # no --endpoint
+            _b, targets = lab._resolve_targets(
+                self._args(service='api', port=8081, endpoint='/items?id=1', compose_file=['c.yml']),
+                '/r', 'sqlmap')
+        self.assertEqual(targets[0].query, 'id=1')
+
+
+class TestGateState(unittest.TestCase):
+    """The --gate result file: written whole, keyed by commit, outside any repo."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        patcher = mock.patch.object(lab, 'GATE_STATE_DIR', self.dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_result_is_read_back_only_for_the_same_commit(self):
+        targets = [lab.parse_target('api', 8081, '/')]
+        lab.write_gate_result('/proj', 'abc123', targets, lab.EXIT_CLEAN)
+        record = lab.read_gate_result('/proj', 'abc123')
+        self.assertEqual(record['verdict'], lab.EXIT_CLEAN)
+        self.assertEqual(record['targets'], [{'service': 'api', 'port': 8081}])
+        self.assertIsNone(lab.read_gate_result('/proj', 'def456'))  # another commit: not this one's
+
+    def test_no_file_reads_as_no_result(self):
+        self.assertIsNone(lab.read_gate_result('/never-scanned', 'abc123'))
+
+    def test_two_projects_do_not_share_a_file(self):
+        lab.write_gate_result('/a', 'sha', [], lab.EXIT_FINDINGS)
+        lab.write_gate_result('/b', 'sha', [], lab.EXIT_CLEAN)
+        self.assertEqual(lab.read_gate_result('/a', 'sha')['verdict'], lab.EXIT_FINDINGS)
+        self.assertEqual(lab.read_gate_result('/b', 'sha')['verdict'], lab.EXIT_CLEAN)
+
+    def test_a_wrong_version_is_ignored(self):
+        lab.write_gate_result('/proj', 'sha', [], lab.EXIT_CLEAN)
+        path = lab._gate_state_path('/proj')
+        with open(path, encoding='utf-8') as fh:
+            record = json.load(fh)
+        record['version'] = lab.GATE_RESULT_VERSION + 1
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(record, fh)
+        self.assertIsNone(lab.read_gate_result('/proj', 'sha'))
+
+
+class TestBuildRemap(unittest.TestCase):
+    """Redirecting build paths at the worktrees of the committed tree."""
+
+    WT = {'/work/shop': '/tmp/wt-shop'}
+
+    def test_a_context_inside_a_mapped_repo_is_redirected(self):
+        self.assertEqual(lab._remap_build_path('/work/shop/api', self.WT), '/tmp/wt-shop/api')
+
+    def test_the_repo_root_itself_maps_to_the_worktree_root(self):
+        self.assertEqual(lab._remap_build_path('/work/shop', self.WT), '/tmp/wt-shop')
+
+    def test_a_path_outside_every_mapped_repo_is_left_alone(self):
+        self.assertIsNone(lab._remap_build_path('/elsewhere/api', self.WT))
+
+    def test_an_image_context_is_not_a_path_and_is_left_alone(self):
+        self.assertIsNone(lab._remap_build_path('docker-image://alpine:3', self.WT))
+
+    def test_remap_rewrites_context_and_additional_contexts(self):
+        service = {'build': {'context': '/work/shop/api', 'additional_contexts': {
+            'seed': '/work/shop/seed', 'base': 'docker-image://alpine'}}}
+        lab._remap_build(service, self.WT)
+        self.assertEqual(service['build']['context'], '/tmp/wt-shop/api')
+        self.assertEqual(service['build']['additional_contexts']['seed'], '/tmp/wt-shop/seed')
+        self.assertEqual(service['build']['additional_contexts']['base'], 'docker-image://alpine')
+
+    def test_build_lab_config_redirects_the_built_service_to_the_worktree(self):
+        base = copy.deepcopy(BASE)  # app builds from /work/shop
+        config = lab.build_lab_config(base, lab.parse_target('app', 8080, '/'), 'redlab-shop',
+                                      tempfile.gettempdir(), 2, worktrees={'/work/shop': '/tmp/wt'})
+        self.assertEqual(config['services']['app']['build']['context'], '/tmp/wt')
+
+    def test_a_gate_build_is_not_refused_as_outside_the_project(self):
+        """Regression: the remapped worktree context (under /tmp) tripped
+        validate_lab_config's "outside the project" refusal, so every --gate run
+        was refused before any scan. Validation must accept the worktree roots."""
+        report_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, report_dir, True)
+        worktree = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, worktree, True)
+        worktrees = {'/work/shop': worktree}  # BASE's app builds from /work/shop
+        config = lab.build_lab_config(copy.deepcopy(BASE), lab.parse_target('app', 8080, '/'),
+                                      'redlab-shop', report_dir, 2, worktrees=worktrees)
+        self.assertEqual(config['services']['app']['build']['context'], worktree)
+        problems = lab.validate_lab_config(config, 'app', report_dir, '/work/shop',
+                                           worktrees=worktrees)
+        self.assertEqual(problems, [])  # and specifically no "outside the project"
+
+    def test_remap_mounts_redirects_an_in_project_read_only_bind(self):
+        config = {'services': {'db': {'volumes': [
+            {'type': 'bind', 'source': '/work/shop/init', 'target': '/x', 'read_only': True},
+            {'type': 'bind', 'source': '/elsewhere/data', 'target': '/y', 'read_only': True}]}}}
+        lab._remap_mounts(config, {'/work/shop': '/tmp/wt'})
+        volumes = config['services']['db']['volumes']
+        self.assertEqual(volumes[0]['source'], '/tmp/wt/init')     # in-project -> worktree
+        self.assertEqual(volumes[1]['source'], '/elsewhere/data')  # outside -> left for validate
+
+    def test_remap_mounts_redirects_a_host_bound_volume_device(self):
+        config = {'services': {}, 'volumes': {'seed': {'driver_opts': {'device': '/work/shop/seed'}}}}
+        lab._remap_mounts(config, {'/work/shop': '/tmp/wt'})
+        self.assertEqual(config['volumes']['seed']['driver_opts']['device'], '/tmp/wt/seed')
+
+    def test_build_lab_config_remaps_an_in_project_read_only_mount(self):
+        """build_lab_config must apply the mount remap, so a committed init
+        script is read from the worktree, not the working tree."""
+        base = copy.deepcopy(BASE)
+        base['services']['postgres']['volumes'] = [
+            {'type': 'bind', 'source': '/work/shop/init', 'target': '/x', 'read_only': True}]
+        config = lab.build_lab_config(base, lab.parse_target('app', 8080, '/'), 'redlab-shop',
+                                      tempfile.gettempdir(), 2, worktrees={'/work/shop': '/tmp/wt'})
+        sources = [v['source'] for v in config['services']['postgres']['volumes']]
+        self.assertEqual(sources, ['/tmp/wt/init'])
+
+    def test_service_build_paths_skips_image_contexts(self):
+        service = {'build': {'context': '/work/shop', 'additional_contexts':
+                             ['seed=/work/shop/seed', 'base=docker-image://alpine']}}
+        self.assertEqual(lab._service_build_paths(service), ['/work/shop', '/work/shop/seed'])
+
+
+class TestPrepareWorktrees(unittest.TestCase):
+
+    def _config(self, services: dict) -> dict:
+        return {'services': services}
+
+    def test_the_project_repo_builds_from_the_commit_and_others_from_head(self):
+        config = self._config({
+            'api': {'build': {'context': '/proj/api'}},
+            'web': {'build': {'context': '/sibling/web'}},
+            'db': {'image': 'postgres:17'}})
+        added: list[tuple[str, str]] = []
+
+        def repo_top(path: str) -> str:
+            return '/proj' if path.startswith('/proj') else '/sibling'
+
+        def git_commit(repo: str, ref: str) -> str:
+            return f'head-of-{os.path.basename(repo)}'
+
+        def add_worktree(repo: str, commit: str, _parent: str, _prefix: str) -> str:
+            added.append((repo, commit))
+            return f'/wt/{os.path.basename(repo)}'
+
+        with mock.patch.object(lab, '_repo_toplevel', side_effect=repo_top), \
+                mock.patch.object(lab, '_run', return_value=mock.Mock(returncode=0, stdout='', stderr='')), \
+                mock.patch.object(lab, '_git_commit', side_effect=git_commit), \
+                mock.patch.object(lab, '_add_worktree', side_effect=add_worktree):
+            worktrees = lab._prepare_worktrees(config, '/proj', 'SHA', '/tmp', 'redlab-proj.wt-')
+        self.assertEqual(worktrees, {'/proj': '/wt/proj', '/sibling': '/wt/sibling'})
+        self.assertIn(('/proj', 'SHA'), added)                 # project repo: the pushed commit
+        self.assertIn(('/sibling', 'head-of-sibling'), added)  # other repo: its own HEAD
+
+    def test_a_failure_removes_the_worktrees_already_made(self):
+        config = self._config({'api': {'build': {'context': '/proj/api'}},
+                               'web': {'build': {'context': '/sibling/web'}}})
+        removed: list[str] = []
+        with mock.patch.object(lab, '_repo_toplevel',
+                               side_effect=lambda p: '/proj' if p.startswith('/proj') else '/sibling'), \
+                mock.patch.object(lab, '_run', return_value=mock.Mock(returncode=0, stdout='', stderr='')), \
+                mock.patch.object(lab, '_git_commit', side_effect=lambda r, ref: 'h'), \
+                mock.patch.object(lab, '_add_worktree',
+                                  side_effect=['/wt/a', lab.LabError('boom', lab.EXIT_ERROR)]), \
+                mock.patch.object(lab, '_remove_worktree', side_effect=lambda r, w: removed.append(w)):
+            with self.assertRaises(lab.LabError):
+                lab._prepare_worktrees(config, '/proj', 'SHA', '/tmp', 'redlab-proj.wt-')
+        self.assertEqual(removed, ['/wt/a'])  # the one that succeeded is cleaned up
 
 
 if __name__ == '__main__':

@@ -12,11 +12,13 @@ do not delete it. Commands are only passed to the check functions as text;
 nothing here runs them.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(_ROOT, 'hooks'))
@@ -68,17 +70,30 @@ DESTRUCTIVE = [
     ('shred -u file', True),
     ('truncate -s 0 db.sqlite', True),
     ('truncate --size=0 db.sqlite', True),
-    # Program decided at run time.
-    ('$(echo rm) -rf build', True),
+    # A variable command word is read as every literal value the command gives
+    # it, wherever and in whatever order it is assigned (2026-11-21). A program
+    # the command never shows is not flagged: see KNOWN_GAPS.
     ('x=rm; $x -rf build', True),
-    ('`echo rm` -rf build', True),
-    ('eval "$CMD"', True),
-    ('bash -c "$CMD"', True),
-    ('ash -c "$CMD"', True),  # a second, shorter shell list once dropped `ash`
-    ('sudo $TOOL --wipe', True),
-    ('env -i $TOOL --wipe', True),
-    ('sudo -u app $TOOL --wipe', True),
-    ('nice -n 5 $TOOL --wipe', True),
+    ('R="rm -rf"; $R build', True),
+    ('S=/tmp/x; G="git -C $S"; $G reset --hard', True),
+    ('P=echo; for P in rm; do $P -rf build; done', True),
+    ('P=; $P rm -rf build', True),
+    ('P=(rm -rf); $P build', True),
+    ('IFS=x; P=rmx-rf; $P build', True),
+    ('P=rmx-rf; IFS=x $P build', True),
+    ('ok && P="rm -rf" || P=echo; $P build', True),
+    ('if true; then P="rm -rf"; fi; $P build', True),
+    ('$P build; P="rm -rf"', True),
+    ('P="rm -rf"; source ./env.sh; $P build', True),
+    ('for t in echo rm; do $t -rf build; done', True),
+    ('export P="git reset"; $P --hard', True),
+    ('A=rm; B="$A -rf"; $B build', True),
+    ('B="$A -rf"; A=rm; $B build', True),
+    # The everyday commands this used to ask about: every value is literal and
+    # none of them destroys anything.
+    ('ls mvnw && M=./mvnw || M=mvn; nice -n 10 $M -q test', False),
+    ('for p in /opt/venv/bin/python /usr/bin/python3; do $p -c "import PIL"; done', False),
+    ('P="docker exec db psql -At -c"; $P "select 1"; source ./lib.sh; $P "select 2"', False),
     # Recursive deletion through an interpreter one-liner.
     ("python3 -c \"import shutil; shutil.rmtree('build')\"", True),
     ("node -e \"require('fs').rmSync('build',{recursive:true})\"", True),
@@ -103,9 +118,13 @@ DESTRUCTIVE = [
     ("python3 -c \"import os; os.remove('x.json')\"", False),
     ("python3 -c \"print('shutil.rmtree is documented here')\"", False),
     ('bash -c "echo $HOME"', False),
-    ('for f in a b; do $f -rf build; done', True),
+    ('P="docker exec db psql -U postgres"; $P -c "select 1"', False),
+    ('P="docker exec db psql"\n$P -c "select 1"\n$P -c "select 2"', False),
+    ('S=/tmp/x; T=$S/t; G="git -C $T -c user.name=t"; $G commit -q -m "feat: x"', False),
+    ('J=/opt/jdk/bin/javap; $J -cp lib.jar Foo', False),
+    ('[[ "$t" > "12:31" && "$t" < "12:58" ]] || continue', False),
+    ('for f in a b; do [[ -f "$f" && -s "$f" ]] && cat "$f"; done', False),
     ('if true; then rm -rf build; fi', True),
-    ('/usr/bin/$TOOL -rf build', True),
     # Real commands from transcripts that the first version of these checks
     # blocked by mistake (replayed 2026-11-16 over 5075 recorded commands).
     ('git diff $(git merge-base origin/develop $B) $B --stat', False),
@@ -154,6 +173,39 @@ DESTRUCTIVE = [
     # A heredoc that is data quotes a one-liner; it does not run it.
     ("gh pr create --body-file - <<'EOF'\nCloses `node -e \"fs.rmSync(dir, opts)\"`.\nEOF", False),
     ("bash <<'EOF'\nnode -e \"fs.rmSync(dir, opts)\"\nEOF", True),
+    # `rm -r` read from tokens (2026-11-21). The text pattern matched the `rm`
+    # of `docker run --rm` and took a later flag's `r` (`-proc`) for `-r`.
+    ("docker run --rm -v \"$PWD\":/w img sh -c 'javac -proc:none A.java'", False),
+    ('docker run --rm alpine true', False),
+    ('podman run --rm -it img bash', False),
+    ('ls | xargs docker run --rm img', False),
+    ('echo rm -rf build', False),
+    ("git commit -m 'rm -rf the old build dir'", False),
+    ('rm -i -v file.txt', False),
+    # What the text pattern caught by accident must stay caught: the `rm` as
+    # the program after wrappers, as an argument of another program, inside
+    # a shell's `-c` script, as `eval`'s arguments and in an interpreter
+    # one-liner (rows above), and its options in any position.
+    ('rm build -rf', True),
+    ('rm --recursive build', True),
+    ('rm -fR build', True),
+    ('sudo rm -rf build', True),
+    ('timeout 5 rm -rf build', True),
+    ('nice -n 5 rm -rf build', True),
+    ('/bin/rm -rf build', True),
+    ('find . -name dist -exec rm -r {} \\;', True),
+    ('find . -execdir rm -rf {} +', True),
+    ('watch rm -rf build', True),
+    ('flock /tmp/l rm -rf build', True),
+    ('docker exec db rm -rf /var/lib/data', True),
+    ('docker run --rm -v "$PWD":/w alpine rm -rf /w/build', True),
+    ("sh -c 'cd x && rm -rf build'", True),
+    ("bash -lc 'rm -rf build'", True),
+    ('eval rm -rf build', True),
+    ("python3 -c \"import subprocess; subprocess.run('rm -rf build', shell=True)\"", True),
+    ('ls | xargs rm', True),
+    ('ls | xargs -0 /bin/rm -f', True),
+    ("sh -c 'rm -rf build; echo \"unterminated'", True),
 ]
 
 # Commands that write source through something other than Write/Edit, `>`,
@@ -291,7 +343,47 @@ KNOWN_GAPS = [
      'the boundary, and it exists only inside the lab'),
     ('./bin/scan --target https://example.com', 'lab',
      'a renamed or wrapped scanner binary is not recognized'),
-]
+    ('P=echo; reset_tools; $P -rf build', 'destructive',
+     'a shell function from the user\'s own environment (`reset_tools`) could rebind a '
+     'variable the command bound to a literal; the text cannot show it, and a function '
+     'the user defined is theirs'),
+] + [(command, 'destructive',
+      'a program the command never shows (a substitution, `eval`/`sh -c` of a variable, a '
+      'variable with no literal value or one from `read`/`source`/the environment) is not '
+      'asked about: only what is shown to be destructive asks (decided by the user, '
+      '2026-11-21); every literal value the text does hold is still checked')
+     for command in (
+         '$(echo rm) -rf build',
+         '`echo rm` -rf build',
+         'eval "$CMD"',
+         'bash -c "$CMD"',
+         'ash -c "$CMD"',
+         'sudo $TOOL --wipe',
+         'env -i $TOOL --wipe',
+         'sudo -u app $TOOL --wipe',
+         'nice -n 5 $TOOL --wipe',
+         '/usr/bin/$TOOL -rf build',
+         '$P -rf build; P=echo',
+         'true && P=echo; $P -rf build',
+         'false || P=echo; $P -rf build',
+         'if true; then P=echo; fi; $P -rf build',
+         'case x in x) P=echo;; esac; $P -rf build',
+         '{ P=echo; }; $P -rf build',
+         '(P=echo); $P -rf build',
+         'P=echo; P=$(cat f); $P -rf build',
+         'P=echo; read P; $P -rf build',
+         'P=echo; source ./env.sh; $P -rf build',
+         'P=echo; . ./env.sh; $P -rf build',
+         'P=echo $P -rf build',
+         'P=/bin/r*; $P -rf build',
+         'P=$HOME/bin/x; $P -rf build',
+         'P=echo; x=$($P -rf build)',
+         'sleep 1 & P=echo; $P -rf build',
+         'function f {\nP=echo\n}\n$P -rf build',
+         'f() {\nP=echo\n}\n$P -rf build',
+         'for f in a b; do $f -rf build; done',
+         'eval "$(sed -n 2,99p probe.sh)"',
+     )]
 
 
 class TestDestructiveCorpus(unittest.TestCase):
@@ -301,9 +393,27 @@ class TestDestructiveCorpus(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(_destructive(command), must_block)
 
-    def test_message_tells_why_a_dynamic_command_is_blocked(self):
+    def test_a_program_the_command_never_shows_is_not_asked_about(self):
+        self.assertIsNone(playbook_core.check_destructive('x=$(printf rm); $x -rf build'))
+
+    def test_each_literal_value_is_a_line_of_its_own(self):
+        resolved = playbook_core.resolve_literal_commands('ok && P="rm -rf" || P=echo; $P build')
+        self.assertIn('rm -rf build', resolved.splitlines())
+        self.assertIn('echo build', resolved.splitlines())
+
+    def test_a_literal_command_variable_is_read_as_the_literal(self):
         result = playbook_core.check_destructive('x=rm; $x -rf build')
-        self.assertIn('decided at run time', result['msg'])
+        self.assertEqual(result['effect'], 'delete_tree')
+
+    def test_the_part_shown_is_the_simple_command_that_destroys(self):
+        result = playbook_core.check_destructive("ls && rm -rf 'my build' && make")
+        self.assertEqual(result['part'], "rm -rf 'my build'")
+
+    def test_a_deletion_inside_an_interpreter_script_shows_no_part(self):
+        """The line is the script's, not the command's: the dialog shows the command."""
+        command = "cd x && python3 -c \"import os; os.system('rm -rf build')\""
+        runnable = playbook_core.strip_inline_payloads(command)
+        self.assertEqual(playbook_core.check_destructive(runnable, command)['part'], '')
 
     def test_every_heredoc_with_the_same_delimiter_is_stripped(self):
         command = "cat > a <<EOF\nrm -rf one\nEOF\ncat > b <<EOF\nrm -rf two\nEOF"
@@ -432,6 +542,40 @@ class TestScriptFiles(unittest.TestCase):
                      executable=True)
         self.assertFalse(self._destructive('./run.sh make test'))
 
+    def test_script_named_by_a_literal_variable_is_read(self):
+        self._script('clean.sh', 'rm -rf dist\n', executable=True)
+        self.assertTrue(self._destructive('S=./clean.sh; $S'))
+        self._script('show.sh', 'ls dist\n', executable=True)
+        self.assertFalse(self._destructive('S=./show.sh; $S'))
+
+    def test_script_removing_its_own_temporary_directory_passes(self):
+        self._script('probe.js', (
+            'const fs = require("fs"); const os = require("os");\n'
+            'const dir = fs.mkdtempSync(os.tmpdir() + "/probe-");\n'
+            'try { run(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }\n'))
+        self.assertFalse(self._destructive('node probe.js'))
+        self._script('probe.py', (
+            'import shutil, tempfile\nd = tempfile.mkdtemp()\ntry:\n    pass\n'
+            'finally:\n    shutil.rmtree(d)\n'))
+        self.assertFalse(self._destructive('python3 probe.py'))
+
+    def test_temporary_directory_name_used_for_something_else_is_blocked(self):
+        cases = {
+            'other.js': 'const dir = fs.mkdtempSync("/tmp/p");\nfs.rmSync(process.argv[2], {recursive: true});\n',
+            'rebound.js': 'let dir = fs.mkdtempSync("/tmp/p");\ndir = "/home";\nfs.rmSync(dir, {recursive: true});\n',
+            'param.js': 'const dir = fs.mkdtempSync("/tmp/p");\nfunction f(dir) { fs.rmSync(dir, {recursive: true}); }\n',
+            'arrow.js': 'const dir = fs.mkdtempSync("/tmp/p");\nconst f = (dir) => fs.rmSync(dir, {recursive: true});\n',
+            'loop.js': 'const dir = fs.mkdtempSync("/tmp/p");\nfor (const dir of ["/home"]) fs.rmSync(dir, {recursive: true});\n',
+            'loop.py': 'import shutil, tempfile\nd = tempfile.mkdtemp()\nfor d in ["/home"]:\n    shutil.rmtree(d)\n',
+            'rebound.py': 'import shutil, tempfile\nd = tempfile.mkdtemp()\nd = "/home"\nshutil.rmtree(d)\n',
+            'param.py': 'import shutil, tempfile\nd = tempfile.mkdtemp()\ndef f(d):\n    shutil.rmtree(d)\n',
+        }
+        for name, text in cases.items():
+            with self.subTest(script=name):
+                self._script(name, text)
+                interpreter = 'node' if name.endswith('.js') else 'python3'
+                self.assertTrue(self._destructive(f'{interpreter} {name}'))
+
     def test_script_run_by_a_script_is_followed(self):
         self._script('outer.sh', '#!/bin/sh\nbash inner.sh\n', executable=True)
         self._script('inner.sh', 'git reset --hard\n')
@@ -446,6 +590,56 @@ class TestScriptFiles(unittest.TestCase):
         subprocess.run(git + ('add', 'mvnw'), check=True)
         subprocess.run(git + ('commit', '-q', '-m', 'wrapper'), check=True)
         self.assertFalse(self._destructive('./mvnw -q compile'))
+
+    def test_the_playbooks_installed_entry_scripts_are_its_own(self):
+        """An installed playbook (release tarball, plugin cache) is in no git
+        work tree, so the destructive gate read lab/run.py, found the rmtree of
+        its own temporary directory and denied every lab step outside this
+        repository (2026-11-17)."""
+        plugin = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, plugin)
+        os.makedirs(os.path.join(plugin, 'lab'))
+        shutil.copy(os.path.join(_ROOT, 'lab', 'run.py'), os.path.join(plugin, 'lab', 'run.py'))
+        installed = os.path.join(plugin, 'lab', 'run.py')
+        with mock.patch.object(playbook_core, 'PLAYBOOK_ROOT', plugin):
+            self.assertFalse(self._destructive(f'python3 {installed} --setup'))
+            self.assertFalse(self._destructive(f'python3 {installed} --service app --port 8080'))
+            # Outside a plugin root the very same file is read, and denied.
+            with mock.patch.object(playbook_core, 'PLAYBOOK_ROOT', self.repo):
+                self.assertTrue(self._destructive(f'python3 {installed} --setup'))
+
+    def test_another_script_in_the_plugin_directory_is_still_read(self):
+        plugin = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, plugin)
+        os.makedirs(os.path.join(plugin, 'lab'))
+        with open(os.path.join(plugin, 'lab', 'clean.py'), 'w') as f:
+            f.write('import shutil\nshutil.rmtree("build")\n')
+        with mock.patch.object(playbook_core, 'PLAYBOOK_ROOT', plugin):
+            self.assertTrue(self._destructive(f'python3 {plugin}/lab/clean.py'))
+
+    def test_an_entry_script_linked_to_a_file_elsewhere_is_still_read(self):
+        plugin = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, plugin)
+        os.makedirs(os.path.join(plugin, 'lab'))
+        self._script('evil.py', 'import shutil\nshutil.rmtree("build")\n')
+        os.symlink(os.path.join(self.repo, 'evil.py'), os.path.join(plugin, 'lab', 'run.py'))
+        with mock.patch.object(playbook_core, 'PLAYBOOK_ROOT', plugin):
+            self.assertTrue(self._destructive(f'python3 {plugin}/lab/run.py --setup'))
+
+    def test_every_script_the_skills_tell_the_model_to_run_is_an_entry_script(self):
+        """A new `python3 <playbook>/x.py` in a skill, missing from the list,
+        would be denied on every installed copy, as lab/run.py was."""
+        named: set[str] = set()
+        for folder in ('skills', 'agents'):
+            for dirpath, _dirs, files in os.walk(os.path.join(_ROOT, folder)):
+                for name in files:
+                    if name.endswith('.md'):
+                        with open(os.path.join(dirpath, name), encoding='utf-8') as f:
+                            named.update(re.findall(r'<playbook>/([\w./-]+\.(?:py|sh))', f.read()))
+        self.assertTrue(named, 'no <playbook>/ script found: the pattern no longer matches the docs')
+        self.assertLessEqual(named, set(playbook_core.PLAYBOOK_ENTRY_SCRIPTS))
+        for rel in playbook_core.PLAYBOOK_ENTRY_SCRIPTS:
+            self.assertTrue(os.path.isfile(os.path.join(_ROOT, rel)), rel)
 
     def test_missing_script_is_not_read(self):
         self.assertFalse(self._destructive('python3 not_there.py'))
@@ -508,6 +702,34 @@ class TestGitCalls(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertTrue(playbook_core.is_git_push(command))
                 self.assertEqual(playbook_core.push_targets(command, '/w/repo')[0].repo, '/w/repo')
+
+    def test_a_dry_run_is_read_per_push_in_every_form(self):
+        """Replaces the whole-command `--dry-run` exemption of the review gate:
+        a dry run publishes nothing only for its own push."""
+        for command, revs in (('echo main | xargs git push --dry-run origin', [[]]),
+                              ("sh -c 'git push --dry-run origin main && git push origin main'",
+                               [[], ['main']]),
+                              ('eval "git push origin main; git push -n origin main"',
+                               [['main'], []]),
+                              ('git push --porcelain origin main', [['main']])):
+            with self.subTest(command=command):
+                self.assertEqual([t.revs for t in playbook_core.push_targets(command, '/w/repo')],
+                                 revs)
+        for command in (r'find . -exec git push --dry-run origin main \;',
+                        'watch git push -n origin main', 'flock /tmp/l git push --dry-run origin main'):
+            with self.subTest(command=command):
+                self.assertIsNone(playbook_core.push_targets(command, '/w/repo')[0].repo)
+
+    def test_an_unknown_push_option_is_unknown_in_every_form(self):
+        """The closed option set holds where the push runs inside another program."""
+        for command in ('git push --dr origin main', 'echo main | xargs git push -fn origin',
+                        "sh -c 'git push --no-dry-run origin main'",
+                        'eval "git push -d --no-delete origin main"'):
+            with self.subTest(command=command):
+                target = playbook_core.push_targets(command, '/w/repo')[0]
+                self.assertEqual(target.repo, '/w/repo')
+                self.assertIsNone(target.revs)
+                self.assertIn('does not read the option', target.reason)
 
     def test_git_run_by_another_program_still_writes_history(self):
         calls = playbook_core.git_calls(r'find . -exec git commit -m x \;', '/w/repo')

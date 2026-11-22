@@ -179,8 +179,10 @@ the design below, all agreed with the user:
 - **Setup and pull.** `--setup` checks Docker, daemon permissions, Compose
   version and disk space, then pulls by digest on the user's machine. The
   playbook ships no image.
-- **Bind mounts.** Refused by default, with the list; `--allow-bind-mounts`
-  overrides.
+- **Mounts of this computer.** A read-only mount inside the project is kept; a
+  read-write one is dropped (the image's content stands in) so the lab never
+  writes to the developer's files; a read-only mount outside the project, and a
+  `configs:`/`secrets:` file outside it, are refused.
 - **Tests.** The end-to-end test is opt-in (`PLAYBOOK_LAB_IT=1`) because it
   needs the ZAP image (3.75 GB on disk). Run on 2026-11-16: both tests pass
   (bind mount refused before start; scan reports and leaves no container,

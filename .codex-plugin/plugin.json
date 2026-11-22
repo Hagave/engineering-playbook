@@ -1,7 +1,7 @@
 {
   "name": "playbook",
-  "version": "4.1.0",
-  "description": "AI Engineering Playbook — Codex adapter wrapping the engineering-* skill catalog (40 skills).",
+  "version": "4.2.0",
+  "description": "AI Engineering Playbook — Codex adapter wrapping the engineering-* skill catalog (42 skills).",
   "author": {
     "name": "hagave"
   },
@@ -53,7 +53,9 @@
     "./skills/engineering-rust",
     "./skills/engineering-csharp",
     "./skills/engineering-kotlin",
-    "./skills/engineering-ruby"
+    "./skills/engineering-ruby",
+    "./skills/engineering-python",
+    "./skills/engineering-cpp"
   ],
   "hooks": "./.codex-plugin/hooks.json",
   "interface": {
