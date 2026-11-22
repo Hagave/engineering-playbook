@@ -29,6 +29,7 @@ def _every_skill_named(table: dict) -> list[str]:
     names = list(table['companions'])
     names += [row['skill'] for row in table['languages'].values()]
     names += [row['skill'] for row in table['frameworks']]
+    names += [row['skill'] for row in table['architectures']]
     names += [row['skill'] for row in table['topics']]
     names += [row['when_framework'] for row in table['topics'] if 'when_framework' in row]
     return names
@@ -89,6 +90,32 @@ class TestSkillRequirementsTable(unittest.TestCase):
                 with self.subTest(ext=ext):
                     self.assertNotIn(ext, seen, f'{ext} is listed for {seen.get(ext)} and {language}')
                     seen[ext] = language
+
+    def test_every_architecture_skill_has_a_row(self) -> None:
+        listed = {row['skill'] for row in self.table['architectures']}
+        skills = {name for name in os.listdir(_SKILLS) if name.startswith('engineering-arch-')}
+        self.assertEqual(listed, skills)
+
+    def test_every_architecture_row_has_one_trigger_shape(self) -> None:
+        for row in self.table['architectures']:
+            with self.subTest(skill=row['skill']):
+                by_layers = bool(row.get('layers'))
+                by_modules = bool(row.get('container')) and bool(
+                    row.get('module_dirs') or row.get('module_files'))
+                self.assertTrue(by_layers != by_modules,
+                                'a row is matched by layers or by a module container, never both')
+
+    def test_architecture_markers_come_from_the_skill_tree(self) -> None:
+        for row in self.table['architectures']:
+            with open(os.path.join(_SKILLS, row['skill'], 'SKILL.md'), encoding='utf-8') as f:
+                tree = re.search(r'```\n(.*?)```', f.read(), re.DOTALL)
+            self.assertIsNotNone(tree, f'{row["skill"]} draws no directory tree')
+            markers = list(row.get('layers', ())) + list(row.get('module_dirs', ()))
+            markers += [row['container']] if row.get('container') else []
+            markers += [p.split('.')[1] for p in row.get('module_files', ())]
+            for marker in markers:
+                with self.subTest(skill=row['skill'], marker=marker):
+                    self.assertRegex(tree.group(1), r'\b' + re.escape(marker) + r'\b')
 
 
 if __name__ == '__main__':

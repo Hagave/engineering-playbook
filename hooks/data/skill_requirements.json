@@ -32,6 +32,26 @@
       "manifests": {"package.json": ["@prisma/client", "prisma"]}
     }
   ],
+  "_architectures_comment": "One row per architecture skill, matched by the directories above a written source file, never by its content, and taken from the tree each skill draws. layers: an ancestor of the file, up to the project root, holds every one of these directories. container with module_dirs or module_files: the file sits under <container>/<module>/, and a module of that container has one of these subdirectories (module_dirs) or a file directly inside matching one of these names (module_files). A file that rows of two architectures match needs neither: the structure is ambiguous, and the session notice says so.",
+  "architectures": [
+    {
+      "skill": "engineering-arch-hexagonal",
+      "name": "hexagonal",
+      "layers": ["domain", "application", "infrastructure"]
+    },
+    {
+      "skill": "engineering-arch-modular",
+      "name": "modular",
+      "container": "modules",
+      "module_dirs": ["controllers", "handlers", "services", "repositories"]
+    },
+    {
+      "skill": "engineering-arch-mvc",
+      "name": "mvc",
+      "container": "modules",
+      "module_files": ["*.controller.*", "*.handler.*", "*.service.*", "*.repository.*"]
+    }
+  ],
   "topics": [
     {
       "skill": "engineering-docker",

@@ -372,6 +372,13 @@ def main() -> None:
         context += '\n\n' + language
 
     try:
+        architecture = playbook_core.architecture_notice(str(input_data.get('cwd') or os.getcwd()))
+    except Exception:
+        architecture = ''  # fail-open: the gate still checks each write on its own
+    if architecture:
+        context += '\n\n' + architecture
+
+    try:
         sast = playbook_core.sast_notice(str(input_data.get('cwd') or os.getcwd()))
     except Exception:
         sast = ''  # fail-open: detection is a convenience, never a reason to lose context

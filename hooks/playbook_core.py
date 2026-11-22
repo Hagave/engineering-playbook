@@ -1924,6 +1924,193 @@ def _imported_name(text: str, names: list[str]) -> str:
     return ''
 
 
+_ARCH_ENTRY_LIMIT = 200
+_ARCH_SCAN_DIR_LIMIT = 4000
+_ARCH_SCAN_DEPTH = 6
+_ARCH_NOTICE_LIMIT = 6
+_ARCH_SCAN_SKIP = frozenset({'node_modules', 'vendor', 'dist', 'build', 'target', 'out',
+                             '__pycache__', 'venv', 'coverage'})
+
+
+class ArchitectureMatch(NamedTuple):
+    skill: str
+    name: str
+    base: str
+    evidence: str
+
+
+def _architecture_rows(table: dict) -> list[dict]:
+    rows = table.get('architectures')
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict) and row.get('skill')]
+
+
+def _child_names(directory: str, limit: int) -> tuple[list[str], list[str]]:
+    """(subdirectories, files) directly inside `directory`, reading at most
+    `limit` entries. An unreadable directory has neither."""
+    dirs: list[str] = []
+    files: list[str] = []
+    try:
+        with os.scandir(directory) as entries:
+            for count, entry in enumerate(entries):
+                if count >= limit:
+                    break
+                try:
+                    (dirs if entry.is_dir(follow_symlinks=False) else files).append(entry.name)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return dirs, files
+
+
+def _module_evidence(container: str, row: dict, cache: dict[tuple[str, str], str]) -> str:
+    """'<module>/<entry>' for the first module of `container` with the row's
+    shape, '' when none has it."""
+    key = (container, str(row.get('name') or row.get('skill')))
+    if key in cache:
+        return cache[key]
+    wanted_dirs = {str(d) for d in row.get('module_dirs', ())}
+    patterns = [str(p) for p in row.get('module_files', ())]
+    evidence = ''
+    modules, _ = _child_names(container, _ARCH_ENTRY_LIMIT)
+    for module in sorted(modules):
+        subdirs, files = _child_names(os.path.join(container, module), _ARCH_ENTRY_LIMIT)
+        hit = (next((d for d in sorted(subdirs) if d in wanted_dirs), '')
+               or next((f for f in sorted(files)
+                        if any(fnmatch.fnmatchcase(f, p) for p in patterns)), ''))
+        if hit:
+            evidence = f'{module}/{hit}'
+            break
+    cache[key] = evidence
+    return evidence
+
+
+def _architecture_at(directory: str, row: dict, cache: dict[tuple[str, str], str]) -> str:
+    """What shows `directory` to be the base of the row's structure, '' if it is not."""
+    layers = [str(layer) for layer in row.get('layers', ())]
+    if layers:
+        if all(os.path.isdir(os.path.join(directory, layer)) for layer in layers):
+            return ', '.join(layers)
+        return ''
+    container = str(row.get('container') or '')
+    if container and os.path.basename(directory) == container:
+        hit = _module_evidence(directory, row, cache)
+        return f'{container}/{hit}' if hit else ''
+    return ''
+
+
+def _ancestors(path: str, root: str) -> list[str]:
+    """The directories above `path`, nearest first, up to and including `root`;
+    [] for a path outside it."""
+    base = os.path.realpath(root)
+    current = os.path.realpath(os.path.dirname(path))
+    if current != base and not current.startswith(base + os.sep):
+        return []
+    chain = [current]
+    while current != base:
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+        chain.append(current)
+    return chain
+
+
+def architecture_matches(path: str, root: str, table: dict) -> list[ArchitectureMatch]:
+    """Each architecture row whose structure holds the file at `path`, with the
+    nearest base for that row. A container row needs the file inside one of its
+    modules, so a file sitting directly in `modules/` matches none."""
+    cache: dict[tuple[str, str], str] = {}
+    chain = _ancestors(path, root or os.getcwd())
+    found: list[ArchitectureMatch] = []
+    for row in _architecture_rows(table):
+        for depth, directory in enumerate(chain):
+            if row.get('container') and depth == 0:
+                continue
+            evidence = _architecture_at(directory, row, cache)
+            if evidence:
+                found.append(ArchitectureMatch(str(row['skill']), str(row.get('name') or row['skill']),
+                                               directory, evidence))
+                break
+    return found
+
+
+def _scan_architectures(root: str) -> tuple[list[ArchitectureMatch], bool]:
+    """Every base of a known architecture in the tree under `root`, and whether
+    the scan stopped at its directory limit before seeing the whole tree."""
+    rows = _architecture_rows(skill_requirements())
+    if not rows:
+        return [], False
+    cache: dict[tuple[str, str], str] = {}
+    found: list[ArchitectureMatch] = []
+    stack = [(os.path.realpath(root), 0)]
+    visited = 0
+    while stack:
+        if visited >= _ARCH_SCAN_DIR_LIMIT:
+            return found, True
+        directory, depth = stack.pop()
+        visited += 1
+        for row in rows:
+            evidence = _architecture_at(directory, row, cache)
+            if evidence:
+                found.append(ArchitectureMatch(str(row['skill']), str(row.get('name') or row['skill']),
+                                               directory, evidence))
+        if depth >= _ARCH_SCAN_DEPTH:
+            continue
+        subdirs, _ = _child_names(directory, _ARCH_SCAN_DIR_LIMIT)
+        for name in sorted(subdirs, reverse=True):
+            if not name.startswith('.') and name not in _ARCH_SCAN_SKIP:
+                stack.append((os.path.join(directory, name), depth + 1))
+    return found, False
+
+
+def _contains(outer: str, inner: str) -> bool:
+    return inner == outer or inner.startswith(outer + os.sep)
+
+
+def architecture_notice(cwd: str) -> str:
+    """Session context naming each architecture found in the project and the
+    skill a write under it requires, '' when none is found. Two structures where
+    one sits inside the other are named as overlapping: a file under both needs
+    neither, so the model is told to confirm the architecture there."""
+    root = cwd or os.getcwd()
+    found, truncated = _scan_architectures(root)
+    if not found:
+        if truncated:
+            return (f'[playbook:architecture] The scan stopped after {_ARCH_SCAN_DIR_LIMIT} '
+                    'directories without finding a known architecture; the gate still checks '
+                    'each write against the structure above it.')
+        return ''
+
+    def shown(match: ArchitectureMatch) -> str:
+        where = _project_relative(match.base, root)
+        return f'{match.name} at {where if where != "." else "the project root"} ({match.evidence})'
+
+    listed = found[:_ARCH_NOTICE_LIMIT]
+    skills = sorted({m.skill for m in found})
+    if len(skills) == 1:
+        text = (f'[playbook:architecture] Detected {"; ".join(shown(m) for m in listed)}. '
+                f'A source write under it requires {skills[0]}: load it before writing code there.')
+    else:
+        text = (f'[playbook:architecture] Architectures found: {"; ".join(shown(m) for m in listed)}. '
+                'A source write requires the skill of the structure it sits under.')
+    if len(found) > len(listed):
+        text += f' {len(found) - len(listed)} more not listed.'
+    overlaps = sorted({_project_relative(inner.base, root)
+                       for outer in found for inner in found
+                       if outer.skill != inner.skill and _contains(outer.base, inner.base)})
+    if overlaps:
+        text += (f' Overlapping structures at {", ".join(overlaps)}: a file there matches two '
+                 'architectures and the gate requires neither. Confirm with the user which one '
+                 'applies before changing the structure there.')
+    if truncated:
+        text += (f' The scan stopped after {_ARCH_SCAN_DIR_LIMIT} directories, so a structure '
+                 'deeper in the tree is not listed; the gate still checks each write.')
+    return text
+
+
 def _requirements_for_path(path: str, written: str, root: str, table: dict,
                            manifest_cache: dict[str, object]) -> list[SkillRequirement]:
     is_source = _ends_with_code_ext(path)
@@ -1957,6 +2144,14 @@ def _requirements_for_path(path: str, written: str, root: str, table: dict,
                     found.append(SkillRequirement(
                         str(row['skill']), f'{dep} in {_project_relative(manifest, root)}'))
                     break
+
+    if is_source:
+        matches = architecture_matches(path, root, table)
+        if len({m.skill for m in matches}) == 1:
+            match = matches[0]
+            found.append(SkillRequirement(
+                match.skill,
+                f'{match.name} layout at {_project_relative(match.base, root)} ({match.evidence})'))
 
     text = (written + '\n' + _read_source(path)) if is_source else ''
     for row in table.get('topics', ()):

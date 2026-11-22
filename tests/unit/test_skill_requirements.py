@@ -315,6 +315,124 @@ class TestNestTopics(_ProjectTest):
         self.assertNotIn('engineering-nestjs-logger', [r.skill for r in reqs])
 
 
+class TestArchitectureByLayout(_ProjectTest):
+
+    _HEX = 'engineering-arch-hexagonal'
+    _MODULAR = 'engineering-arch-modular'
+    _MVC = 'engineering-arch-mvc'
+    _ARCH = (_HEX, _MODULAR, _MVC)
+
+    def _dirs(self, *rels: str) -> None:
+        for rel in rels:
+            os.makedirs(os.path.join(self.dir, rel), exist_ok=True)
+
+    def _archs(self, rel: str) -> list[str]:
+        return [s for s in self._skills(rel, 'export const x = 1;\n') if s in self._ARCH]
+
+    def test_hexagonal_layers_require_the_hexagonal_skill(self) -> None:
+        self._dirs('src/domain', 'src/application', 'src/infrastructure')
+        self.assertEqual(self._archs('src/domain/user.entity.ts'), [self._HEX])
+        self.assertEqual(self._reasons('src/main.ts')[self._HEX],
+                         'hexagonal layout at src (domain, application, infrastructure)')
+
+    def test_a_missing_layer_is_not_hexagonal(self) -> None:
+        self._dirs('src/domain', 'src/application')
+        self.assertEqual(self._archs('src/domain/user.entity.ts'), [])
+
+    def test_a_file_outside_the_base_needs_no_architecture(self) -> None:
+        self._dirs('src/domain', 'src/application', 'src/infrastructure')
+        self.assertEqual(self._archs('scripts/seed.ts'), [])
+
+    def test_a_package_level_base_is_found_above_the_file(self) -> None:
+        self._dirs('src/shop/domain', 'src/shop/application', 'src/shop/infrastructure')
+        self.assertIn('hexagonal layout at src/shop',
+                      self._reasons('src/shop/domain/order.py').get(self._HEX, ''))
+
+    def test_a_module_with_layer_folders_is_modular(self) -> None:
+        self._dirs('src/modules/users/services', 'src/modules/users/controllers')
+        self.assertEqual(self._archs('src/modules/users/services/users.service.ts'), [self._MODULAR])
+
+    def test_a_new_module_takes_the_shape_of_its_siblings(self) -> None:
+        self._dirs('src/modules/users/repositories')
+        self.assertEqual(self._archs('src/modules/orders/orders.ts'), [self._MODULAR])
+
+    def test_a_flat_feature_module_is_mvc(self) -> None:
+        self._file('src/modules/users/users.service.ts')
+        self.assertEqual(self._archs('src/modules/users/users.controller.ts'), [self._MVC])
+
+    def test_a_file_directly_in_the_container_matches_no_module(self) -> None:
+        self._file('src/modules/users/users.service.ts')
+        self.assertEqual(self._archs('src/modules/index.ts'), [])
+
+    def test_modules_of_both_shapes_are_ambiguous_and_require_neither(self) -> None:
+        self._file('src/modules/users/users.service.ts')
+        self._dirs('src/modules/orders/services')
+        self.assertEqual(self._archs('src/modules/users/users.controller.ts'), [])
+
+    def test_overlap_is_ambiguous_only_where_both_hold_the_file(self) -> None:
+        self._dirs('src/domain', 'src/application', 'src/infrastructure')
+        self._file('src/modules/users/users.service.ts')
+        self.assertEqual(self._archs('src/modules/users/users.controller.ts'), [])
+        self.assertEqual(self._archs('src/domain/user.entity.ts'), [self._HEX])
+
+    def test_a_non_source_file_needs_no_architecture(self) -> None:
+        self._dirs('src/domain', 'src/application', 'src/infrastructure')
+        self.assertEqual([s for s in self._skills('src/domain/README.md', '# x') if s in self._ARCH], [])
+
+    def test_a_shell_write_reaches_the_architecture_row(self) -> None:
+        self._dirs('src/domain', 'src/application', 'src/infrastructure')
+        command = f'cat > {self.dir}/src/domain/user.entity.ts <<EOF\nexport class User {{}}\nEOF'
+        reqs = playbook_core.required_skills('Bash', {'command': command}, command, self.dir)
+        self.assertIn(self._HEX, [r.skill for r in reqs])
+
+
+class TestArchitectureNotice(_ProjectTest):
+
+    def _hexagonal(self, base: str = 'src') -> None:
+        for layer in ('domain', 'application', 'infrastructure'):
+            os.makedirs(os.path.join(self.dir, base, layer))
+
+    def test_no_structure_says_nothing(self) -> None:
+        self._file('src/index.ts')
+        self.assertEqual(playbook_core.architecture_notice(self.dir), '')
+
+    def test_one_structure_names_it_and_its_skill(self) -> None:
+        self._hexagonal()
+        notice = playbook_core.architecture_notice(self.dir)
+        self.assertIn('[playbook:architecture] Detected hexagonal at src', notice)
+        self.assertIn('requires engineering-arch-hexagonal', notice)
+
+    def test_an_overlap_is_named_and_sent_to_the_user(self) -> None:
+        self._hexagonal()
+        self._file('src/modules/users/users.service.ts')
+        notice = playbook_core.architecture_notice(self.dir)
+        self.assertIn('Overlapping structures at src/modules', notice)
+        self.assertIn('Confirm with the user', notice)
+
+    def test_dependency_folders_are_not_scanned(self) -> None:
+        self._hexagonal('node_modules/pkg')
+        self.assertEqual(playbook_core.architecture_notice(self.dir), '')
+
+    def test_a_scan_cut_short_says_so(self) -> None:
+        self._hexagonal()
+        saved = playbook_core._ARCH_SCAN_DIR_LIMIT
+        self.addCleanup(setattr, playbook_core, '_ARCH_SCAN_DIR_LIMIT', saved)
+        playbook_core._ARCH_SCAN_DIR_LIMIT = 2
+        for i in range(3):
+            os.makedirs(os.path.join(self.dir, f'z{i}'))
+        notice = playbook_core.architecture_notice(self.dir)
+        self.assertIn('Detected hexagonal at src', notice)
+        self.assertIn('The scan stopped after 2 directories', notice)
+
+    def test_a_scan_cut_short_before_any_match_still_says_so(self) -> None:
+        saved = playbook_core._ARCH_SCAN_DIR_LIMIT
+        self.addCleanup(setattr, playbook_core, '_ARCH_SCAN_DIR_LIMIT', saved)
+        playbook_core._ARCH_SCAN_DIR_LIMIT = 1
+        os.makedirs(os.path.join(self.dir, 'a0'))
+        self.assertIn('stopped after 1 directories without finding',
+                      playbook_core.architecture_notice(self.dir))
+
+
 class TestThrowawayAndFailure(_ProjectTest):
 
     def test_a_git_ignored_destination_needs_nothing(self) -> None:

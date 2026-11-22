@@ -1,7 +1,7 @@
 ---
 name: engineering-governance
 description: "Governance rules for any code implementation task. Use when implementing a feature, fix, or change: defines who owns each decision (and so when to ask), prohibited behaviors, context/clear ownership, and the validation checklist that must pass before every response. Activate for any coding task."
-version: 7.2.0
+version: 7.3.0
 user-invocable: false
 ---
 
@@ -26,7 +26,7 @@ Before generating the implementation checklist (engineering-implement Step 6), l
 
 Do not wait for a task description to match a keyword before loading these. Load all of them before the checklist step — the checklist is where security, concurrency, and error-handling constraints must appear as explicit items, not as an afterthought during implementation.
 
-The skill gate enforces this list and extends it to what each written file calls for: the framework skill its nearest manifest names (`@nestjs/core` in `package.json` → `engineering-nestjs`) and the skill of the topic it touches (a Dockerfile → `engineering-docker`, a message-broker import → `engineering-rabbitmq` or `engineering-kafka`, a test file → `engineering-testing`), whether or not the scaffold loaded it. A setup skill is required again whenever its topic is touched, in any session.
+The skill gate enforces this list and extends it to what each written file calls for: the framework skill its nearest manifest names (`@nestjs/core` in `package.json` → `engineering-nestjs`), the architecture skill of the structure the file sits under (`domain/`, `application/` and `infrastructure/` side by side → `engineering-arch-hexagonal`), and the skill of the topic it touches (a Dockerfile → `engineering-docker`, a message-broker import → `engineering-rabbitmq` or `engineering-kafka`, a test file → `engineering-testing`), whether or not the scaffold loaded it. A setup skill is required again whenever its topic is touched, in any session.
 
 ---
 
@@ -54,7 +54,7 @@ Before any Write or Edit of a source file — any language the project is writte
 
 Four additional gates are enforced mechanically by the plugin hook — they cannot be satisfied by intending to comply:
 
-- **Skill gate:** writing any source file, in any language, is denied until this skill (`engineering-governance`) and every skill the file calls for — the companions, its language opt-in, its framework, its topic — have been loaded via the Skill tool in the current session. A topic file that is not source (a Dockerfile, a compose file, a Prisma schema) needs its topic skill. The deny names each missing skill and the reason; load them all, then retry. A `/clear` starts a new session, so they are loaded again after it.
+- **Skill gate:** writing any source file, in any language, is denied until this skill (`engineering-governance`) and every skill the file calls for — the companions, its language opt-in, its framework, its architecture, its topic — have been loaded via the Skill tool in the current session. A topic file that is not source (a Dockerfile, a compose file, a Prisma schema) needs its topic skill. The deny names each missing skill and the reason; load them all, then retry. A `/clear` starts a new session, so they are loaded again after it.
 - **Validation gate (Stop):** ending the turn is blocked if source files were written and no validation command (tsc, lint, tests) ran afterwards. Run the validation checklist below, or report explicitly what is blocking it.
 - **Review gate (pre-push):** `git push` is denied until what it publishes has been reviewed via the `engineering-code-review` skill. A commit of exactly what the review read in the working tree is covered; a file changed after the read is code no review has read, and the gate names it so only it is reviewed again. Only the user can skip it, by running the push themselves or by starting Claude Code with `PLAYBOOK_SKIP_REVIEW=1`; nothing typed in the chat lifts it, you can never waive it for yourself, and never suggest skipping it as a way past your own findings.
 - **Destructive-command gate:** `rm -r`, `git reset --hard`, force push, `git clean`, mass delete and destructive SQL need the user's approval, and you cannot approve it yourself.
