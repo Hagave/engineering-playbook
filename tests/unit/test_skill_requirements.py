@@ -385,6 +385,29 @@ class TestArchitectureByLayout(_ProjectTest):
         reqs = playbook_core.required_skills('Bash', {'command': command}, command, self.dir)
         self.assertIn(self._HEX, [r.skill for r in reqs])
 
+    def test_every_write_channel_reaches_the_architecture_row(self) -> None:
+        self._dirs('src/domain', 'src/application', 'src/infrastructure')
+        target = os.path.join(self.dir, 'src', 'domain', 'user.entity.ts')
+        self._file('draft.ts', 'export class User {}\n')
+        channels = {
+            'Edit': {'file_path': target, 'old_string': 'a', 'new_string': 'b'},
+            'MultiEdit': {'file_path': target, 'edits': [{'old_string': 'a', 'new_string': 'b'}]},
+            'Bash tee': {'command': f'echo "export {{}}" | tee {target}'},
+            'Bash cp': {'command': f'cp {self.dir}/draft.ts {target}'},
+            'Bash mv': {'command': f'mv {self.dir}/draft.ts {target}'},
+        }
+        for channel, tool_input in channels.items():
+            tool = channel.split()[0]
+            command = str(tool_input.get('command') or '')
+            with self.subTest(channel=channel):
+                reqs = playbook_core.required_skills(tool, tool_input, command, self.dir)
+                self.assertIn(self._HEX, [r.skill for r in reqs])
+
+    def test_a_structure_at_the_project_root_is_named_as_such(self) -> None:
+        self._dirs('domain', 'application', 'infrastructure')
+        self.assertEqual(self._reasons('domain/user.go')[self._HEX],
+                         'hexagonal layout at the project root (domain, application, infrastructure)')
+
 
 class TestArchitectureNotice(_ProjectTest):
 

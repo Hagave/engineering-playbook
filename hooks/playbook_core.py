@@ -2066,6 +2066,11 @@ def _scan_architectures(root: str) -> tuple[list[ArchitectureMatch], bool]:
     return found, False
 
 
+def _shown_base(base: str, root: str) -> str:
+    where = _project_relative(base, root)
+    return 'the project root' if where == '.' else where
+
+
 def _contains(outer: str, inner: str) -> bool:
     return inner == outer or inner.startswith(outer + os.sep)
 
@@ -2085,8 +2090,7 @@ def architecture_notice(cwd: str) -> str:
         return ''
 
     def shown(match: ArchitectureMatch) -> str:
-        where = _project_relative(match.base, root)
-        return f'{match.name} at {where if where != "." else "the project root"} ({match.evidence})'
+        return f'{match.name} at {_shown_base(match.base, root)} ({match.evidence})'
 
     listed = found[:_ARCH_NOTICE_LIMIT]
     skills = sorted({m.skill for m in found})
@@ -2151,7 +2155,7 @@ def _requirements_for_path(path: str, written: str, root: str, table: dict,
             match = matches[0]
             found.append(SkillRequirement(
                 match.skill,
-                f'{match.name} layout at {_project_relative(match.base, root)} ({match.evidence})'))
+                f'{match.name} layout at {_shown_base(match.base, root)} ({match.evidence})'))
 
     text = (written + '\n' + _read_source(path)) if is_source else ''
     for row in table.get('topics', ()):
