@@ -465,6 +465,18 @@ STRINGS: dict[str, dict[str, str]] = {
         'pt-br': 'Já respondido: nada a fazer.',
         'es': 'Ya respondido: nada que hacer.',
     },
+    'snapshot_saved': {
+        'en': ('[playbook:safety] This command discards uncommitted changes, so they were saved '
+               'first and nothing is lost: {saved}. To get them back: `git -C <repo> stash apply '
+               '<commit>`. Say so to the user when the discarded changes were theirs, not yours.'),
+        'pt-br': ('[playbook:safety] Este comando descarta mudanças não commitadas, então elas '
+                  'foram salvas antes e nada se perde: {saved}. Para recuperar: `git -C <repo> '
+                  'stash apply <commit>`. Avise o usuário quando as mudanças descartadas eram '
+                  'dele, não suas.'),
+        'es': ('[playbook:safety] Este comando descarta cambios sin commit, así que se guardaron '
+               'antes y no se pierde nada: {saved}. Para recuperarlos: `git -C <repo> stash apply '
+               '<commit>`. Avisa al usuario cuando los cambios descartados eran suyos, no tuyos.'),
+    },
     'destructive_part': {
         'en': 'That is one part of a longer command: approving runs the whole command.',
         'pt-br': 'Esse é um trecho de um comando maior: aprovar roda o comando inteiro.',
