@@ -1557,6 +1557,7 @@ def _waiting_notice() -> str:
     if _AGENT_ID or not _SESSION_ID:
         return ''
     try:
+        playbook_core.consent_drop_superseded(STATE_DIR, _SESSION_ID)
         fresh = playbook_core.consent_unannounced(STATE_DIR, _SESSION_ID)
     except OSError:
         return ''

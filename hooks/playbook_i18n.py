@@ -552,8 +552,15 @@ STRINGS: dict[str, dict[str, str]] = {
         'pt-br': 'O modo auto está esperando a sua resposta:',
         'es': 'El modo auto espera tu respuesta:',
     },
-    'tmp_row': {'en': '#{id} {effect}: {command}', 'pt-br': '#{id} {effect}: {command}',
-                'es': '#{id} {effect}: {command}'},
+    'tmp_row': {'en': '#{id} {effect}: {command} ({age})',
+                'pt-br': '#{id} {effect}: {command} ({age})',
+                'es': '#{id} {effect}: {command} ({age})'},
+    'tmp_age': {'en': 'queued {age} ago', 'pt-br': 'na fila há {age}', 'es': 'en cola hace {age}'},
+    'tmp_superseded': {
+        'en': 'What #{id} removes is already gone: nothing left to approve.',
+        'pt-br': 'O que #{id} apaga já não existe: nada a aprovar.',
+        'es': 'Lo que borra #{id} ya no existe: nada que aprobar.',
+    },
     'tmp_hint': {
         'en': 'Click, or ctrl+x tab, the arrows and Enter. The rest of the work goes on.',
         'pt-br': 'Clique, ou ctrl+x tab, as setas e Enter. O resto do trabalho segue.',
