@@ -11,7 +11,10 @@ Text addressed to the model stays in English; only what the person reads is
 here. A string missing in a language falls back to English, never to a blank.
 """
 
+import json
 import os
+import re
+import tempfile
 
 # Stored value -> name shown in the language picker, each in its own language.
 LANGUAGE_LABELS = {
@@ -58,11 +61,88 @@ def from_locale(environ: dict) -> str:
     return DEFAULT_LANGUAGE
 
 
-def resolve(preference: str, environ: dict | None = None) -> str:
-    """The language text is shown in: the preference, or the locale for 'auto'."""
+STATE_DIR = os.path.expanduser('~/.claude/hooks')
+_REMEMBERED_FILE = '.playbook-language.json'
+
+# What the words of each language give away. Words two of the languages share
+# (para, como, porque, esta) are left out: they decide nothing.
+def _words(text: str) -> frozenset[str]:
+    return frozenset(text.split())
+
+
+_MARKERS: dict[str, frozenset[str]] = {
+    'en': _words('the is are was were and to of that with this for it you not have has be '
+                 'what how why when where which can could should would do does did if but '
+                 'from they we will my your please'),
+    'pt-br': _words('não você vocês isso uma são também então pra já pelo pela dos das nos '
+                    'ao às ainda esse essa isto aqui só mesmo sim ele ela nós meu seu '
+                    'minha tem foi estão com mas quando agora fazer esses essas deste desta '
+                    'nesse nessa onde seja pode podem preciso quero eu dele dela ter tudo'),
+    'es': _words('qué cómo también pero muy hay el los las usted ustedes con esto eso ahora '
+                 'cuando sí aquí yo mi tu y una un por favor hacer fue son puede pueden '
+                 'quiero necesito tengo del estos donde todo'),
+}
+_DIACRITICS = {'pt-br': 'ãõç', 'es': 'ñ¿¡'}
+_WORD_RE = re.compile(r"[a-zà-ÿñ¿¡']+")
+_DETECT_MIN_HITS = 3
+_DETECT_MAX_CHARS = 4000
+
+
+def detect(text: str) -> str | None:
+    """The language a typed message is written in, or None when it does not say:
+    too short, mixed, or in a language the playbook does not offer.
+
+    A word list, not a model: the hook runs on every prompt and must stay in
+    milliseconds. The trade-off is accepted knowingly: a short prompt ("sim")
+    settles nothing and the language stays as it was, and a message needs a
+    clear lead (twice the runner-up) so pasted English inside Portuguese prose
+    does not flip it."""
+    lowered = text[:_DETECT_MAX_CHARS].lower()
+    words = _WORD_RE.findall(lowered)
+    scores = {language: sum(word in markers for word in words)
+              for language, markers in _MARKERS.items()}
+    for language, marks in _DIACRITICS.items():
+        scores[language] += 2 * len({char for char in lowered if char in marks})
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    (best, top), (_, second) = ranked[0], ranked[1]
+    return best if top >= _DETECT_MIN_HITS and top >= 2 * second else None
+
+
+def remember(language: str, state_dir: str = STATE_DIR) -> None:
+    """Keep the language the user writes in, for the text the playbook shows
+    that no model writes (dialogs, the panel). Best effort: a state directory
+    that cannot be written loses a convenience, never a prompt."""
+    if language not in LANGUAGE_NAMES or remembered(state_dir) == language:
+        return
+    path = os.path.join(state_dir, _REMEMBERED_FILE)
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile('w', dir=state_dir, delete=False, suffix='.tmp') as tmp:
+            json.dump({'language': language}, tmp)
+        os.replace(tmp.name, path)
+    except OSError:
+        pass
+
+
+def remembered(state_dir: str = STATE_DIR) -> str | None:
+    """The language `remember` kept, None when there is none or it is unreadable."""
+    try:
+        with open(os.path.join(state_dir, _REMEMBERED_FILE)) as handle:
+            value = json.load(handle).get('language')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if value in LANGUAGE_NAMES else None
+
+
+def resolve(preference: str, environ: dict | None = None, state_dir: str = STATE_DIR) -> str:
+    """The language text is shown in: the preference; for 'auto', the language
+    the user last wrote in, then the locale. A caller that passes `environ` asks
+    for the locale alone."""
     if preference in LANGUAGE_NAMES:
         return preference
-    return from_locale(os.environ if environ is None else environ)
+    if environ is None:
+        return remembered(state_dir) or from_locale(os.environ)
+    return from_locale(environ)
 
 
 STRINGS: dict[str, dict[str, str]] = {
@@ -342,6 +422,104 @@ STRINGS: dict[str, dict[str, str]] = {
         'pt-br': 'Em vigor agora: nada é enviado; os desvios ficam só no diário local.',
         'es': 'En vigor ahora: no se envía nada; los desvíos quedan solo en el diario local.',
     },
+    'label_update_check': {
+        'en': 'Update check',
+        'pt-br': 'Verificação de atualização',
+        'es': 'Búsqueda de actualizaciones',
+    },
+    'help_update_check': {
+        'en': ('Once a day the playbook asks GitHub for the newest release and tells you, once '
+               'per version, when it is newer than the one installed. The request carries nothing '
+               'about you, your machine or your project. On by default.'),
+        'pt-br': ('Uma vez por dia o playbook pergunta ao GitHub qual é a release mais nova e '
+                  'avisa, uma vez por versão, quando ela é mais nova que a instalada. O pedido '
+                  'não leva nada sobre você, a sua máquina ou o seu projeto. Ligado por padrão.'),
+        'es': ('Una vez al día el playbook pregunta a GitHub por la release más nueva y avisa, '
+               'una vez por versión, cuando es más nueva que la instalada. La petición no lleva '
+               'nada sobre ti, tu máquina o tu proyecto. Encendido por defecto.'),
+    },
+    'effect_update_check_on': {
+        'en': 'In force now: the next session start checks for a newer release.',
+        'pt-br': 'Em vigor agora: o próximo início de sessão procura uma release mais nova.',
+        'es': 'En vigor ahora: el próximo inicio de sesión busca una release más nueva.',
+    },
+    'effect_update_check_off': {
+        'en': 'In force now: nothing is asked of GitHub; update by hand when you choose.',
+        'pt-br': 'Em vigor agora: nada é perguntado ao GitHub; atualize à mão quando quiser.',
+        'es': 'En vigor ahora: no se pregunta nada a GitHub; actualiza a mano cuando quieras.',
+    },
+    'group_updates': {
+        'en': 'Updates and reports',
+        'pt-br': 'Atualizações e relatos',
+        'es': 'Actualizaciones e informes',
+    },
+    'group_updates_help': {
+        'en': 'What the playbook asks of the network: the update check, the update itself and the deviation reports.',
+        'pt-br': 'O que o playbook pede à rede: a verificação de atualização, a atualização em si e os relatos de desvio.',
+        'es': 'Lo que el playbook pide a la red: la búsqueda de actualizaciones, la actualización en sí y los informes de desvío.',
+    },
+    'update_available': {
+        'en': ('[playbook] Version {latest} is available (installed {installed}). Open '
+               '/playbook-config, Updates and reports, to update.'),
+        'pt-br': ('[playbook] A versão {latest} está disponível (instalada {installed}). Abra '
+                  '/playbook-config, Atualizações e relatos, para atualizar.'),
+        'es': ('[playbook] La versión {latest} está disponible (instalada {installed}). Abre '
+               '/playbook-config, Actualizaciones e informes, para actualizar.'),
+    },
+    'update_now': {'en': 'Update now', 'pt-br': 'Atualizar agora', 'es': 'Actualizar ahora'},
+    'update_check_now': {
+        'en': 'Check for updates',
+        'pt-br': 'Procurar atualização',
+        'es': 'Buscar actualizaciones',
+    },
+    'update_new': {
+        'en': 'Version {latest} is available (installed {installed}).',
+        'pt-br': 'A versão {latest} está disponível (instalada {installed}).',
+        'es': 'La versión {latest} está disponible (instalada {installed}).',
+    },
+    'update_ahead': {
+        'en': 'This copy ({installed}) is newer than the latest release ({latest}).',
+        'pt-br': 'Esta cópia ({installed}) é mais nova que a última release ({latest}).',
+        'es': 'Esta copia ({installed}) es más nueva que la última release ({latest}).',
+    },
+    'update_current': {
+        'en': 'Up to date: {installed} is the newest release.',
+        'pt-br': 'Em dia: a {installed} é a release mais nova.',
+        'es': 'Al día: la {installed} es la release más nueva.',
+    },
+    'update_unreachable': {
+        'en': 'Could not reach GitHub, so the newest release is unknown. Installed: {installed}.',
+        'pt-br': 'Não consegui falar com o GitHub, então a release mais nova é desconhecida. Instalada: {installed}.',
+        'es': 'No pude comunicarme con GitHub, así que la release más nueva se desconoce. Instalada: {installed}.',
+    },
+    'update_done': {
+        'en': 'Updated. Reloading the plugins to apply it.',
+        'pt-br': 'Atualizado. Recarregando os plugins para aplicar.',
+        'es': 'Actualizado. Recargando los plugins para aplicarlo.',
+    },
+    'update_done_manual': {
+        'en': 'Updated. Type /reload-plugins to apply it in this session.',
+        'pt-br': 'Atualizado. Digite /reload-plugins para aplicar nesta sessão.',
+        'es': 'Actualizado. Escribe /reload-plugins para aplicarlo en esta sesión.',
+    },
+    'update_failed': {
+        'en': 'The update failed: {error}',
+        'pt-br': 'A atualização falhou: {error}',
+        'es': 'La actualización falló: {error}',
+    },
+    'pending_waiting': {
+        'en': ('[playbook] Waiting for your answer, above the chat: {list}. Nothing runs until '
+               'you approve; decline to drop it.'),
+        'pt-br': ('[playbook] Aguardando a sua resposta, acima do chat: {list}. Nada roda até você '
+                  'aprovar; recuse para descartar.'),
+        'es': ('[playbook] Esperando tu respuesta, sobre el chat: {list}. Nada se ejecuta hasta '
+               'que apruebes; rechaza para descartarlo.'),
+    },
+    'tmp_no_output': {
+        'en': 'the command wrote nothing',
+        'pt-br': 'o comando não escreveu nada',
+        'es': 'el comando no escribió nada',
+    },
     'effect_generic': {'en': 'In force now.', 'pt-br': 'Em vigor agora.', 'es': 'En vigor ahora.'},
     # The output filter's totals line (hooks/output_filter.py --report).
     'filter_empty': {
@@ -465,6 +643,18 @@ STRINGS: dict[str, dict[str, str]] = {
         'pt-br': 'Já respondido: nada a fazer.',
         'es': 'Ya respondido: nada que hacer.',
     },
+    'snapshot_saved': {
+        'en': ('[playbook:safety] This command discards uncommitted changes, so they were saved '
+               'first and nothing is lost: {saved}. To get them back: `git -C <repo> stash apply '
+               '<commit>`. Say so to the user when the discarded changes were theirs, not yours.'),
+        'pt-br': ('[playbook:safety] Este comando descarta mudanças não commitadas, então elas '
+                  'foram salvas antes e nada se perde: {saved}. Para recuperar: `git -C <repo> '
+                  'stash apply <commit>`. Avise o usuário quando as mudanças descartadas eram '
+                  'dele, não suas.'),
+        'es': ('[playbook:safety] Este comando descarta cambios sin commit, así que se guardaron '
+               'antes y no se pierde nada: {saved}. Para recuperarlos: `git -C <repo> stash apply '
+               '<commit>`. Avisa al usuario cuando los cambios descartados eran suyos, no tuyos.'),
+    },
     'destructive_part': {
         'en': 'That is one part of a longer command: approving runs the whole command.',
         'pt-br': 'Esse é um trecho de um comando maior: aprovar roda o comando inteiro.',
@@ -566,7 +756,7 @@ UI_KEYS = (
     'title', 'hint_main', 'hint_sub', 'opened', 'no_entry', 'current', 'default',
     'status', 'learn', 'lab', 'diff', 'back', 'exit', 'custom',
     'lab_title', 'lab_help', 'lab_setup', 'lab_passive', 'lab_active', 'lab_sqlmap',
-    'lab_uninstall',
+    'lab_uninstall', 'update_now', 'update_check_now',
 )
 
 

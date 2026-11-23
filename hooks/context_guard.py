@@ -934,6 +934,29 @@ def _queue_for_consent(queued: dict, command: str) -> dict:
     return {**hit, 'msg': _consent_queued_msg(hit, number)}
 
 
+def _recover_discards(runnable: str, command: str, prefs: dict) -> tuple[dict | None, dict | None]:
+    """`(verdict, notice)` for a command whose first destructive hit is a discard
+    of tracked changes. When those discards are all it destroys and each can be
+    snapshotted, the verdict is None (nothing to ask) and the notice tells the
+    model where the changes were saved, so the user is never asked about work
+    that stays recoverable. Anything else, or a snapshot that cannot be taken,
+    leaves the full verdict to the usual consent flow."""
+    other = _check_destructive(runnable, command, _CWD, disposable_root=_session_scratchpad(),
+                               tolerate=playbook_core.SNAPSHOT_EFFECTS)
+    if other:
+        return other, None
+    snapshots = playbook_core.snapshot_before_discard(runnable, _CWD)
+    if snapshots is None:
+        return _check_destructive(runnable, command, _CWD,
+                                  disposable_root=_session_scratchpad()), None
+    if not snapshots:
+        return None, None
+    language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'))
+    saved = '; '.join(f'{item.repo} -> {item.sha[:12]} ({item.ref})' for item in snapshots)
+    return None, {'msg': playbook_i18n.text(language, 'snapshot_saved', saved=saved),
+                  'to_model': True}
+
+
 _FINDING_RE = re.compile(r'^\s*[-*]\s+`?[^`\n]+?:\d+`?\s*[—-]', re.MULTILINE)
 _SEVERITY_RE = re.compile(r'^#{1,4}\s*(blockers?|major)\b', re.IGNORECASE | re.MULTILINE)
 
@@ -1525,6 +1548,27 @@ def _block_turn(state: dict, reason: str, gate: str) -> None:
     sys.exit(0)
 
 
+def _waiting_notice() -> str:
+    """A line for the person, from the hook and not the model, naming the
+    destructive commands queued for their answer that they have not been shown
+    yet: the queue sits in a band above the chat, and a message the model was
+    told to write about it is easy to miss. '' for a subagent, with nothing
+    waiting, or when the state cannot be read."""
+    if _AGENT_ID or not _SESSION_ID:
+        return ''
+    try:
+        fresh = playbook_core.consent_unannounced(STATE_DIR, _SESSION_ID)
+    except OSError:
+        return ''
+    if not fresh:
+        return ''
+    language = playbook_i18n.resolve(str(playbook_core.load_prefs(STATE_DIR).get('language') or 'auto'))
+    listed = '; '.join(
+        f"#{entry.get('id')} `{playbook_core.shown_command(str(entry.get('command') or ''))}`"
+        for entry in fresh)
+    return playbook_i18n.text(language, 'pending_waiting', list=listed)
+
+
 def _handle_stop(input_data: dict, state: dict, transcript: str | None,
                  spec_transcript: str | None) -> None:
     global _DEVIATION_NOTICE
@@ -1544,7 +1588,8 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
     # carries stop_hook_active, which returns early -- the handoff written in the
     # blocked response would never be saved.
     _capture_handoff(transcript)
-    _DEVIATION_NOTICE = _capture_deviations(state, spec_transcript)
+    _DEVIATION_NOTICE = '\n\n'.join(filter(None, (_capture_deviations(state, spec_transcript),
+                                                  _waiting_notice())))
     _refresh_carryover(state, transcript)
 
     # A continuation after a block: the gates that already blocked this turn are
@@ -1655,6 +1700,7 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
     ask = None
     consented = False
     queued = None
+    snapshot_notice = None
 
     if not result and tool_name == 'Bash':
         # What a heredoc writes is data, not commands about to run: a commit
@@ -1668,6 +1714,8 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
             playbook_core.strip_heredoc_bodies(command))
         destructive = _check_destructive(runnable, command, _CWD,
                                          disposable_root=_session_scratchpad())
+        if destructive and destructive.get('effect') in playbook_core.SNAPSHOT_EFFECTS:
+            destructive, snapshot_notice = _recover_discards(runnable, command, prefs)
         if destructive:
             destructive = _destructive_verdict(destructive, input_data, command, prefs)
             if destructive.get('ask'):
@@ -1740,6 +1788,10 @@ def _handle_pretooluse(input_data: dict, state: dict, transcript: str | None) ->
     if secret_notice and not (result and result.get('block')):
         result = (secret_notice if not result else
                   {**secret_notice, 'msg': result['msg'] + '\n\n' + secret_notice['msg']})
+
+    if snapshot_notice and not (result and result.get('block')):
+        result = (snapshot_notice if not result else
+                  {**snapshot_notice, 'msg': result['msg'] + '\n\n' + snapshot_notice['msg']})
 
     if shell_edit and result and not result.get('block') and shell_edit['msg'] in result['msg']:
         state['shell_edit_noted'] = True

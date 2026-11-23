@@ -4,7 +4,7 @@
 > Built for Claude Code. Codex CLI and Google Antigravity adapters are experimental.
 
 [![License: MIT + Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-4.2.0-blueviolet.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-4.3.0-blueviolet.svg)](.claude-plugin/plugin.json)
 [![Harnesses](https://img.shields.io/badge/harnesses-Claude_Code%20%7C%20Codex%20CLI%20%7C%20Antigravity-2ea44f.svg)](#supported-harnesses)
 [![Skills](https://img.shields.io/badge/skills-42-orange.svg)](skills/)
 [![PRs target develop](https://img.shields.io/badge/PRs-target%20%60develop%60-blueviolet.svg)](#contributing)
@@ -135,6 +135,15 @@ default for marketplaces outside Anthropic's). Without it, re-run the script or
 `claude plugin update engineering-playbook@engineering-playbook`. A release
 reaches users when its version changes in `.claude-plugin/plugin.json`, which
 happens only on a merge into `main`.
+
+Without auto-update nothing tells you a release exists, so the playbook says so
+itself: at session start, at most once a day and never waiting for the network,
+it asks GitHub's public releases API for the newest release (no identifier of
+you, your machine or your project is sent) and tells you once per version.
+`/playbook-config` shows the installed version in its title, and its **Updates and reports**
+screen has **Check for updates** and **Update now**, which updates the plugin
+and reloads it in the running session. `update_check off` stops the daily
+check.
 
 ### From a clone (development)
 
@@ -493,7 +502,7 @@ concurrent sessions in the same project never interfere; a subagent gets its
 own state (`session_id` + `agent_id`) and is gated at `SubagentStop`, so its
 writes never block the parent session's turn.
 
-**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.2.0`.
+**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.3.0`.
 
 **For a team:** commit the marketplace and the plugin to the project's
 `.claude/settings.json`; each teammate still accepts the folder's trust dialog

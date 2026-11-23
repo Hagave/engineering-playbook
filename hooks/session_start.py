@@ -22,11 +22,13 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import playbook_core  # noqa: E402
 import playbook_i18n  # noqa: E402
+import playbook_update  # noqa: E402
 
 STATE_DIR = os.path.expanduser('~/.claude/hooks')
 _ONBOARD_MARKER = os.path.join(STATE_DIR, '.onboarded')
@@ -305,6 +307,24 @@ def _carryover(input_data: dict, source: str) -> str:
         return ''
 
 
+def _update_notice() -> str:
+    """With the update check on: refresh the newest-release cache in a detached
+    process when it is due (the session never waits for the network), and return
+    the line telling the person a newer release exists, once per version."""
+    prefs = playbook_core.load_prefs(STATE_DIR)
+    if not prefs.get('update_check'):
+        return ''
+    if playbook_update.is_due(playbook_update.read_cache(STATE_DIR), time.time()):
+        playbook_update.spawn_refresh()
+    latest = playbook_update.unannounced(STATE_DIR)
+    if not latest:
+        return ''
+    playbook_update.mark_announced(latest, STATE_DIR)
+    current = playbook_update.status(STATE_DIR)
+    return playbook_i18n.text(playbook_i18n.resolve(prefs['language']), 'update_available',
+                              latest=latest, installed=current.installed or '?')
+
+
 def _report_links() -> str:
     """With deviation reports on: start the detached drain of what earlier
     sessions queued, and return the links of the reports gh could not send
@@ -407,6 +427,12 @@ def main() -> None:
             links = ''  # fail-open: a report is never worth losing the session context
         if links:
             output['systemMessage'] = '\n\n'.join(filter(None, (str(output.get('systemMessage') or ''), links)))
+        try:
+            update = _update_notice()
+        except Exception:
+            update = ''  # fail-open: an update notice is never worth losing the session context
+        if update:
+            output['systemMessage'] = '\n\n'.join(filter(None, (str(output.get('systemMessage') or ''), update)))
 
     sys.stdout.write(json.dumps(output, separators=(',', ':')))
     sys.exit(0)

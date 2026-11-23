@@ -2424,13 +2424,52 @@ def _pattern_lines(command: str) -> list[tuple[str, str]]:
         words = command_words(segment)
         if words and not _searches_only(words):
             shown = shlex.join(segment)
-            lines += [(shown, ' '.join(segment)),
-                      (shown, _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(words)))]
+            read = _without_message_text(segment)
+            lines += [(shown, ' '.join(read)),
+                      (shown, _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(command_words(read))))]
     return lines
 
 
+# A commit, tag, stash or pull request carries prose in its message options; a
+# message that mentions `git reset --hard` is text, and read as part of the
+# line it asked the user about every commit that explained a fix to the gate.
+_MESSAGE_COMMAND_RE = re.compile(
+    r'^(?:git\s+(?:commit|tag|stash|merge|revert|notes|am)|gh\s+(?:pr|issue|release|gist))\b')
+_MESSAGE_VALUE_OPTIONS = {
+    'git': frozenset({'-m', '--message'}),
+    'gh': frozenset({'--title', '-t', '--body', '-b', '--notes', '-n', '--description', '-d'}),
+}
+_MESSAGE_CLUSTER_RE = re.compile(r'-[a-zA-Z]*m')
+
+
+def _without_message_text(segment: list[str]) -> list[str]:
+    """`segment` without the text of its message options (`-m "..."`,
+    `--message=...`, `--title`, `--body`, ...), when it is a command that takes a
+    message; unchanged otherwise. Only those values: every other word of the
+    command is still read, so a destructive command after `&&` or a `-c`
+    script is untouched, and so is a substitution the shell runs from inside
+    double quotes (the shell has already split it into its own command)."""
+    words = command_words(segment)
+    if not words or not _MESSAGE_COMMAND_RE.match(
+            _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(words))):
+        return segment
+    options = _MESSAGE_VALUE_OPTIONS.get(words[0].rsplit('/', 1)[-1], frozenset())
+    kept: list[str] = []
+    skip = False
+    for word in segment:
+        if skip:
+            skip = False
+        elif word in options or (words[0] == 'git' and _MESSAGE_CLUSTER_RE.fullmatch(word)):
+            skip = True
+        elif not word.startswith(('--message=', '--title=', '--body=', '--notes=',
+                                  '--description=')):
+            kept.append(word)
+    return kept
+
+
 def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 0,
-                      disposable_root: str = '') -> dict | None:
+                      disposable_root: str = '',
+                      tolerate: frozenset[str] = frozenset()) -> dict | None:
     """Flag a command that destroys work; the adapter decides how the user
     approves it (Claude Code: a permission dialog; Codex: never in-session).
 
@@ -2457,11 +2496,17 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
     `disposable_root` is the session's own scratchpad: an `rm` of literal paths
     inside it deletes only what the session made there, and needs no consent
     (decided by the user for 4.0.0; a build directory or node_modules still
-    does)."""
+    does).
+
+    `tolerate` names effects the caller has made recoverable (see
+    `snapshot_before_discard`): the pattern hits of the command as typed with
+    those effects are skipped. A script the command runs is checked in full."""
     command = strip_heredoc_bodies(command)
     expanded = resolve_literal_commands(command) if _depth == 0 else command
     for shown, line in _pattern_lines(expanded):
         for pattern, effect in DESTRUCTIVE_RULES:
+            if effect in tolerate:
+                continue
             match = re.search(pattern, line, re.IGNORECASE)
             if match:
                 return _destructive_block(
@@ -2512,6 +2557,116 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
                 f'Recursive deletion in the script `{source.origin}` (`{call}`). Show the '
                 'user what it deletes.', 'script_delete')
     return None
+
+
+# Effects of a git command that only overwrite tracked content: what they destroy
+# is what `git stash create` captures, so a snapshot makes them recoverable.
+# `clean` (untracked files), branch deletion and the rest are not.
+SNAPSHOT_EFFECTS = frozenset({'discard_changes', 'reset_hard'})
+_SNAPSHOT_REF = 'refs/playbook/snapshots/'
+_SNAPSHOT_KEPT = 20
+_SNAPSHOT_REPOS_MAX = 5
+_SNAPSHOT_TIMEOUT = 4.0
+_PLAIN_VALUE_RE = re.compile(r'[\w@%+=:,./~-]+')
+
+
+class Snapshot(NamedTuple):
+    """Uncommitted tracked changes of `repo`, kept as the commit `sha` under
+    `ref`. `sha` is empty when the repository had none to lose."""
+    repo: str
+    ref: str
+    sha: str
+
+
+def _single_valued_variables(command: str) -> str:
+    """`command` with each `$NAME` or `${NAME}` the text gives exactly one
+    plain literal replaced by it (`C=/srv/app; git -C $C checkout -- f`), so a
+    repository named through a variable can be read. A name with several
+    values, or a value from a substitution or the environment, stays as it is."""
+    outer, _inner = _lift_substitutions(command.replace('\\\n', ' '))
+    statements = _statements(outer)
+    if not statements:
+        return command
+    values = {name: found[0] for name, found in _literal_candidates(statements).items()
+              if len(found) == 1 and _PLAIN_VALUE_RE.fullmatch(found[0])}
+    if not values:
+        return command
+    return _VAR_REF_RE.sub(lambda m: values.get(m.group(1) or m.group(2), m.group(0)), command)
+
+
+def _prune_snapshots(repo: str) -> None:
+    listed = _git_out(repo, 'for-each-ref', '--sort=-refname', '--format=%(refname)',
+                      _SNAPSHOT_REF, timeout=_SNAPSHOT_TIMEOUT)
+    for ref in (listed or '').split()[_SNAPSHOT_KEPT:]:
+        _git_out(repo, 'update-ref', '-d', ref, timeout=_SNAPSHOT_TIMEOUT)
+
+
+def _snapshot_repo(repo: str) -> Snapshot | None:
+    """Keep the uncommitted tracked changes of `repo` under a ref, without
+    touching its working tree or index. None when git cannot (not a repository,
+    no commit yet, unmerged paths, no committer identity, out of time)."""
+    top = _git_out(repo, 'rev-parse', '--show-toplevel', timeout=_SNAPSHOT_TIMEOUT)
+    sha = _git_out(repo, 'stash', 'create', 'playbook: saved before a discard',
+                   timeout=_SNAPSHOT_TIMEOUT)
+    if not top or sha is None:
+        return None
+    top, sha = top.strip(), sha.strip()
+    if not sha:
+        return Snapshot(top, '', '')
+    ref = f'{_SNAPSHOT_REF}{int(time.time() * 1000)}-{os.getpid()}'
+    # The empty old value makes a name that already exists fail, so a snapshot
+    # never overwrites another one: it falls back to asking.
+    if _git_out(repo, 'update-ref', ref, sha, '', timeout=_SNAPSHOT_TIMEOUT) is None:
+        return None
+    _prune_snapshots(repo)
+    return Snapshot(top, ref, sha)
+
+
+def _moves_head(reset_args: list[str]) -> bool:
+    """Whether a `git reset` names a commit other than HEAD. That drops commits
+    from the branch, which a snapshot of uncommitted changes does not bring back
+    (only the reflog does), so it is still asked about."""
+    return any(arg != 'HEAD' for arg in reset_args if not arg.startswith('-'))
+
+
+def snapshot_before_discard(command: str, cwd: str) -> list[Snapshot] | None:
+    """Make the discards in `command` recoverable: for each repository a
+    `SNAPSHOT_EFFECTS` git call acts on, keep its uncommitted tracked changes
+    under `refs/playbook/snapshots/` (`git stash apply <sha>` brings them back).
+    The snapshot is a commit, not a stash entry: nothing in the working tree
+    moves, so there is nothing to pop afterwards and nothing to conflict with.
+    Accepted trade-off: the snapshot is taken before the command runs, so a
+    file another tool call of the same response changes in between is saved as
+    it was.
+
+    The snapshots that hold something; an empty list when no repository had
+    changes to lose. None when the command cannot be made recoverable, and the
+    caller keeps asking: a repository decided at run time, one git cannot
+    snapshot, a reset to another commit, a discard git_calls does not see, or
+    more than `_SNAPSHOT_REPOS_MAX` repositories."""
+    calls = git_calls(_single_valued_variables(command), cwd)
+    if calls is None:
+        return None
+    repos: list[str] = []
+    for call in calls:
+        line = ' '.join(['git', call.sub, *call.args])
+        if not any(effect in SNAPSHOT_EFFECTS and re.search(pattern, line, re.IGNORECASE)
+                   for pattern, effect in DESTRUCTIVE_RULES):
+            continue
+        if call.repo is None or (call.sub == 'reset' and _moves_head(call.args)):
+            return None
+        if call.repo not in repos:
+            repos.append(call.repo)
+    if not repos or len(repos) > _SNAPSHOT_REPOS_MAX:
+        return None
+    kept: list[Snapshot] = []
+    for repo in repos:
+        snapshot = _snapshot_repo(repo)
+        if snapshot is None:
+            return None
+        if snapshot.sha:
+            kept.append(snapshot)
+    return kept
 
 
 def attribution_allowed() -> bool:
@@ -3984,6 +4139,26 @@ def consent_pending(state_dir: str, session_id: str) -> list[dict]:
     return _consent_entries(load_state(consent_path(state_dir, session_id)), 'pending')
 
 
+def consent_unannounced(state_dir: str, session_id: str) -> list[dict]:
+    """The waiting commands the user has not been told about yet, marked told:
+    each is shown to them once by the hook itself, so a command queued while
+    the model forgot to say so (or said it in a message nobody read) is not
+    left waiting unseen."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return []
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        fresh = [entry for entry in pending if not entry.get('announced')]
+        if fresh:
+            for entry in fresh:
+                entry['announced'] = True
+            data['pending'] = pending
+            save_state(path, data)
+    return fresh
+
+
 def consent_decide(state_dir: str, session_id: str, number: int) -> dict | None:
     """Take `#number` out of the queue for the answer the user gave on the
     button; the entry, or None when it is no longer waiting (answered in the
@@ -4438,8 +4613,11 @@ PREFS_DEFAULTS: dict = {
     # instead of dropped, so a leftover the user did not remove right away is
     # not forgotten by them or the model.
     'temporary_data': True,
+    # Ask GitHub, at most once a day, for the newest release and say so once per
+    # version (hooks/playbook_update.py). The request carries nothing about the user.
+    'update_check': True,
 }
-PREF_FLAGS = ('watch', 'reports', 'temporary_data')
+PREF_FLAGS = ('watch', 'reports', 'temporary_data', 'update_check')
 
 MEMORY_FILE = 'CLAUDE.md'
 
