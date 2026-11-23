@@ -34,6 +34,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'hooks'))
 import playbook_core  # noqa: E402
 import playbook_i18n  # noqa: E402
+import playbook_update  # noqa: E402
 
 STATE_DIR = os.path.expanduser('~/.claude/hooks')
 
@@ -55,7 +56,7 @@ HARNESSES = ('claude', 'codex', 'antigravity')
 #   queues destructive commands for an answer.
 HARNESS_SETTINGS = {
     'claude': ('prose', 'watch', 'temporary_data', 'claude_md_budget', 'context_budget',
-               'language', 'reports'),
+               'language', 'reports', 'update_check'),
     'codex': ('prose',),
     'antigravity': ('prose',),
 }
@@ -68,6 +69,7 @@ DESCRIPTIONS = {
     'language': 'language of the settings menu (auto | en | pt-br | es)',
     'reports': 'send deviation reports to the playbook maintainer (on | off)',
     'temporary_data': 'keep declined deletions in the Temporary data panel (on | off)',
+    'update_check': 'ask GitHub once a day for a newer release and say so (on | off)',
 }
 
 # Settings the panel lists under one row of the main screen, which opens a
@@ -75,6 +77,7 @@ DESCRIPTIONS = {
 GROUPS: dict[str, tuple[str, ...]] = {
     'budgets': ('claude_md_budget', 'context_budget'),
     'reminders': ('watch', 'temporary_data'),
+    'online': ('update_check', 'reports'),
 }
 
 
@@ -112,6 +115,7 @@ CHOICES: dict[str, list[tuple[str, str]]] = {
     'language': list(playbook_i18n.LANGUAGE_LABELS.items()),
     'reports': [('on', 'on'), ('off', 'off')],
     'temporary_data': [('on', 'on'), ('off', 'off')],
+    'update_check': [('on', 'on'), ('off', 'off')],
 }
 
 _TRANSLATED_CHOICES = ('on', 'off')
@@ -137,9 +141,12 @@ def snapshot(prefs: dict, harness: str = 'claude', environ: dict | None = None) 
     own strings: everything in the language `prefs['language']` resolves to.
     Settings come in the order DESCRIPTIONS lists them."""
     language = playbook_i18n.resolve(prefs['language'], environ)
+    current = playbook_update.status(STATE_DIR)
     return {
         'language': language,
         'language_name': playbook_i18n.LANGUAGE_NAMES[language],
+        'version': current.installed or '',
+        'update': {'available': current.available, 'latest': current.latest or ''},
         'ui': playbook_i18n.ui(language),
         'settings': [
             {
@@ -191,6 +198,32 @@ def session_policy(prefs: dict) -> str:
     return playbook_core.PROSE_POLICY.get(prefs['prose'], playbook_core.PROSE_POLICY['mid'])
 
 
+def update_answer(op: str, language: str) -> dict:
+    """What `update check` and `update apply` tell the panel: the text to show,
+    whether it is an error, and whether the plugins are to be reloaded now.
+
+    `check` asks GitHub now, whatever the cache says: the person pressed it.
+    A check that could not reach GitHub says so instead of repeating an old
+    answer as if it were current."""
+    say = playbook_i18n.text
+    if op == 'apply':
+        outcome = playbook_update.apply_update()
+        if not outcome.ok:
+            failed = say(language, 'update_failed', error=outcome.text)
+            return {'text': failed, 'manual_text': failed, 'is_error': True, 'reload': False}
+        return {'text': say(language, 'update_done'), 'manual_text': say(language, 'update_done_manual'),
+                'is_error': False, 'reload': True}
+    cache = playbook_update.refresh(STATE_DIR, force=True)
+    current = playbook_update.status(STATE_DIR)
+    installed = current.installed or '?'
+    if not cache.get('ok'):
+        unreachable = say(language, 'update_unreachable', installed=installed)
+        return {'text': unreachable, 'manual_text': unreachable, 'is_error': True, 'reload': False}
+    key = 'update_new' if current.available else 'update_current'
+    shown = say(language, key, latest=current.latest, installed=installed)
+    return {'text': shown, 'manual_text': shown, 'is_error': False, 'reload': False}
+
+
 def _take_harness(argv: list[str]) -> tuple[list[str], str | None]:
     """`argv` without `--harness <name>`, and the name ('claude' when absent,
     None when it names no harness)."""
@@ -220,6 +253,15 @@ def main(argv: list[str]) -> int:
     if action == 'session':
         print(session_policy(playbook_core.load_prefs(STATE_DIR)))
         return 0
+
+    if action == 'update':
+        if len(argv) < 2 or argv[1].lower() not in ('check', 'apply'):
+            print('usage: playbook_config.py update check|apply [--json]', file=sys.stderr)
+            return 2
+        language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
+        answer = update_answer(argv[1].lower(), language)
+        print(json.dumps(answer) if '--json' in argv[2:] else answer['text'])
+        return 1 if answer['is_error'] and '--json' not in argv[2:] else 0
 
     if action == 'get':
         if len(argv) < 2:
@@ -253,7 +295,7 @@ def main(argv: list[str]) -> int:
         print(effect_note(key, value, playbook_i18n.resolve(prefs['language'])))
         return 0
 
-    print(f'unknown action {action!r} — use show, get, set or session', file=sys.stderr)
+    print(f'unknown action {action!r} — use show, get, set, session or update', file=sys.stderr)
     return 2
 
 

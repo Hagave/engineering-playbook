@@ -19,7 +19,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ConfigSetting, ConfigSnapshot, MenuScreen, PanelNotice, PanelText } from './config_panel_state'
+import type {
+  ConfigSetting,
+  ConfigSnapshot,
+  MenuScreen,
+  PanelNotice,
+  PanelText,
+  UpdateAnswer,
+} from './config_panel_state'
 import { panelPrompt, registerTemporaryData } from './temporary_data'
 
 const COMMAND = 'playbook-config'
@@ -30,6 +37,12 @@ const ENGLISH = 'en'
 // Status, Learn, red-lab-playbook and Diff panel after them, five fill the
 // digits 1-9.
 const MAX_SETTING_ROWS = 5
+// The group whose screen also holds the update entries.
+const ONLINE_GROUP = 'online'
+// The script gives the marketplace refresh and the plugin update two minutes
+// each; this limit only ends a script that hangs past both.
+const UPDATE_TIMEOUT_MS = 300_000
+const RELOAD_COMMAND = 'reload-plugins'
 // A gate's denial starts with its tag, sometimes behind the engine's own
 // prefix; a command whose output merely mentions a tag is not a denial.
 const GATE_TAG_RE = /^(?:PreToolUse:\S+ hook error: )?\[playbook:([\w-]+)\]/
@@ -37,7 +50,7 @@ const GATE_TAG_RE = /^(?:PreToolUse:\S+ hook error: )?\[playbook:([\w-]+)\]/
 // Change the tag when a stored value's fields change: an earlier version's
 // value is then read as the initial one instead of a wrong shape.
 const snapshot = atom({ plugin: 'engineering-playbook', key: 'snapshot' } as const, null, {
-  shape: 'snapshot-4',
+  shape: 'snapshot-5',
 })
 const notice = atom({ plugin: 'engineering-playbook', key: 'notice' } as const, null, {
   shape: 'notice-1',
@@ -90,6 +103,7 @@ type Action =
   | { kind: 'back' }
   | { kind: 'ask'; text: string }
   | { kind: 'diff' }
+  | { kind: 'update'; op: 'check' | 'apply' }
   | { kind: 'exit' }
 
 type Entry = { digit: string; label: string; action: Action }
@@ -138,6 +152,51 @@ async function refresh($: EngineInterface): Promise<boolean> {
   await update($, filterReport, () => (report.exitCode === 0 ? report.stdout.trim() || null : null))
 
   return true
+}
+
+function isUpdateAnswer(value: unknown): value is UpdateAnswer {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const fields = value as { text?: unknown; manual_text?: unknown; is_error?: unknown; reload?: unknown }
+
+  return (
+    typeof fields.text === 'string' &&
+    typeof fields.manual_text === 'string' &&
+    typeof fields.is_error === 'boolean' &&
+    typeof fields.reload === 'boolean'
+  )
+}
+
+// Checks for a newer release, or updates the plugin and, when that worked,
+// reloads the plugins so the new version applies in this session. The check and
+// the update are the script's (hooks/playbook_update.py): this only shows what
+// it said, in the person's language.
+async function updateAction($: EngineInterface, op: 'check' | 'apply', canReload: boolean): Promise<void> {
+  const ran = await $.process.run(['python3', configScript($), 'update', op, '--json'], {
+    timeoutMs: UPDATE_TIMEOUT_MS,
+  })
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(ran.stdout)
+  } catch {
+    parsed = null
+  }
+  if (ran.exitCode !== 0 || !isUpdateAnswer(parsed)) {
+    await update($, notice, () => ({ text: ran.stderr.trim() || 'could not run the update', isError: true }))
+    return
+  }
+  const answer = parsed
+  // A digit typed and sent runs inside a prompt.submit hook, which may not run
+  // a command (it would wait on the turn the hook holds): there the person is
+  // told to type the reload instead.
+  const shown = answer.reload && !canReload ? answer.manual_text : answer.text
+  await update($, notice, () => ({ text: shown, isError: answer.is_error }))
+  $.ui.toast(shown)
+  await refresh($)
+  if (answer.reload && canReload) {
+    await $.command.run({ command: RELOAD_COMMAND })
+  }
 }
 
 async function apply($: EngineInterface, key: string, value: string): Promise<void> {
@@ -197,7 +256,7 @@ function heading(current: MenuScreen, loaded: ConfigSnapshot): { title: string; 
     }
   }
 
-  return { title: ui.title, help: undefined }
+  return { title: loaded.version === '' ? ui.title : `${ui.title} v${loaded.version}`, help: undefined }
 }
 
 // The main screen's setting rows: a setting of its own, or one row per group,
@@ -213,11 +272,33 @@ function mainRows(loaded: ConfigSnapshot): { label: string; action: Action }[] {
     const group = loaded.groups.find((one): boolean => one.key === setting.group)
     if (group && !placed.has(group.key)) {
       placed.add(group.key)
-      rows.push({ label: group.label, action: { kind: 'group', group: group.key } })
+      const newer = group.key === ONLINE_GROUP && loaded.update.available ? ` (${loaded.update.latest})` : ''
+      rows.push({ label: `${group.label}${newer}`, action: { kind: 'group', group: group.key } })
     }
   }
 
   return rows
+}
+
+// The Online screen's own entries after its settings: update now (only when a
+// newer release is known) and a check for one.
+function updateEntries(after: number, loaded: ConfigSnapshot): Entry[] {
+  const { ui, update: found } = loaded
+  const checks: Entry[] = []
+  if (found.available) {
+    checks.push({
+      digit: String(after + checks.length + 1),
+      label: `${ui.update_now} (${found.latest})`,
+      action: { kind: 'update', op: 'apply' },
+    })
+  }
+  checks.push({
+    digit: String(after + checks.length + 1),
+    label: ui.update_check_now,
+    action: { kind: 'update', op: 'check' },
+  })
+
+  return checks
 }
 
 function noEntry(ui: PanelText, digit: string): string {
@@ -263,7 +344,7 @@ function entries(current: MenuScreen, loaded: ConfigSnapshot): Entry[] {
         }),
       )
 
-    return [...members, back]
+    return [...members, ...(current.group === ONLINE_GROUP ? updateEntries(members.length, loaded) : []), back]
   }
   if (current.kind === 'lab') {
     const steps: Entry[] = LAB_STEPS.map(
@@ -291,7 +372,7 @@ function entries(current: MenuScreen, loaded: ConfigSnapshot): Entry[] {
   ]
 }
 
-async function run($: EngineInterface, action: Action): Promise<void> {
+async function run($: EngineInterface, action: Action, canReload: boolean): Promise<void> {
   switch (action.kind) {
     case 'open':
       await update($, screen, (): MenuScreen => ({ kind: 'setting', key: action.key }))
@@ -314,6 +395,9 @@ async function run($: EngineInterface, action: Action): Promise<void> {
     case 'diff':
       await $.command.run({ command: 'diff' })
       return
+    case 'update':
+      await updateAction($, action.op, canReload)
+      return
     case 'exit':
       await close($)
       return
@@ -333,7 +417,7 @@ async function entryFor($: EngineInterface, digit: string): Promise<Entry | unde
 async function choose($: EngineInterface, digit: string): Promise<void> {
   const entry = await entryFor($, digit)
   if (entry) {
-    await run($, entry.action)
+    await run($, entry.action, true)
   }
 }
 
@@ -394,11 +478,13 @@ export const register: Register = on => {
 
       return next({ ...e, text: entry.action.text })
     }
-    await run($, entry.action)
+    await run($, entry.action, false)
     const last = await read($, notice)
-    const isSet = entry.action.kind === 'set'
+    // What the action said stands in for the menu's own echo: the line the
+    // script gives after a `set`, the answer of an update or a check.
+    const said = entry.action.kind === 'set' ? last?.text.split('\n').pop() : entry.action.kind === 'update' ? last?.text : undefined
 
-    return { drop: (isSet && last?.text.split('\n').pop()) || `${loaded.ui.title}: ${entry.label}` }
+    return { drop: said || `${loaded.ui.title}: ${entry.label}` }
   }).catch(($, e, next) => next(e)) // never lose a prompt to the menu
 
   // A gate denial is shown to the person too, not only to the model.

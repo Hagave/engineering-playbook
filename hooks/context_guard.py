@@ -1548,6 +1548,27 @@ def _block_turn(state: dict, reason: str, gate: str) -> None:
     sys.exit(0)
 
 
+def _waiting_notice() -> str:
+    """A line for the person, from the hook and not the model, naming the
+    destructive commands queued for their answer that they have not been shown
+    yet: the queue sits in a band above the chat, and a message the model was
+    told to write about it is easy to miss. '' for a subagent, with nothing
+    waiting, or when the state cannot be read."""
+    if _AGENT_ID or not _SESSION_ID:
+        return ''
+    try:
+        fresh = playbook_core.consent_unannounced(STATE_DIR, _SESSION_ID)
+    except OSError:
+        return ''
+    if not fresh:
+        return ''
+    language = playbook_i18n.resolve(str(playbook_core.load_prefs(STATE_DIR).get('language') or 'auto'))
+    listed = '; '.join(
+        f"#{entry.get('id')} `{playbook_core.shown_command(str(entry.get('command') or ''))}`"
+        for entry in fresh)
+    return playbook_i18n.text(language, 'pending_waiting', list=listed)
+
+
 def _handle_stop(input_data: dict, state: dict, transcript: str | None,
                  spec_transcript: str | None) -> None:
     global _DEVIATION_NOTICE
@@ -1567,7 +1588,8 @@ def _handle_stop(input_data: dict, state: dict, transcript: str | None,
     # carries stop_hook_active, which returns early -- the handoff written in the
     # blocked response would never be saved.
     _capture_handoff(transcript)
-    _DEVIATION_NOTICE = _capture_deviations(state, spec_transcript)
+    _DEVIATION_NOTICE = '\n\n'.join(filter(None, (_capture_deviations(state, spec_transcript),
+                                                  _waiting_notice())))
     _refresh_carryover(state, transcript)
 
     # A continuation after a block: the gates that already blocked this turn are

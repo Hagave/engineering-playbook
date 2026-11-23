@@ -47,13 +47,27 @@ export type PanelText = {
   lab_active: string
   lab_sqlmap: string
   lab_uninstall: string
+  update_now: string
+  update_check_now: string
 }
+
+// The newest release the last check found, and whether it is newer than the
+// installed one (hooks/playbook_update.py).
+export type UpdateState = { available: boolean; latest: string }
+
+// What `playbook_config.py update check|apply --json` answers: `reload` asks
+// the panel to reload the plugins now, so the update applies in this session;
+// `manual_text` is what to show instead where the panel cannot run the reload.
+export type UpdateAnswer = { text: string; manual_text: string; is_error: boolean; reload: boolean }
 
 export type ConfigSnapshot = {
   // 'en', 'pt-br' or 'es': what the `language` setting resolved to.
   language: string
   // That language's English name, for the prompts the menu hands the model.
   language_name: string
+  // The installed version ('' when its manifest cannot be read).
+  version: string
+  update: UpdateState
   ui: PanelText
   settings: ConfigSetting[]
   groups: ConfigGroup[]

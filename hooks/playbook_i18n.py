@@ -422,6 +422,95 @@ STRINGS: dict[str, dict[str, str]] = {
         'pt-br': 'Em vigor agora: nada é enviado; os desvios ficam só no diário local.',
         'es': 'En vigor ahora: no se envía nada; los desvíos quedan solo en el diario local.',
     },
+    'label_update_check': {
+        'en': 'Update check',
+        'pt-br': 'Verificação de atualização',
+        'es': 'Búsqueda de actualizaciones',
+    },
+    'help_update_check': {
+        'en': ('Once a day the playbook asks GitHub for the newest release and tells you, once '
+               'per version, when it is newer than the one installed. The request carries nothing '
+               'about you, your machine or your project. On by default.'),
+        'pt-br': ('Uma vez por dia o playbook pergunta ao GitHub qual é a release mais nova e '
+                  'avisa, uma vez por versão, quando ela é mais nova que a instalada. O pedido '
+                  'não leva nada sobre você, a sua máquina ou o seu projeto. Ligado por padrão.'),
+        'es': ('Una vez al día el playbook pregunta a GitHub por la release más nueva y avisa, '
+               'una vez por versión, cuando es más nueva que la instalada. La petición no lleva '
+               'nada sobre ti, tu máquina o tu proyecto. Encendido por defecto.'),
+    },
+    'effect_update_check_on': {
+        'en': 'In force now: the next session start checks for a newer release.',
+        'pt-br': 'Em vigor agora: o próximo início de sessão procura uma release mais nova.',
+        'es': 'En vigor ahora: el próximo inicio de sesión busca una release más nueva.',
+    },
+    'effect_update_check_off': {
+        'en': 'In force now: nothing is asked of GitHub; update by hand when you choose.',
+        'pt-br': 'Em vigor agora: nada é perguntado ao GitHub; atualize à mão quando quiser.',
+        'es': 'En vigor ahora: no se pregunta nada a GitHub; actualiza a mano cuando quieras.',
+    },
+    'group_online': {'en': 'Online', 'pt-br': 'Online', 'es': 'En línea'},
+    'group_online_help': {
+        'en': 'What the playbook asks of the network: the update check, the update itself and the deviation reports.',
+        'pt-br': 'O que o playbook pede à rede: a verificação de atualização, a atualização em si e os relatos de desvio.',
+        'es': 'Lo que el playbook pide a la red: la búsqueda de actualizaciones, la actualización en sí y los informes de desvío.',
+    },
+    'update_available': {
+        'en': ('[playbook] Version {latest} is available (installed {installed}). Open '
+               '/playbook-config, Online, to update.'),
+        'pt-br': ('[playbook] A versão {latest} está disponível (instalada {installed}). Abra '
+                  '/playbook-config, Online, para atualizar.'),
+        'es': ('[playbook] La versión {latest} está disponible (instalada {installed}). Abre '
+               '/playbook-config, En línea, para actualizar.'),
+    },
+    'update_now': {'en': 'Update now', 'pt-br': 'Atualizar agora', 'es': 'Actualizar ahora'},
+    'update_check_now': {
+        'en': 'Check for updates',
+        'pt-br': 'Procurar atualização',
+        'es': 'Buscar actualizaciones',
+    },
+    'update_new': {
+        'en': 'Version {latest} is available (installed {installed}).',
+        'pt-br': 'A versão {latest} está disponível (instalada {installed}).',
+        'es': 'La versión {latest} está disponible (instalada {installed}).',
+    },
+    'update_current': {
+        'en': 'Up to date: {installed} is the newest release.',
+        'pt-br': 'Em dia: a {installed} é a release mais nova.',
+        'es': 'Al día: la {installed} es la release más nueva.',
+    },
+    'update_unreachable': {
+        'en': 'Could not reach GitHub, so the newest release is unknown. Installed: {installed}.',
+        'pt-br': 'Não consegui falar com o GitHub, então a release mais nova é desconhecida. Instalada: {installed}.',
+        'es': 'No pude comunicarme con GitHub, así que la release más nueva se desconoce. Instalada: {installed}.',
+    },
+    'update_done': {
+        'en': 'Updated. Reloading the plugins to apply it.',
+        'pt-br': 'Atualizado. Recarregando os plugins para aplicar.',
+        'es': 'Actualizado. Recargando los plugins para aplicarlo.',
+    },
+    'update_done_manual': {
+        'en': 'Updated. Type /reload-plugins to apply it in this session.',
+        'pt-br': 'Atualizado. Digite /reload-plugins para aplicar nesta sessão.',
+        'es': 'Actualizado. Escribe /reload-plugins para aplicarlo en esta sesión.',
+    },
+    'update_failed': {
+        'en': 'The update failed: {error}',
+        'pt-br': 'A atualização falhou: {error}',
+        'es': 'La actualización falló: {error}',
+    },
+    'pending_waiting': {
+        'en': ('[playbook] Waiting for your answer, above the chat: {list}. Nothing runs until '
+               'you approve; decline to drop it.'),
+        'pt-br': ('[playbook] Aguardando a sua resposta, acima do chat: {list}. Nada roda até você '
+                  'aprovar; recuse para descartar.'),
+        'es': ('[playbook] Esperando tu respuesta, sobre el chat: {list}. Nada se ejecuta hasta '
+               'que apruebes; rechaza para descartarlo.'),
+    },
+    'tmp_no_output': {
+        'en': 'the command wrote nothing',
+        'pt-br': 'o comando não escreveu nada',
+        'es': 'el comando no escribió nada',
+    },
     'effect_generic': {'en': 'In force now.', 'pt-br': 'Em vigor agora.', 'es': 'En vigor ahora.'},
     # The output filter's totals line (hooks/output_filter.py --report).
     'filter_empty': {
@@ -658,7 +747,7 @@ UI_KEYS = (
     'title', 'hint_main', 'hint_sub', 'opened', 'no_entry', 'current', 'default',
     'status', 'learn', 'lab', 'diff', 'back', 'exit', 'custom',
     'lab_title', 'lab_help', 'lab_setup', 'lab_passive', 'lab_active', 'lab_sqlmap',
-    'lab_uninstall',
+    'lab_uninstall', 'update_now', 'update_check_now',
 )
 
 
