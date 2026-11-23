@@ -4,7 +4,7 @@
 > Built for Claude Code. Codex CLI and Google Antigravity adapters are experimental.
 
 [![License: MIT + Commons Clause](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-4.2.0-blueviolet.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-4.2.1-blueviolet.svg)](.claude-plugin/plugin.json)
 [![Harnesses](https://img.shields.io/badge/harnesses-Claude_Code%20%7C%20Codex%20CLI%20%7C%20Antigravity-2ea44f.svg)](#supported-harnesses)
 [![Skills](https://img.shields.io/badge/skills-42-orange.svg)](skills/)
 [![PRs target develop](https://img.shields.io/badge/PRs-target%20%60develop%60-blueviolet.svg)](#contributing)
@@ -493,7 +493,7 @@ concurrent sessions in the same project never interfere; a subagent gets its
 own state (`session_id` + `agent_id`) and is gated at `SubagentStop`, so its
 writes never block the parent session's turn.
 
-**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.2.0`.
+**Pin a version:** `claude plugin marketplace add Hagave/engineering-playbook#v4.2.1`.
 
 **For a team:** commit the marketplace and the plugin to the project's
 `.claude/settings.json`; each teammate still accepts the folder's trust dialog
