@@ -2430,7 +2430,8 @@ def _pattern_lines(command: str) -> list[tuple[str, str]]:
 
 
 def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 0,
-                      disposable_root: str = '') -> dict | None:
+                      disposable_root: str = '',
+                      tolerate: frozenset[str] = frozenset()) -> dict | None:
     """Flag a command that destroys work; the adapter decides how the user
     approves it (Claude Code: a permission dialog; Codex: never in-session).
 
@@ -2457,11 +2458,17 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
     `disposable_root` is the session's own scratchpad: an `rm` of literal paths
     inside it deletes only what the session made there, and needs no consent
     (decided by the user for 4.0.0; a build directory or node_modules still
-    does)."""
+    does).
+
+    `tolerate` names effects the caller has made recoverable (see
+    `snapshot_before_discard`): the pattern hits of the command as typed with
+    those effects are skipped. A script the command runs is checked in full."""
     command = strip_heredoc_bodies(command)
     expanded = resolve_literal_commands(command) if _depth == 0 else command
     for shown, line in _pattern_lines(expanded):
         for pattern, effect in DESTRUCTIVE_RULES:
+            if effect in tolerate:
+                continue
             match = re.search(pattern, line, re.IGNORECASE)
             if match:
                 return _destructive_block(
@@ -2512,6 +2519,109 @@ def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 
                 f'Recursive deletion in the script `{source.origin}` (`{call}`). Show the '
                 'user what it deletes.', 'script_delete')
     return None
+
+
+# Effects of a git command that only overwrite tracked content: what they destroy
+# is what `git stash create` captures, so a snapshot makes them recoverable.
+# `clean` (untracked files), branch deletion and the rest are not.
+SNAPSHOT_EFFECTS = frozenset({'discard_changes', 'reset_hard'})
+_SNAPSHOT_REF = 'refs/playbook/snapshots/'
+_SNAPSHOT_KEPT = 20
+_SNAPSHOT_REPOS_MAX = 5
+_SNAPSHOT_TIMEOUT = 4.0
+_PLAIN_VALUE_RE = re.compile(r'[\w@%+=:,./~-]+')
+
+
+class Snapshot(NamedTuple):
+    """Uncommitted tracked changes of `repo`, kept as the commit `sha` under
+    `ref`. `sha` is empty when the repository had none to lose."""
+    repo: str
+    ref: str
+    sha: str
+
+
+def _single_valued_variables(command: str) -> str:
+    """`command` with each `$NAME` or `${NAME}` the text gives exactly one
+    plain literal replaced by it (`C=/srv/app; git -C $C checkout -- f`), so a
+    repository named through a variable can be read. A name with several
+    values, or a value from a substitution or the environment, stays as it is."""
+    outer, _inner = _lift_substitutions(command.replace('\\\n', ' '))
+    statements = _statements(outer)
+    if not statements:
+        return command
+    values = {name: found[0] for name, found in _literal_candidates(statements).items()
+              if len(found) == 1 and _PLAIN_VALUE_RE.fullmatch(found[0])}
+    if not values:
+        return command
+    return _VAR_REF_RE.sub(lambda m: values.get(m.group(1) or m.group(2), m.group(0)), command)
+
+
+def _prune_snapshots(repo: str) -> None:
+    listed = _git_out(repo, 'for-each-ref', '--sort=-refname', '--format=%(refname)',
+                      _SNAPSHOT_REF, timeout=_SNAPSHOT_TIMEOUT)
+    for ref in (listed or '').split()[_SNAPSHOT_KEPT:]:
+        _git_out(repo, 'update-ref', '-d', ref, timeout=_SNAPSHOT_TIMEOUT)
+
+
+def _snapshot_repo(repo: str) -> Snapshot | None:
+    """Keep the uncommitted tracked changes of `repo` under a ref, without
+    touching its working tree or index. None when git cannot (not a repository,
+    no commit yet, unmerged paths, no committer identity, out of time)."""
+    top = _git_out(repo, 'rev-parse', '--show-toplevel', timeout=_SNAPSHOT_TIMEOUT)
+    sha = _git_out(repo, 'stash', 'create', 'playbook: saved before a discard',
+                   timeout=_SNAPSHOT_TIMEOUT)
+    if not top or sha is None:
+        return None
+    top, sha = top.strip(), sha.strip()
+    if not sha:
+        return Snapshot(top, '', '')
+    ref = f'{_SNAPSHOT_REF}{int(time.time() * 1000)}-{os.getpid()}'
+    # The empty old value makes a name that already exists fail, so a snapshot
+    # never overwrites another one: it falls back to asking.
+    if _git_out(repo, 'update-ref', ref, sha, '', timeout=_SNAPSHOT_TIMEOUT) is None:
+        return None
+    _prune_snapshots(repo)
+    return Snapshot(top, ref, sha)
+
+
+def snapshot_before_discard(command: str, cwd: str) -> list[Snapshot] | None:
+    """Make the discards in `command` recoverable: for each repository a
+    `SNAPSHOT_EFFECTS` git call acts on, keep its uncommitted tracked changes
+    under `refs/playbook/snapshots/` (`git stash apply <sha>` brings them back).
+    The snapshot is a commit, not a stash entry: nothing in the working tree
+    moves, so there is nothing to pop afterwards and nothing to conflict with.
+    Accepted trade-off: the snapshot is taken before the command runs, so a
+    file another tool call of the same response changes in between is saved as
+    it was.
+
+    The snapshots that hold something; an empty list when no repository had
+    changes to lose. None when the command cannot be made recoverable, and the
+    caller keeps asking: a repository decided at run time, one git cannot
+    snapshot, a discard git_calls does not see (inside `sh -c`), or more than
+    `_SNAPSHOT_REPOS_MAX` repositories."""
+    calls = git_calls(_single_valued_variables(command), cwd)
+    if calls is None:
+        return None
+    repos: list[str] = []
+    for call in calls:
+        line = ' '.join(['git', call.sub, *call.args])
+        if not any(effect in SNAPSHOT_EFFECTS and re.search(pattern, line, re.IGNORECASE)
+                   for pattern, effect in DESTRUCTIVE_RULES):
+            continue
+        if call.repo is None:
+            return None
+        if call.repo not in repos:
+            repos.append(call.repo)
+    if not repos or len(repos) > _SNAPSHOT_REPOS_MAX:
+        return None
+    kept: list[Snapshot] = []
+    for repo in repos:
+        snapshot = _snapshot_repo(repo)
+        if snapshot is None:
+            return None
+        if snapshot.sha:
+            kept.append(snapshot)
+    return kept
 
 
 def attribution_allowed() -> bool:
