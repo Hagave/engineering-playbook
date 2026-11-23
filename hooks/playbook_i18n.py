@@ -11,7 +11,10 @@ Text addressed to the model stays in English; only what the person reads is
 here. A string missing in a language falls back to English, never to a blank.
 """
 
+import json
 import os
+import re
+import tempfile
 
 # Stored value -> name shown in the language picker, each in its own language.
 LANGUAGE_LABELS = {
@@ -58,11 +61,88 @@ def from_locale(environ: dict) -> str:
     return DEFAULT_LANGUAGE
 
 
-def resolve(preference: str, environ: dict | None = None) -> str:
-    """The language text is shown in: the preference, or the locale for 'auto'."""
+STATE_DIR = os.path.expanduser('~/.claude/hooks')
+_REMEMBERED_FILE = '.playbook-language.json'
+
+# What the words of each language give away. Words two of the languages share
+# (para, como, porque, esta) are left out: they decide nothing.
+def _words(text: str) -> frozenset[str]:
+    return frozenset(text.split())
+
+
+_MARKERS: dict[str, frozenset[str]] = {
+    'en': _words('the is are was were and to of that with this for it you not have has be '
+                 'what how why when where which can could should would do does did if but '
+                 'from they we will my your please'),
+    'pt-br': _words('não você vocês isso uma são também então pra já pelo pela dos das nos '
+                    'ao às ainda esse essa isto aqui só mesmo sim ele ela nós meu seu '
+                    'minha tem foi estão com mas quando agora fazer esses essas deste desta '
+                    'nesse nessa onde seja pode podem preciso quero eu dele dela ter tudo'),
+    'es': _words('qué cómo también pero muy hay el los las usted ustedes con esto eso ahora '
+                 'cuando sí aquí yo mi tu y una un por favor hacer fue son puede pueden '
+                 'quiero necesito tengo del estos donde todo'),
+}
+_DIACRITICS = {'pt-br': 'ãõç', 'es': 'ñ¿¡'}
+_WORD_RE = re.compile(r"[a-zà-ÿñ¿¡']+")
+_DETECT_MIN_HITS = 3
+_DETECT_MAX_CHARS = 4000
+
+
+def detect(text: str) -> str | None:
+    """The language a typed message is written in, or None when it does not say:
+    too short, mixed, or in a language the playbook does not offer.
+
+    A word list, not a model: the hook runs on every prompt and must stay in
+    milliseconds. The trade-off is accepted knowingly: a short prompt ("sim")
+    settles nothing and the language stays as it was, and a message needs a
+    clear lead (twice the runner-up) so pasted English inside Portuguese prose
+    does not flip it."""
+    lowered = text[:_DETECT_MAX_CHARS].lower()
+    words = _WORD_RE.findall(lowered)
+    scores = {language: sum(word in markers for word in words)
+              for language, markers in _MARKERS.items()}
+    for language, marks in _DIACRITICS.items():
+        scores[language] += 2 * len({char for char in lowered if char in marks})
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    (best, top), (_, second) = ranked[0], ranked[1]
+    return best if top >= _DETECT_MIN_HITS and top >= 2 * second else None
+
+
+def remember(language: str, state_dir: str = STATE_DIR) -> None:
+    """Keep the language the user writes in, for the text the playbook shows
+    that no model writes (dialogs, the panel). Best effort: a state directory
+    that cannot be written loses a convenience, never a prompt."""
+    if language not in LANGUAGE_NAMES or remembered(state_dir) == language:
+        return
+    path = os.path.join(state_dir, _REMEMBERED_FILE)
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile('w', dir=state_dir, delete=False, suffix='.tmp') as tmp:
+            json.dump({'language': language}, tmp)
+        os.replace(tmp.name, path)
+    except OSError:
+        pass
+
+
+def remembered(state_dir: str = STATE_DIR) -> str | None:
+    """The language `remember` kept, None when there is none or it is unreadable."""
+    try:
+        with open(os.path.join(state_dir, _REMEMBERED_FILE)) as handle:
+            value = json.load(handle).get('language')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if value in LANGUAGE_NAMES else None
+
+
+def resolve(preference: str, environ: dict | None = None, state_dir: str = STATE_DIR) -> str:
+    """The language text is shown in: the preference; for 'auto', the language
+    the user last wrote in, then the locale. A caller that passes `environ` asks
+    for the locale alone."""
     if preference in LANGUAGE_NAMES:
         return preference
-    return from_locale(os.environ if environ is None else environ)
+    if environ is None:
+        return remembered(state_dir) or from_locale(os.environ)
+    return from_locale(environ)
 
 
 STRINGS: dict[str, dict[str, str]] = {
