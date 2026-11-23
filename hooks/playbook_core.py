@@ -2424,9 +2424,47 @@ def _pattern_lines(command: str) -> list[tuple[str, str]]:
         words = command_words(segment)
         if words and not _searches_only(words):
             shown = shlex.join(segment)
-            lines += [(shown, ' '.join(segment)),
-                      (shown, _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(words)))]
+            read = _without_message_text(segment)
+            lines += [(shown, ' '.join(read)),
+                      (shown, _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(command_words(read))))]
     return lines
+
+
+# A commit, tag, stash or pull request carries prose in its message options; a
+# message that mentions `git reset --hard` is text, and read as part of the
+# line it asked the user about every commit that explained a fix to the gate.
+_MESSAGE_COMMAND_RE = re.compile(
+    r'^(?:git\s+(?:commit|tag|stash|merge|revert|notes|am)|gh\s+(?:pr|issue|release|gist))\b')
+_MESSAGE_VALUE_OPTIONS = {
+    'git': frozenset({'-m', '--message'}),
+    'gh': frozenset({'--title', '-t', '--body', '-b', '--notes', '-n', '--description', '-d'}),
+}
+_MESSAGE_CLUSTER_RE = re.compile(r'-[a-zA-Z]*m')
+
+
+def _without_message_text(segment: list[str]) -> list[str]:
+    """`segment` without the text of its message options (`-m "..."`,
+    `--message=...`, `--title`, `--body`, ...), when it is a command that takes a
+    message; unchanged otherwise. Only those values: every other word of the
+    command is still read, so a destructive command after `&&` or a `-c`
+    script is untouched, and so is a substitution the shell runs from inside
+    double quotes (the shell has already split it into its own command)."""
+    words = command_words(segment)
+    if not words or not _MESSAGE_COMMAND_RE.match(
+            _GIT_GLOBAL_OPTS_RE.sub('git ', ' '.join(words))):
+        return segment
+    options = _MESSAGE_VALUE_OPTIONS.get(words[0].rsplit('/', 1)[-1], frozenset())
+    kept: list[str] = []
+    skip = False
+    for word in segment:
+        if skip:
+            skip = False
+        elif word in options or (words[0] == 'git' and _MESSAGE_CLUSTER_RE.fullmatch(word)):
+            skip = True
+        elif not word.startswith(('--message=', '--title=', '--body=', '--notes=',
+                                  '--description=')):
+            kept.append(word)
+    return kept
 
 
 def check_destructive(command: str, raw: str = '', cwd: str = '', _depth: int = 0,
