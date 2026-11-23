@@ -38,7 +38,7 @@ const ENGLISH = 'en'
 // digits 1-9.
 const MAX_SETTING_ROWS = 5
 // The group whose screen also holds the update entries.
-const ONLINE_GROUP = 'online'
+const UPDATES_GROUP = 'updates'
 // The script gives the marketplace refresh and the plugin update two minutes
 // each; this limit only ends a script that hangs past both.
 const UPDATE_TIMEOUT_MS = 300_000
@@ -272,7 +272,7 @@ function mainRows(loaded: ConfigSnapshot): { label: string; action: Action }[] {
     const group = loaded.groups.find((one): boolean => one.key === setting.group)
     if (group && !placed.has(group.key)) {
       placed.add(group.key)
-      const newer = group.key === ONLINE_GROUP && loaded.update.available ? ` (${loaded.update.latest})` : ''
+      const newer = group.key === UPDATES_GROUP && loaded.update.available ? ` (${loaded.update.latest})` : ''
       rows.push({ label: `${group.label}${newer}`, action: { kind: 'group', group: group.key } })
     }
   }
@@ -280,7 +280,7 @@ function mainRows(loaded: ConfigSnapshot): { label: string; action: Action }[] {
   return rows
 }
 
-// The Online screen's own entries after its settings: update now (only when a
+// The Updates and reports screen's own entries after its settings: update now (only when a
 // newer release is known) and a check for one.
 function updateEntries(after: number, loaded: ConfigSnapshot): Entry[] {
   const { ui, update: found } = loaded
@@ -344,7 +344,7 @@ function entries(current: MenuScreen, loaded: ConfigSnapshot): Entry[] {
         }),
       )
 
-    return [...members, ...(current.group === ONLINE_GROUP ? updateEntries(members.length, loaded) : []), back]
+    return [...members, ...(current.group === UPDATES_GROUP ? updateEntries(members.length, loaded) : []), back]
   }
   if (current.kind === 'lab') {
     const steps: Entry[] = LAB_STEPS.map(

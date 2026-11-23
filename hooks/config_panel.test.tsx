@@ -524,10 +524,10 @@ const ONLINE = {
   ...SNAPSHOT,
   settings: [
     ...SNAPSHOT.settings,
-    { ...SNAPSHOT.settings[1], key: 'update_check', label: 'Update check', value: 'on', default: 'on', group: 'online' },
-    { ...SNAPSHOT.settings[1], key: 'reports', label: 'Deviation reports', group: 'online' },
+    { ...SNAPSHOT.settings[1], key: 'update_check', label: 'Update check', value: 'on', default: 'on', group: 'updates' },
+    { ...SNAPSHOT.settings[1], key: 'reports', label: 'Deviation reports', group: 'updates' },
   ],
-  groups: [{ key: 'online', label: 'Online', help: 'What the playbook asks of the network.' }],
+  groups: [{ key: 'updates', label: 'Updates and reports', help: 'What the playbook asks of the network.' }],
 }
 const NEWER = { ...ONLINE, update: { available: true, latest: '4.3.0' } }
 
@@ -541,14 +541,14 @@ test('the main title carries the installed version', async ($, on) => {
   await band.unmount()
 })
 
-test('a newer release is named on the Online row, and its screen offers the update before the check', async ($, on) => {
+test('a newer release is named on the Updates and reports row, and its screen offers the update before the check', async ($, on) => {
   on('process.run', (_, e) => exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(NEWER)))
   on('command.run', () => ({ text: 'the skill ran' }))
   await $.command.run(typed('playbook-config'))
 
   const main = await $.ui.mount({ ...BAND, surface: 'terminal' })
   const row = await main.find({ type: 'Button', key: 'entry-3' })
-  expect(row?.props.label).toBe('Online (4.3.0)')
+  expect(row?.props.label).toBe('Updates and reports (4.3.0)')
   await main.unmount()
 
   await $.prompt.submit(sent('3'))
@@ -563,7 +563,7 @@ test('a newer release is named on the Online row, and its screen offers the upda
   await online.unmount()
 })
 
-test('without a newer release the Online screen offers only the check', async ($, on) => {
+test('without a newer release the Updates and reports screen offers only the check', async ($, on) => {
   on('process.run', (_, e) => exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(ONLINE)))
   on('command.run', () => ({ text: 'the skill ran' }))
   await $.command.run(typed('playbook-config'))

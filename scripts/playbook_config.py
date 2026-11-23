@@ -77,7 +77,7 @@ DESCRIPTIONS = {
 GROUPS: dict[str, tuple[str, ...]] = {
     'budgets': ('claude_md_budget', 'context_budget'),
     'reminders': ('watch', 'temporary_data'),
-    'online': ('update_check', 'reports'),
+    'updates': ('update_check', 'reports'),
 }
 
 
@@ -219,7 +219,10 @@ def update_answer(op: str, language: str) -> dict:
     if not cache.get('ok'):
         unreachable = say(language, 'update_unreachable', installed=installed)
         return {'text': unreachable, 'manual_text': unreachable, 'is_error': True, 'reload': False}
-    key = 'update_new' if current.available else 'update_current'
+    installed_at, latest_at = (playbook_update.parse_version(current.installed),
+                               playbook_update.parse_version(current.latest))
+    ahead = bool(installed_at and latest_at and installed_at > latest_at)
+    key = 'update_new' if current.available else 'update_ahead' if ahead else 'update_current'
     shown = say(language, key, latest=current.latest, installed=installed)
     return {'text': shown, 'manual_text': shown, 'is_error': False, 'reload': False}
 

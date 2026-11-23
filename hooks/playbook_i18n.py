@@ -448,19 +448,23 @@ STRINGS: dict[str, dict[str, str]] = {
         'pt-br': 'Em vigor agora: nada é perguntado ao GitHub; atualize à mão quando quiser.',
         'es': 'En vigor ahora: no se pregunta nada a GitHub; actualiza a mano cuando quieras.',
     },
-    'group_online': {'en': 'Online', 'pt-br': 'Online', 'es': 'En línea'},
-    'group_online_help': {
+    'group_updates': {
+        'en': 'Updates and reports',
+        'pt-br': 'Atualizações e relatos',
+        'es': 'Actualizaciones e informes',
+    },
+    'group_updates_help': {
         'en': 'What the playbook asks of the network: the update check, the update itself and the deviation reports.',
         'pt-br': 'O que o playbook pede à rede: a verificação de atualização, a atualização em si e os relatos de desvio.',
         'es': 'Lo que el playbook pide a la red: la búsqueda de actualizaciones, la actualización en sí y los informes de desvío.',
     },
     'update_available': {
         'en': ('[playbook] Version {latest} is available (installed {installed}). Open '
-               '/playbook-config, Online, to update.'),
+               '/playbook-config, Updates and reports, to update.'),
         'pt-br': ('[playbook] A versão {latest} está disponível (instalada {installed}). Abra '
-                  '/playbook-config, Online, para atualizar.'),
+                  '/playbook-config, Atualizações e relatos, para atualizar.'),
         'es': ('[playbook] La versión {latest} está disponible (instalada {installed}). Abre '
-               '/playbook-config, En línea, para actualizar.'),
+               '/playbook-config, Actualizaciones e informes, para actualizar.'),
     },
     'update_now': {'en': 'Update now', 'pt-br': 'Atualizar agora', 'es': 'Actualizar ahora'},
     'update_check_now': {
@@ -472,6 +476,11 @@ STRINGS: dict[str, dict[str, str]] = {
         'en': 'Version {latest} is available (installed {installed}).',
         'pt-br': 'A versão {latest} está disponível (instalada {installed}).',
         'es': 'La versión {latest} está disponible (instalada {installed}).',
+    },
+    'update_ahead': {
+        'en': 'This copy ({installed}) is newer than the latest release ({latest}).',
+        'pt-br': 'Esta cópia ({installed}) é mais nova que a última release ({latest}).',
+        'es': 'Esta copia ({installed}) es más nueva que la última release ({latest}).',
     },
     'update_current': {
         'en': 'Up to date: {installed} is the newest release.',

@@ -260,10 +260,10 @@ class TestSettingsScript(Case):
         with open(playbook_core.prefs_path(self.state), 'w') as handle:
             json.dump({'language': 'en'}, handle)
 
-    def test_update_check_is_a_setting_in_the_online_group_on_by_default(self) -> None:
+    def test_update_check_is_a_setting_in_the_updates_group_on_by_default(self) -> None:
         self.assertIs(playbook_core.PREFS_DEFAULTS['update_check'], True)
         self.assertIn('update_check', config.HARNESS_SETTINGS['claude'])
-        self.assertEqual(config.GROUPS['online'], ('update_check', 'reports'))
+        self.assertEqual(config.GROUPS['updates'], ('update_check', 'reports'))
         for harness in ('codex', 'antigravity'):
             self.assertNotIn('update_check', config.HARNESS_SETTINGS[harness])
 
@@ -273,7 +273,7 @@ class TestSettingsScript(Case):
         self.assertEqual(shown['version'], playbook_update.installed_version())
         self.assertEqual(shown['update'], {'available': True, 'latest': '99.0.0'})
         self.assertIn('update_now', shown['ui'])
-        self.assertEqual({g['key'] for g in shown['groups']} & {'online'}, {'online'})
+        self.assertEqual({g['key'] for g in shown['groups']} & {'updates'}, {'updates'})
 
     def test_update_check_turns_off_and_on_with_the_effect_said(self) -> None:
         for value, key in (('off', 'effect_update_check_off'), ('on', 'effect_update_check_on')):
@@ -293,6 +293,14 @@ class TestSettingsScript(Case):
         with mock.patch.object(playbook_update, 'fetch_latest', return_value='4.2.1'), \
                 mock.patch.object(playbook_update, 'PLUGIN_ROOT', self.root):
             self.assertIn('Up to date', config.update_answer('check', 'en')['text'])
+
+    def test_a_copy_newer_than_the_latest_release_says_so_instead_of_calling_itself_the_newest(self) -> None:
+        with mock.patch.object(playbook_update, 'fetch_latest', return_value='4.2.0'), \
+                mock.patch.object(playbook_update, 'PLUGIN_ROOT', self.root):
+            answer = config.update_answer('check', 'en')
+        self.assertFalse(answer['is_error'])
+        self.assertIn('newer than the latest release (4.2.0)', answer['text'])
+        self.assertNotIn('Up to date', answer['text'])
 
     def test_a_check_that_cannot_reach_github_says_so_instead_of_repeating_an_old_answer(self) -> None:
         playbook_update.refresh(self.state, NOW, fetch=lambda: '4.2.1')

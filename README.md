@@ -140,7 +140,7 @@ Without auto-update nothing tells you a release exists, so the playbook says so
 itself: at session start, at most once a day and never waiting for the network,
 it asks GitHub's public releases API for the newest release (no identifier of
 you, your machine or your project is sent) and tells you once per version.
-`/playbook-config` shows the installed version in its title, and its **Online**
+`/playbook-config` shows the installed version in its title, and its **Updates and reports**
 screen has **Check for updates** and **Update now**, which updates the plugin
 and reloads it in the running session. `update_check off` stops the daily
 check.
