@@ -109,7 +109,7 @@ class TestSnapshotBeforeDiscard(SnapshotTestCase):
 
     def test_each_form_of_discard_is_read(self) -> None:
         for command in ('git checkout -- a.txt', 'git restore a.txt', 'git restore --worktree a.txt',
-                        'git restore -W a.txt', 'git reset --hard', 'git reset --hard HEAD~0',
+                        'git restore -W a.txt', 'git reset --hard', 'git reset --hard HEAD',
                         'git -c core.pager=cat restore a.txt', 'sh -c "git checkout -- a.txt"',
                         'cd {repo} && git restore a.txt'):
             with self.subTest(command=command):
@@ -150,6 +150,21 @@ class TestSnapshotBeforeDiscard(SnapshotTestCase):
             with self.subTest(command=command):
                 self.assertIsNone(playbook_core.snapshot_before_discard(command, self.repo))
         self.assertEqual(git(self.repo, 'for-each-ref', 'refs/playbook/'), '')
+
+    def test_a_reset_to_another_commit_is_not_snapshotted(self) -> None:
+        write(self.repo, 'a.txt', 'work\n')
+        for command in ('git reset --hard HEAD~1', 'git reset --hard origin/main',
+                        'git reset --hard abc1234', 'git reset --hard HEAD@{1}',
+                        'git reset --hard -q main'):
+            with self.subTest(command=command):
+                self.assertIsNone(playbook_core.snapshot_before_discard(command, self.repo))
+        self.assertEqual(git(self.repo, 'for-each-ref', 'refs/playbook/'), '')
+
+    def test_a_reset_to_head_is_snapshotted(self) -> None:
+        write(self.repo, 'a.txt', 'work\n')
+        for command in ('git reset --hard', 'git reset --hard HEAD', 'git reset --hard --quiet HEAD'):
+            with self.subTest(command=command):
+                self.assertEqual(len(playbook_core.snapshot_before_discard(command, self.repo)), 1)
 
     def test_a_directory_that_is_not_a_repository_is_not_snapshotted(self) -> None:
         plain = os.path.join(self.tmp, 'plain')

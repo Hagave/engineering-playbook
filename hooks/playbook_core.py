@@ -2584,6 +2584,13 @@ def _snapshot_repo(repo: str) -> Snapshot | None:
     return Snapshot(top, ref, sha)
 
 
+def _moves_head(reset_args: list[str]) -> bool:
+    """Whether a `git reset` names a commit other than HEAD. That drops commits
+    from the branch, which a snapshot of uncommitted changes does not bring back
+    (only the reflog does), so it is still asked about."""
+    return any(arg != 'HEAD' for arg in reset_args if not arg.startswith('-'))
+
+
 def snapshot_before_discard(command: str, cwd: str) -> list[Snapshot] | None:
     """Make the discards in `command` recoverable: for each repository a
     `SNAPSHOT_EFFECTS` git call acts on, keep its uncommitted tracked changes
@@ -2597,8 +2604,8 @@ def snapshot_before_discard(command: str, cwd: str) -> list[Snapshot] | None:
     The snapshots that hold something; an empty list when no repository had
     changes to lose. None when the command cannot be made recoverable, and the
     caller keeps asking: a repository decided at run time, one git cannot
-    snapshot, a discard git_calls does not see (inside `sh -c`), or more than
-    `_SNAPSHOT_REPOS_MAX` repositories."""
+    snapshot, a reset to another commit, a discard git_calls does not see, or
+    more than `_SNAPSHOT_REPOS_MAX` repositories."""
     calls = git_calls(_single_valued_variables(command), cwd)
     if calls is None:
         return None
@@ -2608,7 +2615,7 @@ def snapshot_before_discard(command: str, cwd: str) -> list[Snapshot] | None:
         if not any(effect in SNAPSHOT_EFFECTS and re.search(pattern, line, re.IGNORECASE)
                    for pattern, effect in DESTRUCTIVE_RULES):
             continue
-        if call.repo is None:
+        if call.repo is None or (call.sub == 'reset' and _moves_head(call.args)):
             return None
         if call.repo not in repos:
             repos.append(call.repo)
