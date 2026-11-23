@@ -1098,7 +1098,12 @@ user confirmation before proceeding:
   flag holding an `r` (`javac -proc:none`)
 - `git push --force` / `git push -f` / force-push refspec (`git push origin +main`)
 - `git reset --hard`, forced branch deletion (`-D`, `-df`, `--delete --force`), `git clean -f*`
-- `git checkout --` / `git restore <path>` (except `--staged` alone)
+- `git checkout [<ref>] -- <path>` / `git checkout .` / `git checkout -f` /
+  `git switch -f`, and `git restore <path>` (except `--staged` alone)
+- A script handed to a shell through its stdin is read like a `-c` script:
+  `echo "..." | sh`, `printf`, a here-string (`sh <<< "..."`) and
+  `cat <<EOF | sh`. The output of another program (`cat f | sh`,
+  `curl ... | sh`) is not shown by the command and is not read
 - `git stash clear|drop`, `git reflog expire|delete`, `git update-ref -d`, `git filter-branch|filter-repo`
 - `find ... -delete`, `... | xargs rm`, `rsync --delete`, `shred`, `truncate -s 0`
 - `DROP TABLE`, `TRUNCATE`
