@@ -4139,6 +4139,26 @@ def consent_pending(state_dir: str, session_id: str) -> list[dict]:
     return _consent_entries(load_state(consent_path(state_dir, session_id)), 'pending')
 
 
+def consent_unannounced(state_dir: str, session_id: str) -> list[dict]:
+    """The waiting commands the user has not been told about yet, marked told:
+    each is shown to them once by the hook itself, so a command queued while
+    the model forgot to say so (or said it in a message nobody read) is not
+    left waiting unseen."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return []
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        fresh = [entry for entry in pending if not entry.get('announced')]
+        if fresh:
+            for entry in fresh:
+                entry['announced'] = True
+            data['pending'] = pending
+            save_state(path, data)
+    return fresh
+
+
 def consent_decide(state_dir: str, session_id: str, number: int) -> dict | None:
     """Take `#number` out of the queue for the answer the user gave on the
     button; the entry, or None when it is no longer waiting (answered in the
@@ -4593,8 +4613,11 @@ PREFS_DEFAULTS: dict = {
     # instead of dropped, so a leftover the user did not remove right away is
     # not forgotten by them or the model.
     'temporary_data': True,
+    # Ask GitHub, at most once a day, for the newest release and say so once per
+    # version (hooks/playbook_update.py). The request carries nothing about the user.
+    'update_check': True,
 }
-PREF_FLAGS = ('watch', 'reports', 'temporary_data')
+PREF_FLAGS = ('watch', 'reports', 'temporary_data', 'update_check')
 
 MEMORY_FILE = 'CLAUDE.md'
 

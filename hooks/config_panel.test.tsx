@@ -36,11 +36,15 @@ const UI = {
   lab_active: 'Active scan',
   lab_sqlmap: 'SQL injection scan',
   lab_uninstall: 'Remove the scanner images',
+  update_now: 'Update now',
+  update_check_now: 'Check for updates',
 }
 
 const SNAPSHOT = {
   language: 'en',
   language_name: 'English',
+  version: '4.2.1',
+  update: { available: false, latest: '' },
   ui: UI,
   settings: [
     {
@@ -514,4 +518,170 @@ test('settings the script cannot read leave the request to the skill', async ($,
 
   const ran = await $.command.run(typed('playbook-config'))
   expect(ran.text).toBe('the skill ran')
+})
+
+const ONLINE = {
+  ...SNAPSHOT,
+  settings: [
+    ...SNAPSHOT.settings,
+    { ...SNAPSHOT.settings[1], key: 'update_check', label: 'Update check', value: 'on', default: 'on', group: 'updates' },
+    { ...SNAPSHOT.settings[1], key: 'reports', label: 'Deviation reports', group: 'updates' },
+  ],
+  groups: [{ key: 'updates', label: 'Updates and reports', help: 'What the playbook asks of the network.' }],
+}
+const NEWER = { ...ONLINE, update: { available: true, latest: '4.3.0' } }
+
+test('the main title carries the installed version', async ($, on) => {
+  on('process.run', (_, e) => exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(SNAPSHOT)))
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /Engineering Playbook settings v4\.2\.1/ }))?.text).toBeTruthy()
+  await band.unmount()
+})
+
+test('a newer release is named on the Updates and reports row, and its screen offers the update before the check', async ($, on) => {
+  on('process.run', (_, e) => exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(NEWER)))
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+
+  const main = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const row = await main.find({ type: 'Button', key: 'entry-3' })
+  expect(row?.props.label).toBe('Updates and reports (4.3.0)')
+  await main.unmount()
+
+  await $.prompt.submit(sent('3'))
+  const online = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const labels: unknown[] = []
+  for (const digit of ['1', '2', '3', '4', '0']) {
+    labels.push((await online.find({ type: 'Button', key: `entry-${digit}` }))?.props.label)
+  }
+  expect(labels[2]).toBe('Update now (4.3.0)')
+  expect(labels[3]).toBe('Check for updates')
+  expect(labels[4]).toBe('Back')
+  await online.unmount()
+})
+
+test('without a newer release the Updates and reports screen offers only the check', async ($, on) => {
+  on('process.run', (_, e) => exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(ONLINE)))
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('3'))
+
+  const online = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await online.find({ type: 'Button', key: 'entry-3' }))?.props.label).toBe('Check for updates')
+  expect(await online.find({ type: 'Button', key: 'entry-4' })).toBeUndefined()
+  await online.unmount()
+})
+
+const APPLIED = {
+  text: 'Updated. Reloading the plugins to apply it.',
+  manual_text: 'Updated. Type /reload-plugins to apply it in this session.',
+  is_error: false,
+  reload: true,
+}
+
+test('Update now from a button press runs the script, then reloads the plugins in this session', async ($, on) => {
+  const argvs: string[][] = []
+  const commands: string[] = []
+  on('process.run', (_, e) => {
+    argvs.push([...e.argv])
+    if (e.argv.includes('update')) {
+      return exited(0, JSON.stringify(APPLIED))
+    }
+
+    return exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(NEWER))
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('command.run', (_, e) => {
+    commands.push(e.command)
+
+    return { text: 'ran' }
+  })
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('3'))
+
+  const online = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await online.press({ key: 'entry-3' })
+  await online.unmount()
+
+  expect(argvs.some(argv => argv.includes('update') && argv.includes('apply') && argv.includes('--json'))).toBe(true)
+  expect(commands).toContain('reload-plugins')
+})
+
+test('Update now from a typed digit cannot run the reload, so it tells the person to type it', async ($, on) => {
+  const commands: string[] = []
+  on('process.run', (_, e) => {
+    if (e.argv.includes('update')) {
+      return exited(0, JSON.stringify(APPLIED))
+    }
+
+    return exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(NEWER))
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('command.run', (_, e) => {
+    commands.push(e.command)
+
+    return { text: 'ran' }
+  })
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('3'))
+  const dropped = await $.prompt.submit(sent('3'))
+
+  expect(commands).not.toContain('reload-plugins')
+  expect(JSON.stringify(dropped)).toContain('/reload-plugins')
+})
+
+test('a failed update is shown in red and nothing is reloaded', async ($, on) => {
+  const commands: string[] = []
+  on('process.run', (_, e) => {
+    if (e.argv.includes('update')) {
+      return exited(0, JSON.stringify({ text: 'The update failed: not found', manual_text: 'The update failed: not found', is_error: true, reload: false }))
+    }
+
+    return exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(NEWER))
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('command.run', (_, e) => {
+    commands.push(e.command)
+
+    return { text: 'ran' }
+  })
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('3'))
+  await $.prompt.submit(sent('3'))
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const said = await band.find({ type: 'Text', text: /The update failed/ })
+  expect(said?.props.color).toBe('red')
+  expect(commands).not.toContain('reload-plugins')
+  await band.unmount()
+})
+
+test('Check for updates asks the script and shows its answer', async ($, on) => {
+  const argvs: string[][] = []
+  on('process.run', (_, e) => {
+    argvs.push([...e.argv])
+    if (e.argv.includes('update')) {
+      return exited(0, JSON.stringify({
+          text: 'Up to date: 4.2.1 is the newest release.',
+          manual_text: 'Up to date: 4.2.1 is the newest release.',
+          is_error: false,
+          reload: false,
+        }))
+    }
+
+    return exited(0, e.argv.includes('--report') ? REPORT : JSON.stringify(ONLINE))
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('command.run', () => ({ text: 'the skill ran' }))
+  await $.command.run(typed('playbook-config'))
+  await $.prompt.submit(sent('3'))
+  await $.prompt.submit(sent('3'))
+
+  expect(argvs.some(argv => argv.includes('update') && argv.includes('check'))).toBe(true)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /Up to date/ }))?.text).toBeTruthy()
+  await band.unmount()
 })

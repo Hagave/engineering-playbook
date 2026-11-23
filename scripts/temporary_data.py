@@ -182,7 +182,8 @@ def show(session_id: str, project_dir: str) -> dict:
 
 def _run(command: str, cwd: str) -> tuple[int, str]:
     """Run `command` the way the Bash tool would, in `cwd`; its exit code and
-    the end of what it wrote to stderr."""
+    the end of what it wrote: stderr, or stdout when stderr is empty (git says
+    "nothing to commit" on stdout), or what the language calls no output."""
     if not os.path.isdir(cwd):
         return 1, f'{cwd} no longer exists'
     try:
@@ -190,7 +191,8 @@ def _run(command: str, cwd: str) -> tuple[int, str]:
                              timeout=RUN_TIMEOUT_S, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return 124, f'still running after {RUN_TIMEOUT_S}s; stopped'
-    return ran.returncode, ran.stderr.strip()[-ERROR_SHOWN_CHARS:]
+    said = ran.stderr.strip() or ran.stdout.strip() or playbook_i18n.text(_language(), 'tmp_no_output')
+    return ran.returncode, said[-ERROR_SHOWN_CHARS:]
 
 
 def approve(session_id: str, project_dir: str, number: int) -> dict:

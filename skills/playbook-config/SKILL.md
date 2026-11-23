@@ -52,7 +52,7 @@ Read the current values first: `python3 <playbook>/scripts/playbook_config.py sh
 | Warnings and reminders | | | Opens a screen with the two settings below. |
 | Cost budgets | | | Opens a screen with the two budgets below. |
 | Language | `language` | `auto` (default, follows the system locale), `en`, `pt-br`, `es` | Language of the fixed text in Claude Code's numbered settings menu. Replies always follow the language the user writes in. |
-| Deviation reports | `reports` | `on`, `off` (default) | Sends the maintainer each deviation a model reports from a skill rule. See *Deviation reports*. |
+| Updates and reports | | | Opens a screen with the two settings below, **Check for updates** and, when a newer release is known, **Update now**. |
 
 Warnings and reminders screen:
 
@@ -60,6 +60,15 @@ Warnings and reminders screen:
 |---|---|---|---|
 | Known-failure warnings | `watch` | `on`, `off` (default) | Before a write or a command that touches something that already failed in this project, show the recorded failure. See *Known-failure warnings*. |
 | Temporary data panel | `temporary_data` | `on` (default), `off` | In auto mode, a deletion the user declines on the button above the chat is kept in this project's Temporary data panel (`/temporary-data`) to remove later; off, it is only dropped. Claude Code only. |
+
+Updates and reports screen:
+
+| Entry | Key | Values | What it does |
+|---|---|---|---|
+| Update check | `update_check` | `on` (default), `off` | Once a day the playbook asks GitHub for the newest release (a plain request that carries nothing about the user, the machine or the project) and says so, once per version, at session start. The installed version is in the menu's title. |
+| Deviation reports | `reports` | `on`, `off` (default) | Sends the maintainer each deviation a model reports from a skill rule. See *Deviation reports*. |
+| Check for updates | | | Asks GitHub now and says whether a newer release exists. `python3 <playbook>/scripts/playbook_config.py update check`. |
+| Update now | | | Shown only when a newer release is known. Runs `claude plugin marketplace update` and `claude plugin update`, then reloads the plugins so the new version applies in this session (typed from the prompt instead of pressed, it asks for `/reload-plugins`). `python3 <playbook>/scripts/playbook_config.py update apply`. A copy loaded from a folder (`--plugin-dir`) or an installer's clone is not tracked by the marketplace: the update says so and names what to do instead. |
 
 Cost budgets screen:
 
