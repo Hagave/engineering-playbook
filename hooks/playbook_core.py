@@ -277,7 +277,13 @@ DESTRUCTIVE_RULES = [
      r'|(?-i:-[a-zA-Z]*(?:d[a-zA-Z]*f|f[a-zA-Z]*d)[a-zA-Z]*)\b'
      r'|(?:--delete|-d)\b[^\n;&|]*\s(?:--force|-f)\b'
      r'|(?:--force|-f)\b[^\n;&|]*\s(?:--delete|-d)\b)', 'branch_delete'),
-    (r'\bgit\s+checkout\s+--\s', 'discard_changes'),
+    # `git checkout` overwrites the working tree with any ref's content when it
+    # names paths (`-- f`, `HEAD -- f`, `main -- f`, `.`), and `-f`/`--force`
+    # (also `git switch`) throws local changes away on a switch.
+    (r'\bgit\s+checkout\b[^\n;&|]*\s--(?:\s|$)', 'discard_changes'),
+    (r'\bgit\s+checkout\b[^\n;&|]*\s\.(?:\s|$)', 'discard_changes'),
+    (r'\bgit\s+(?:checkout|switch)\b[^\n;&|]*\s(?:(?-i:-[a-zA-Z]*f[a-zA-Z]*)|--force|--discard-changes)(?:\s|$)',
+     'discard_changes'),
     # `git restore` discards working-tree changes unless it only unstages.
     # Short flags case-sensitive: under IGNORECASE `-s` (--source, which
     # overwrites the working tree) read as `-S` (--staged, which only unstages).
@@ -370,6 +376,10 @@ _SHELL_CONSUMERS = frozenset({'sh', 'bash', 'zsh', 'ksh', 'dash', 'ash',
                               'eval', 'source', '.', 'ssh', 'sudo', 'doas'})
 
 
+_PIPED_INTO_SHELL_RE = re.compile(
+    r'\|\s*(?:(?:sudo|doas)\s+)?(?:\S*/)?(?:sh|bash|zsh|ksh|dash|ash)\b(?!\s+(?:-\S*c|[^-\s;&|)<>]))')
+
+
 def _segment_command_word(command: str, upto: int) -> str:
     """The command word of the pipeline segment ending at `upto`."""
     start = 0
@@ -410,9 +420,12 @@ def strip_heredoc_bodies(command: str, keep_for: frozenset | set = frozenset()) 
         if not match:
             return result
         pos = match.end()
-        if _segment_command_word(result, match.start()) in consumers:
+        line_end = result.find('\n', match.end())
+        opener_tail = result[match.end():line_end if line_end != -1 else len(result)]
+        if (_segment_command_word(result, match.start()) in consumers
+                or _PIPED_INTO_SHELL_RE.search(opener_tail)):
             continue
-        body = _heredoc_body_re(match).match(result, match.start())
+        body =_heredoc_body_re(match).match(result, match.start())
         if not body:
             continue
         replacement = body.group(1) + '[heredoc body omitted]' + body.group(3)
@@ -1307,6 +1320,67 @@ def _nested_scripts(words: list[str]) -> list[str]:
                        if re.fullmatch(r'-[a-z]*c[a-z]*', words[j])), None)
         if script is not None:
             scripts.append(script)
+        else:
+            scripts += _here_string(words[at + 1:])
+    return scripts
+
+
+def _here_string(words: list[str]) -> list[str]:
+    """The text a here-string (`<<< text`, `<<<text`) among `words` feeds in."""
+    for at, word in enumerate(words):
+        if word == '<<<' and at + 1 < len(words):
+            return [words[at + 1]]
+        if word.startswith('<<<') and len(word) > 3:
+            return [word[3:]]
+    return []
+
+
+_REDIRECT_WORD_RE = re.compile(r'(?:\d*>>?|&>>?|\d*<)')
+
+
+def _reads_script_from_stdin(words: list[str]) -> bool:
+    """Whether a shell with these words has no `-c` and no script file, so it
+    reads its script from stdin."""
+    if not words or words[0].rsplit('/', 1)[-1] not in _SHELL_WORDS:
+        return False
+    skip = False
+    for word in words[1:]:
+        if skip:
+            skip = False
+        elif word in ('-o', '+o', '-O', '+O'):
+            skip = True
+        elif _REDIRECT_WORD_RE.fullmatch(word):
+            skip = True
+        elif _REDIRECT_WORD_RE.match(word) or word.startswith(('--', '+')):
+            continue
+        elif word.startswith('-') and len(word) > 1:
+            if 'c' in word:
+                return False
+            if 's' in word:
+                return True
+        else:
+            return False
+    return True
+
+
+def _piped_shell_scripts(command: str) -> list[str]:
+    """What `echo` or `printf` pipes into a shell that reads its script from
+    stdin (`echo "rm -rf build" | sh`), as the script that shell runs. Only
+    text the command shows: the output of another producer (`cat f`,
+    `curl ...`) is a program it does not show, and is not read."""
+    outer, _inner = _lift_substitutions(command.replace('\\\n', ' '))
+    statements = _statements(re.sub(r'\d*>&\d+|&>>?', ' ', outer)) or []
+    scripts: list[str] = []
+    for (_, producer), (separator, consumer) in zip(statements, statements[1:]):
+        words = command_words(producer)
+        if (separator not in ('|', '|&') or not words
+                or words[0].rsplit('/', 1)[-1] not in ('echo', 'printf')
+                or not _reads_script_from_stdin(command_words(consumer))):
+            continue
+        args = [w for w in words[1:] if not re.fullmatch(r'-[neE]+', w)]
+        if words[0].rsplit('/', 1)[-1] == 'printf' and args and '%' in args[0]:
+            args = args[1:]
+        scripts.append('\n'.join(args).replace('\\n', '\n'))
     return scripts
 
 
@@ -1326,16 +1400,18 @@ def _raw_simple_commands(command: str
         return None
     found: list[tuple[list[str], bool]] = []
     opaque: list[str] = []
+    scripts = _piped_shell_scripts(command)
     for segment in segments:
         found.append((segment, False))
         words = command_words(segment)
-        for script in _nested_scripts(words) if words else ():
-            nested = _raw_simple_commands(script)
-            if nested is None:
-                opaque.append(script)
-            else:
-                found += [(inner, True) for inner, _ in nested[0]]
-                opaque += nested[1]
+        scripts += _nested_scripts(words) if words else []
+    for script in scripts:
+        nested = _raw_simple_commands(script)
+        if nested is None:
+            opaque.append(script)
+        else:
+            found += [(inner, True) for inner, _ in nested[0]]
+            opaque += nested[1]
     return found, opaque
 
 

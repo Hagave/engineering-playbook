@@ -111,7 +111,10 @@ class TestSnapshotBeforeDiscard(SnapshotTestCase):
         for command in ('git checkout -- a.txt', 'git restore a.txt', 'git restore --worktree a.txt',
                         'git restore -W a.txt', 'git reset --hard', 'git reset --hard HEAD',
                         'git -c core.pager=cat restore a.txt', 'sh -c "git checkout -- a.txt"',
-                        'cd {repo} && git restore a.txt'):
+                        'cd {repo} && git restore a.txt', 'git checkout HEAD -- a.txt',
+                        'git checkout main -- a.txt', 'git checkout .', 'git checkout -f',
+                        'git switch --discard-changes main', 'echo "git checkout HEAD -- a.txt" | sh',
+                        'sh <<< "git checkout HEAD -- a.txt"'):
             with self.subTest(command=command):
                 write(self.repo, 'a.txt', 'work\n')
                 snapshots = playbook_core.snapshot_before_discard(
