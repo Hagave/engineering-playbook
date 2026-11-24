@@ -102,10 +102,21 @@ export type TemporaryUi = {
 
 // A command auto mode queued for the person's answer. `cut` says why the
 // button cannot run it ('' when it can).
-export type TemporaryPending = { id: number; text: string; cut: string }
+// `text` is its headline (number, what it destroys, how long it waits).
+export type TemporaryPending = { id: number; text: string; command: string; cut: string }
 
-// A deletion the person declined and has not run yet.
-export type TemporaryItem = { id: string; text: string; confirm: string; command: string }
+// A deletion the person declined and has not run yet. The list draws `title`,
+// `detail` ('' when the title already holds the whole name) and `origin`; the
+// confirmation draws `text`.
+export type TemporaryItem = {
+  id: string
+  title: string
+  detail: string
+  origin: string
+  text: string
+  confirm: string
+  command: string
+}
 
 export type TemporaryView = {
   ui: TemporaryUi

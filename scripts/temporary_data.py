@@ -147,6 +147,38 @@ def _item_text(language: str, item: dict) -> str:
     return say(language, template, effect=label, command=command, when=when)
 
 
+def _item_label(language: str, item: dict) -> tuple[str, str]:
+    """What an item removes, as a short name and the full path when the name
+    only shows its last folder: the list draws them on two lines."""
+    what = item.get('what') if isinstance(item.get('what'), dict) else {}
+    key, name, text = what.get('key'), what.get('name'), what.get('text')
+    if isinstance(key, str) and key in playbook_i18n.STRINGS and isinstance(name, str):
+        short = os.path.basename(name.rstrip('/')) or name
+        return playbook_i18n.text(language, key, name=short), name if short != name else ''
+    if isinstance(text, str) and text:
+        return text[:WHAT_SHOWN_CHARS], ''
+    return _effect_text(language, item.get('effect')), ''
+
+
+def _item_origin(language: str, item: dict) -> str:
+    when = time.strftime('%Y-%m-%d %H:%M', time.localtime(item['ts']))
+    kind = item.get('kind') if item.get('kind') in ('created', 'registered') else 'declined'
+    return playbook_i18n.text(language, f'tmp_origin_{kind}', when=when)
+
+
+def _item_view(language: str, item: dict) -> dict:
+    title, detail = _item_label(language, item)
+    return {
+        'id': item['id'],
+        'title': title,
+        'detail': detail,
+        'origin': _item_origin(language, item),
+        'text': _item_text(language, item),
+        'confirm': playbook_i18n.text(language, 'tmp_confirm', cwd=item['cwd']),
+        'command': playbook_core.shown_command(item['command']),
+    }
+
+
 def _age(seconds: float) -> str:
     minutes = int(seconds // 60)
     if minutes < 1:
@@ -184,19 +216,14 @@ def show(session_id: str, project_dir: str) -> dict:
             'id': entry.get('id'),
             'text': say(language, 'tmp_row', id=entry.get('id'),
                         effect=_effect_text(language, entry.get('effect')),
-                        command=playbook_core.shown_command(str(entry.get('command') or '')),
                         age=_queued_for(language, entry)),
+            'command': playbook_core.shown_command(str(entry.get('command') or '')),
             'cut': say(language, 'tmp_cut', id=entry.get('id')) if entry.get('is_cut') else '',
         } for entry in pending[:PENDING_SHOWN]],
         'more': (say(language, 'tmp_more', count=len(pending) - PENDING_SHOWN)
                  if len(pending) > PENDING_SHOWN else ''),
         'open': say(language, 'tmp_open', count=len(items)) if items else '',
-        'items': [{
-            'id': item['id'],
-            'text': _item_text(language, item),
-            'confirm': say(language, 'tmp_confirm', cwd=item['cwd']),
-            'command': playbook_core.shown_command(item['command']),
-        } for item in items],
+        'items': [_item_view(language, item) for item in items],
     }
 
 
