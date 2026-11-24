@@ -624,6 +624,11 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     'tmp_what_worktree': {'en': 'git worktree {name}', 'pt-br': 'worktree do git {name}',
                           'es': 'worktree de git {name}'},
+    'tmp_what_orphan': {
+        'en': 'git worktree {name}, no longer tracked by git',
+        'pt-br': 'worktree do git {name}, que o git não conhece mais',
+        'es': 'worktree de git {name}, que git ya no conoce',
+    },
     'tmp_what_tempdir': {'en': 'temporary folder {name}', 'pt-br': 'pasta temporária {name}',
                          'es': 'carpeta temporal {name}'},
     'tmp_what_tempfile': {'en': 'temporary file {name}', 'pt-br': 'arquivo temporário {name}',

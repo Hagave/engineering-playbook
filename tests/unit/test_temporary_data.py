@@ -324,6 +324,149 @@ class TestSuperseded(_Case):
         self.assertEqual(playbook_core.consent_pending(state, SESSION), [])
 
 
+_GIT_ENV = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.com',
+            'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.com'}
+
+
+class TestOrphanWorktree(_Case):
+    """A worktree folder git no longer tracks: `git worktree remove` can never
+    succeed on it, so the panel deletes the folder, and says so."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = os.path.join(self.project, 'repo')
+        self.wt = os.path.join(self.project, 'wt')
+        os.makedirs(self.repo)
+        self._git('init', '-q')
+        self._git('commit', '-q', '--allow-empty', '-m', 'first')
+        self._git('worktree', 'add', '-q', self.wt)
+
+    def _git(self, *args: str, cwd: str = '') -> subprocess.CompletedProcess:
+        return subprocess.run(['git', *args], cwd=cwd or self.repo, capture_output=True, text=True,
+                              env=_GIT_ENV, check=False)
+
+    def _item(self, path: str = '', key: str = 'tmp_what_worktree') -> dict:
+        path = path or self.wt
+        return playbook_core.temporary_data_add(
+            self.state, self.project, command=f'git worktree remove --force {path}', cwd=self.repo,
+            effect='worktree_remove', origin='model', kind='registered',
+            what={'key': key, 'name': path}, target={'kind': 'path', 'value': path})
+
+    def _lose_the_registration(self) -> None:
+        shutil.rmtree(os.path.join(self.repo, '.git', 'worktrees', 'wt'))
+
+    def test_git_really_refuses_a_folder_it_lost_track_of(self):
+        self._lose_the_registration()
+        refused = self._git('worktree', 'remove', '--force', self.wt)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertTrue(os.path.isdir(self.wt))
+
+    def test_a_registered_worktree_is_removed_by_git(self):
+        item = self._item()
+        self.assertIsNone(temporary_data._orphan_worktree(item))
+        self.assertTrue(temporary_data.show(SESSION, self.project)['items'][0]['title']
+                        .startswith('git worktree wt'))
+        self.assertEqual(temporary_data.show(SESSION, self.project)['items'][0]['command'],
+                         item['command'])
+        self.assertEqual(temporary_data.remove(self.project, item['id'])['text'], 'Removed.')
+        self.assertFalse(os.path.exists(self.wt))
+        self.assertEqual(self._git('worktree', 'list', '--porcelain').stdout.count('worktree '), 1)
+
+    def test_an_orphan_is_shown_as_what_it_is_and_the_command_shown_is_what_runs(self):
+        item = self._item()
+        self._lose_the_registration()
+        self.assertEqual(temporary_data._orphan_worktree(item), self.wt)
+        shown = temporary_data.show(SESSION, self.project)['items'][0]
+        self.assertEqual(shown['title'], 'git worktree wt, no longer tracked by git')
+        self.assertEqual(shown['detail'], self.wt)
+        self.assertEqual(shown['command'], f'rm -rf {self.wt}')
+        self.assertIn('no longer tracked by git', shown['text'])
+        self.assertIn(f'rm -rf {self.wt}', shown['text'])
+
+    def test_pressing_remove_deletes_the_folder_and_the_item(self):
+        item = self._item()
+        self._lose_the_registration()
+        answer = temporary_data.remove(self.project, item['id'])
+        self.assertEqual((answer['text'], answer['is_error']), ('Removed.', False))
+        self.assertFalse(os.path.exists(self.wt))
+        self.assertEqual(playbook_core.temporary_data_items(self.state, self.project), [])
+
+    def test_a_folder_that_cannot_be_deleted_is_reported_and_kept(self):
+        item = self._item()
+        self._lose_the_registration()
+        with mock.patch.object(temporary_data.shutil, 'rmtree', side_effect=OSError('denied')):
+            answer = temporary_data.remove(self.project, item['id'])
+        self.assertTrue(answer['is_error'])
+        self.assertIn('denied', answer['text'])
+        self.assertEqual(len(playbook_core.temporary_data_items(self.state, self.project)), 1)
+
+    def test_the_pointer_may_be_relative_to_the_folder(self):
+        self._lose_the_registration()
+        with open(os.path.join(self.wt, '.git'), 'w') as pointer:
+            pointer.write('gitdir: ../repo/.git/worktrees/wt\n')
+        self.assertEqual(temporary_data._orphan_worktree(self._item()), self.wt)
+        os.makedirs(os.path.join(self.repo, '.git', 'worktrees', 'wt'))
+        self.assertIsNone(temporary_data._orphan_worktree(self._item()))
+
+    def test_only_a_folder_that_is_shown_to_be_orphan_is_ever_deleted(self):
+        self._lose_the_registration()
+        pointer = os.path.join(self.wt, '.git')
+        os.remove(pointer)
+
+        def write(text: str) -> None:
+            with open(pointer, 'w') as handle:
+                handle.write(text)
+
+        def leave_nothing() -> None:
+            pass
+
+        def make_a_directory() -> None:
+            os.makedirs(pointer)
+
+        def make_a_link() -> None:
+            os.symlink(os.path.join(self.repo, 'nowhere'), pointer)
+
+        cases = {
+            'a real .git directory': make_a_directory,
+            'no .git at all': leave_nothing,
+            'a .git that is no gitdir pointer': lambda: write('hello\n'),
+            'a pointer to a folder that exists': lambda: write(f'gitdir: {self.repo}\n'),
+            'an empty pointer': lambda: write('gitdir:\n'),
+            'a .git that is a link': make_a_link,
+        }
+        for name, make in cases.items():
+            with self.subTest(case=name):
+                if os.path.isdir(pointer) and not os.path.islink(pointer):
+                    shutil.rmtree(pointer)
+                elif os.path.lexists(pointer):
+                    os.remove(pointer)
+                make()
+                self.assertIsNone(temporary_data._orphan_worktree(self._item()))
+                temporary_data.remove(self.project, self._item()['id'])
+                self.assertTrue(os.path.isdir(self.wt))
+
+    def test_a_link_to_an_orphan_is_never_followed(self):
+        self._lose_the_registration()
+        link = os.path.join(self.project, 'link')
+        os.symlink(self.wt, link)
+        self.assertIsNone(temporary_data._orphan_worktree(self._item(link)))
+
+    def test_only_a_worktree_item_can_be_an_orphan(self):
+        self._lose_the_registration()
+        self.assertIsNone(temporary_data._orphan_worktree(self._item(key='tmp_what_tempdir')))
+        self.assertIsNone(temporary_data._orphan_worktree({'what': {}, 'target': {}}))
+        item = self._item()
+        item['target'] = {'kind': 'container', 'value': self.wt}
+        self.assertIsNone(temporary_data._orphan_worktree(item))
+
+    def test_the_orphan_text_exists_in_every_language(self):
+        item = {'ts': 0, 'what': {'key': 'tmp_what_orphan', 'name': '/a/wt'}}
+        for language in ('en', 'pt-br', 'es'):
+            with self.subTest(language=language):
+                title, _detail = temporary_data._item_label(language, item)
+                self.assertIn('wt', title)
+
+
 class TestCreatedTemporaries(unittest.TestCase):
     def setUp(self) -> None:
         self.cwd = tempfile.mkdtemp()

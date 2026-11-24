@@ -33,6 +33,7 @@ cut (`is_cut`) is never run from the button: the person answers in the chat.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -130,12 +131,49 @@ def _is_released(item: dict, session_id: str, turn_end: float) -> bool:
     return item['ts'] <= turn_end
 
 
+def _orphan_worktree(item: dict) -> str | None:
+    """The folder of a worktree git no longer tracks: its `.git` file points
+    at an administrative folder that is gone (a removal that took only the
+    registration), so `git worktree remove` can never succeed on it. Read from
+    the folder itself, never from git's message, which is translated. A folder
+    that is a link, has a real `.git` directory or has no `.git` is not one."""
+    target = item.get('target') if isinstance(item.get('target'), dict) else {}
+    what = item.get('what') if isinstance(item.get('what'), dict) else {}
+    path = target.get('value')
+    if what.get('key') != 'tmp_what_worktree' or target.get('kind') != 'path' or not isinstance(path, str):
+        return None
+    pointer = os.path.join(path, '.git')
+    if (os.path.islink(path) or not os.path.isdir(path)
+            or os.path.islink(pointer) or not os.path.isfile(pointer)):
+        return None
+    try:
+        with open(pointer, encoding='utf-8') as handle:
+            first = handle.readline().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not first.startswith('gitdir:'):
+        return None
+    return None if os.path.exists(os.path.join(path, first[len('gitdir:'):].strip())) else path
+
+
+def _removal_command(item: dict) -> str:
+    """What a press on Remove runs, as the person is shown it."""
+    orphan = _orphan_worktree(item)
+    if orphan is not None:
+        return f'rm -rf {shlex.quote(orphan)}'
+    return playbook_core.shown_command(item['command'])
+
+
+def _what_key(item: dict, key: object) -> object:
+    return 'tmp_what_orphan' if _orphan_worktree(item) is not None else key
+
+
 def _item_text(language: str, item: dict) -> str:
     say = playbook_i18n.text
     when = time.strftime('%Y-%m-%d %H:%M', time.localtime(item['ts']))
-    command = playbook_core.shown_command(item['command'])
+    command = _removal_command(item)
     what = item.get('what') if isinstance(item.get('what'), dict) else {}
-    key, name, text = what.get('key'), what.get('name'), what.get('text')
+    key, name, text = _what_key(item, what.get('key')), what.get('name'), what.get('text')
     if isinstance(key, str) and key in playbook_i18n.STRINGS and isinstance(name, str):
         label = say(language, key, name=name)
     elif isinstance(text, str) and text:
@@ -151,7 +189,7 @@ def _item_label(language: str, item: dict) -> tuple[str, str]:
     """What an item removes, as a short name and the full path when the name
     only shows its last folder: the list draws them on two lines."""
     what = item.get('what') if isinstance(item.get('what'), dict) else {}
-    key, name, text = what.get('key'), what.get('name'), what.get('text')
+    key, name, text = _what_key(item, what.get('key')), what.get('name'), what.get('text')
     if isinstance(key, str) and key in playbook_i18n.STRINGS and isinstance(name, str):
         short = os.path.basename(name.rstrip('/')) or name
         return playbook_i18n.text(language, key, name=short), name if short != name else ''
@@ -175,7 +213,7 @@ def _item_view(language: str, item: dict) -> dict:
         'origin': _item_origin(language, item),
         'text': _item_text(language, item),
         'confirm': playbook_i18n.text(language, 'tmp_confirm', cwd=item['cwd']),
-        'command': playbook_core.shown_command(item['command']),
+        'command': _removal_command(item),
     }
 
 
@@ -310,6 +348,15 @@ def remove(project_dir: str, item_id: str) -> dict:
                  if one['id'] == item_id), None)
     if item is None:
         return {'text': say(language, 'tmp_gone'), 'note': '', 'is_error': False}
+    orphan = _orphan_worktree(item)
+    if orphan is not None:
+        try:
+            shutil.rmtree(orphan)
+        except OSError as error:
+            return {'text': say(language, 'tmp_failed', code=1, error=str(error)[-ERROR_SHOWN_CHARS:]),
+                    'note': '', 'is_error': True}
+        playbook_core.temporary_data_drop(STATE_DIR, project_dir, item_id)
+        return {'text': say(language, 'tmp_removed'), 'note': '', 'is_error': False}
     code, error = _run(item['command'], item['cwd'])
     if code != 0:
         return {'text': say(language, 'tmp_failed', code=code, error=error), 'note': '',
