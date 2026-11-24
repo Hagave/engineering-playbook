@@ -96,7 +96,7 @@ def _effect_text(language: str, effect: object) -> str:
 
 
 def _language() -> str:
-    return playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
+    return playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'], state_dir=STATE_DIR)
 
 
 def _still_there(item: dict, deadline: float) -> bool:

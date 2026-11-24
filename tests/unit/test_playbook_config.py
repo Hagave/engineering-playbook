@@ -150,6 +150,18 @@ class TestLanguage(unittest.TestCase):
         self.assertEqual(self._show('C')['language'], 'en')
         self.assertEqual(self._show('de_DE.UTF-8')['language'], 'en')
 
+    def test_auto_reads_the_remembered_language_of_the_state_it_is_given_and_no_other(self):
+        elsewhere = mock.Mock(return_value='es')
+
+        def remembered(state_dir: str = '') -> str | None:
+            return 'pt-br' if state_dir == self.state else elsewhere()
+
+        config.playbook_i18n.remember('pt-br', self.state)
+        with mock.patch.object(config.playbook_i18n, 'remembered', side_effect=remembered):
+            self.assertEqual(self._show('en_US.UTF-8')['language'], 'pt-br')
+            self.assertIn('Vale a partir', self._run('set', 'prose', 'low')[1])
+        elsewhere.assert_not_called()
+
     def test_a_chosen_language_wins_over_the_locale(self):
         self.assertEqual(self._run('set', 'language', 'pt-BR')[0], 0)
         shown = self._show('en_US.UTF-8')
@@ -297,7 +309,7 @@ class TestHarness(unittest.TestCase):
                 self.assertNotIn('reports', config.HARNESS_SETTINGS[harness])
 
     def test_reports_turn_on_and_off_with_the_effect_said(self):
-        language = config.playbook_i18n.resolve('auto')
+        language = config.playbook_i18n.resolve('auto', state_dir=self.state)
         code, out, _ = self._run('set', 'reports', 'on')
         self.assertEqual(code, 0)
         self.assertIn('reports = on', out)
