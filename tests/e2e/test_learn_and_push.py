@@ -1210,6 +1210,7 @@ class TestDestructiveConsentByDialog(_Base):
         self.tmp = os.path.join(self.dir, 'tmp')
         os.makedirs(os.path.join(self.home, '.claude', 'hooks'))
         os.makedirs(self.tmp)
+        os.makedirs(os.path.join(self.dir, 'build'))
         self._language('en')
 
     def _language(self, language: str) -> None:

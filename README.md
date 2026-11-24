@@ -294,7 +294,12 @@ machine: destructive commands, AI attribution in history, and secrets.
 dialog and approve or decline it. In auto mode, Claude Code shows the queued
 command above the chat with **Decline** and **Approve** (click, or ctrl+x tab,
 the arrows and Enter; no digit presses them, so a message you start typing never
-runs one). Approve runs it right away and tells the agent; Decline drops it, or
+runs one). Each queued command shows how long it has been waiting. One whose
+targets are all already gone (a literal `rm` or `git worktree remove` whose paths
+no longer exist, because the agent or you removed them another way) leaves the
+queue by itself and the agent is told; anything the words do not name (a glob, a
+variable, `find -exec rm`) stays until answered. Approve runs it right away and
+tells the agent; Decline drops it, or
 keeps a deletion in the project's **Temporary data** panel (`/temporary-data`,
 or the button that appears above the chat), where you remove it later or keep
 it. The panel also gets, once the agent's turn ends, what a command made and

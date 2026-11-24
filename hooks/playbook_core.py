@@ -2458,13 +2458,9 @@ def _searches_only(words: list[str]) -> bool:
     return base in _SEARCH_TOOLS
 
 
-def removes_only_under(words: list[str], root: str) -> bool:
-    """Whether `words` is an `rm` whose every operand is a literal absolute
-    path inside `root` (the session scratchpad), resolved through symlinks:
-    `rm -rf <scratchpad>/link/` follows the link and is not inside. A glob, a
-    variable, a relative path or no operand at all is never inside."""
-    if not root or words[0].rsplit('/', 1)[-1] != 'rm':
-        return False
+def _rm_operands(words: list[str]) -> list[str]:
+    """The operands of the `rm` in `words`: what is left once its options
+    (anything dashed before `--`) are set aside."""
     operands: list[str] = []
     options_done = False
     for word in words[1:]:
@@ -2474,6 +2470,43 @@ def removes_only_under(words: list[str], root: str) -> bool:
             continue
         else:
             operands.append(word)
+    return operands
+
+
+def deletion_targets(command: str, cwd: str) -> list[str] | None:
+    """The absolute paths `command` removes, when it is nothing but `rm` and
+    `git worktree remove` with literal operands (relative ones read from
+    `cwd`). None when any part is something else: a glob, a variable, a
+    substitution, another program, an `rm` run as an argument (`xargs`,
+    `find -exec`), or a `git` with options before `worktree`."""
+    if not os.path.isabs(cwd):
+        return None
+    read = _simple_commands(strip_heredoc_bodies(command))
+    if read is None or read[1]:
+        return None
+    targets: list[str] = []
+    for words in read[0]:
+        base = words[0].rsplit('/', 1)[-1]
+        if base == 'rm':
+            operands = _rm_operands(words)
+        elif base == 'git' and words[1:3] == ['worktree', 'remove']:
+            operands = [word for word in words[3:] if not word.startswith('-')]
+        else:
+            return None
+        if not operands or not all(map(_is_literal_path, operands)):
+            return None
+        targets += [os.path.join(cwd, os.path.expanduser(one)) for one in operands]
+    return targets or None
+
+
+def removes_only_under(words: list[str], root: str) -> bool:
+    """Whether `words` is an `rm` whose every operand is a literal absolute
+    path inside `root` (the session scratchpad), resolved through symlinks:
+    `rm -rf <scratchpad>/link/` follows the link and is not inside. A glob, a
+    variable, a relative path or no operand at all is never inside."""
+    if not root or words[0].rsplit('/', 1)[-1] != 'rm':
+        return False
+    operands = _rm_operands(words)
     real_root = os.path.realpath(root)
     for operand in operands:
         if not (_is_literal_path(operand) and os.path.isabs(operand)):
@@ -4233,6 +4266,34 @@ def consent_unannounced(state_dir: str, session_id: str) -> list[dict]:
             data['pending'] = pending
             save_state(path, data)
     return fresh
+
+
+def _is_superseded(entry: dict) -> bool:
+    """Whether a queued removal has nothing left to remove: a deletion whose
+    every target, all read literally, is already gone. A command that is cut,
+    names something the words do not (see `deletion_targets`) or is not a
+    deletion stays: only a known absence supersedes it."""
+    if entry.get('effect') not in DELETION_EFFECTS or entry.get('is_cut'):
+        return False
+    targets = deletion_targets(str(entry.get('command') or ''), str(entry.get('cwd') or ''))
+    return bool(targets) and not any(os.path.lexists(target) for target in targets)
+
+
+def consent_drop_superseded(state_dir: str, session_id: str) -> list[dict]:
+    """Take out of the queue the removals that were resolved another way (the
+    model or the user already removed what they name), and return them: asking
+    to approve what is gone only ends in a failed command."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return []
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        gone = [entry for entry in pending if _is_superseded(entry)]
+        if gone:
+            data['pending'] = [entry for entry in pending if entry not in gone]
+            save_state(path, data)
+    return gone
 
 
 def consent_decide(state_dir: str, session_id: str, number: int) -> dict | None:

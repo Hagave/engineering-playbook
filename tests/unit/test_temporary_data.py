@@ -67,7 +67,7 @@ class TestApprove(_Case):
         self.assertEqual(again['note'], '')
 
     def test_a_failure_is_reported_to_both(self):
-        number = self._queue('rm -r /nonexistent-path-for-the-test')
+        number = self._queue('rm -r "$UNSET_FOR_THE_TEST"')
         answer = temporary_data.approve(SESSION, self.project, number)
         self.assertTrue(answer['is_error'])
         self.assertIn('failed', answer['note'])
@@ -169,6 +169,7 @@ class TestShow(_Case):
     def test_lists_three_waiting_and_counts_the_rest_in_the_language(self):
         self._prefs({'language': 'pt-br'})
         for index in range(5):
+            os.makedirs(os.path.join(self.project, f'build{index}'))
             self._queue(f'rm -rf build{index}')
         temporary_data.decline(SESSION, self.project, 5)
         view = temporary_data.show(SESSION, self.project)
@@ -177,6 +178,142 @@ class TestShow(_Case):
         self.assertEqual(view['open'], 'Temporary data (1)')
         self.assertEqual(view['ui']['tmp_approve'], 'Aprovar')
         self.assertIn('apaga arquivos e diretórios recursivamente', view['pending'][0]['text'])
+
+    def test_a_row_says_how_long_it_has_been_waiting(self):
+        self._build()
+        self._queue('rm -rf build')
+        queued = playbook_core.consent_pending(self.state, SESSION)[0]['ts']
+        for seconds, shown in ((5, '(queued <1 min ago)'), (90, '(queued 1 min ago)'),
+                               (59 * 60, '(queued 59 min ago)'), (3 * 3600 + 5, '(queued 3 h ago)'),
+                               (2 * 86400 + 5, '(queued 2 d ago)')):
+            with self.subTest(seconds=seconds), mock.patch.object(
+                    temporary_data.time, 'time', return_value=queued + seconds):
+                self.assertTrue(temporary_data.show(SESSION, self.project)['pending'][0]['text']
+                                .endswith(shown))
+
+    def test_the_age_follows_the_language(self):
+        self._build()
+        self._queue('rm -rf build')
+        for language, expected in (('pt-br', 'na fila há'), ('es', 'en cola hace')):
+            with self.subTest(language=language):
+                self._prefs({'language': language})
+                self.assertIn(expected, temporary_data.show(SESSION, self.project)['pending'][0]['text'])
+
+    def test_a_row_with_no_readable_time_shows_no_age(self):
+        self.assertEqual(temporary_data._queued_for('en', {'ts': 'yesterday'}), '')
+        self.assertEqual(temporary_data._queued_for('en', {}), '')
+        self.assertEqual(temporary_data._queued_for('en', {'ts': True}), '')
+
+
+class TestSuperseded(_Case):
+    """A queued removal whose targets are all gone was resolved another way."""
+
+    def _gone(self, command: str, effect: str = 'delete_tree') -> bool:
+        number = self._queue(command, effect)
+        temporary_data.show(SESSION, self.project)
+        return number not in self._pending_ids()
+
+    def test_a_deletion_of_what_is_already_gone_leaves_the_queue(self):
+        for command in ('rm -rf build', 'rm -r build/out', 'rm -rf -- build', 'sudo rm -rf build',
+                        'rm -rf build cache', f'rm -rf {os.path.join("/", "no", "such", "dir")}',
+                        'rm -rf ./build/../build', 'rm -rf build && rm -rf cache'):
+            with self.subTest(command=command):
+                self.assertTrue(self._gone(command))
+
+    def test_a_removed_worktree_leaves_the_queue(self):
+        wt = os.path.join(self.project, 'wt')
+        self.assertTrue(self._gone(f'git worktree remove --force {wt}', 'worktree_remove'))
+        self.assertTrue(self._gone('git worktree remove ../no-such-worktree', 'worktree_remove'))
+
+    def test_one_target_still_there_keeps_it_waiting(self):
+        self._build()
+        for command in ('rm -rf build', 'rm -rf build cache', 'rm -rf cache build', 'rm -rf -- build'):
+            with self.subTest(command=command):
+                self.assertFalse(self._gone(command))
+
+    def test_dot_dot_through_a_link_is_read_the_way_the_shell_reads_it(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        os.makedirs(os.path.join(base, 'sub', 'inner'))
+        os.makedirs(os.path.join(base, 'marker'))
+        os.symlink(os.path.join(base, 'sub', 'inner'), os.path.join(self.project, 'link'))
+        self.assertFalse(self._gone('rm -rf link/../../marker'))
+
+    def test_a_dangling_symlink_still_counts_as_there(self):
+        os.symlink(os.path.join(self.project, 'nowhere'), os.path.join(self.project, 'link'))
+        self.assertFalse(self._gone('rm -rf link'))
+
+    def test_what_the_words_do_not_name_is_never_superseded(self):
+        for command in ('rm -rf $BUILD_DIR', 'rm -rf "$(pwd)/build"', 'rm -rf build/*', 'rm -rf bu?ld',
+                        'rm -rf ~/no-such-thing-for-the-test/*', 'rm -rf build[12]',
+                        'find . -name build -exec rm -rf {} +', 'ls build | xargs rm -rf',
+                        'cd build && rm -rf out', 'rm -rf build && echo done',
+                        'git -C other worktree remove wt', 'rm -rf'):
+            with self.subTest(command=command):
+                self.assertFalse(self._gone(command))
+
+    def test_only_a_deletion_can_be_superseded(self):
+        for effect in ('reset_hard', 'force_push', 'clean', 'sql'):
+            with self.subTest(effect=effect):
+                self.assertFalse(self._gone('rm -rf build', effect))
+
+    def test_a_cut_command_stays(self):
+        self.assertFalse(self._gone('rm -rf build ' + ' '.join(['x'] * 1200)))
+
+    def test_a_queue_entry_with_no_folder_is_never_superseded(self):
+        playbook_core.consent_request(self.state, SESSION, 'rm -rf build', 'delete_tree', '')
+        playbook_core.consent_request(self.state, SESSION, 'rm -rf cache', 'delete_tree', 'relative')
+        self.assertEqual(playbook_core.consent_drop_superseded(self.state, SESSION), [])
+        self.assertEqual(len(self._pending_ids()), 2)
+
+    def test_pressing_approve_on_one_runs_nothing_and_says_why(self):
+        number = self._queue('rm -rf build')
+        answer = temporary_data.approve(SESSION, self.project, number)
+        self.assertFalse(answer['is_error'])
+        self.assertIn('already gone', answer['text'])
+        self.assertIn('nothing ran', answer['note'])
+        self.assertEqual(self._pending_ids(), [])
+
+    def test_an_approve_that_came_after_the_target_returned_still_runs(self):
+        build = self._build()
+        number = self._queue('rm -rf build')
+        answer = temporary_data.approve(SESSION, self.project, number)
+        self.assertFalse(os.path.exists(build))
+        self.assertIn('ran it', answer['note'])
+
+    def test_only_the_superseded_ones_are_dropped(self):
+        self._build()
+        gone = self._queue('rm -rf cache')
+        kept = self._queue('rm -rf build')
+        self.assertEqual([e['id'] for e in playbook_core.consent_drop_superseded(self.state, SESSION)], [gone])
+        self.assertEqual(self._pending_ids(), [kept])
+
+    def test_the_stop_notice_does_not_announce_one(self):
+        import context_guard as cg
+        self._queue('rm -rf cache')
+        self._build()
+        kept = self._queue('rm -rf build')
+        with mock.patch.object(cg, 'STATE_DIR', self.state), \
+                mock.patch.object(cg, '_SESSION_ID', SESSION), mock.patch.object(cg, '_AGENT_ID', ''):
+            notice = cg._waiting_notice()
+        self.assertIn(f'#{kept}', notice)
+        self.assertNotIn('cache', notice)
+
+    def test_the_prompt_hook_tells_the_model_what_it_took_out(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        state = os.path.join(home, '.claude', 'hooks')
+        os.makedirs(state)
+        number = playbook_core.consent_request(state, SESSION, 'rm -rf cache', 'delete_tree', self.project)
+        ran = subprocess.run(
+            [sys.executable, os.path.join(_ROOT, 'hooks', 'consent_guard.py')],
+            input=json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': SESSION,
+                              'prompt': 'continue'}),
+            capture_output=True, text=True, env={**os.environ, 'HOME': home}, check=False)
+        context = json.loads(ran.stdout)['hookSpecificOutput']['additionalContext']
+        self.assertIn(f'#{number} `rm -rf cache`', context)
+        self.assertIn('already gone', context)
+        self.assertEqual(playbook_core.consent_pending(state, SESSION), [])
 
 
 class TestCreatedTemporaries(unittest.TestCase):

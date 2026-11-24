@@ -147,9 +147,28 @@ def _item_text(language: str, item: dict) -> str:
     return say(language, template, effect=label, command=command, when=when)
 
 
+def _age(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return '<1 min'
+    if minutes < 60:
+        return f'{minutes} min'
+    if minutes < 60 * 24:
+        return f'{minutes // 60} h'
+    return f'{minutes // (60 * 24)} d'
+
+
+def _queued_for(language: str, entry: dict) -> str:
+    ts = entry.get('ts')
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return ''
+    return playbook_i18n.text(language, 'tmp_age', age=_age(max(0.0, time.time() - ts)))
+
+
 def show(session_id: str, project_dir: str) -> dict:
     language = _language()
     say = playbook_i18n.text
+    playbook_core.consent_drop_superseded(STATE_DIR, session_id)
     pending = playbook_core.consent_pending(STATE_DIR, session_id)
     turn_end = playbook_core.consent_turn_end(STATE_DIR, session_id)
     items = []
@@ -165,7 +184,8 @@ def show(session_id: str, project_dir: str) -> dict:
             'id': entry.get('id'),
             'text': say(language, 'tmp_row', id=entry.get('id'),
                         effect=_effect_text(language, entry.get('effect')),
-                        command=playbook_core.shown_command(str(entry.get('command') or ''))),
+                        command=playbook_core.shown_command(str(entry.get('command') or '')),
+                        age=_queued_for(language, entry)),
             'cut': say(language, 'tmp_cut', id=entry.get('id')) if entry.get('is_cut') else '',
         } for entry in pending[:PENDING_SHOWN]],
         'more': (say(language, 'tmp_more', count=len(pending) - PENDING_SHOWN)
@@ -198,6 +218,12 @@ def _run(command: str, cwd: str) -> tuple[int, str]:
 def approve(session_id: str, project_dir: str, number: int) -> dict:
     language = _language()
     say = playbook_i18n.text
+    if any(entry.get('id') == number
+           for entry in playbook_core.consent_drop_superseded(STATE_DIR, session_id)):
+        return {'text': say(language, 'tmp_superseded', id=number),
+                'note': (f'[playbook:consent] The user pressed Approve on #{number}, but what it '
+                         'removes is already gone, so nothing ran. Do not run it.'),
+                'is_error': False}
     waiting = next((one for one in playbook_core.consent_pending(STATE_DIR, session_id)
                     if one.get('id') == number), None)
     if waiting is not None and waiting.get('is_cut'):
