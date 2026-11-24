@@ -276,7 +276,8 @@ def _lsp_hint(cwd: str) -> str:
     playbook_core.save_state(path, {'settled': sorted(settled | set(pending))})
     if not missing:
         return ''
-    language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
+    language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'],
+                                     state_dir=STATE_DIR)
     return '\n'.join(
         playbook_i18n.text(language, 'lsp_hint', stack=LSP_PLUGINS[lang].label,
                            plugin=LSP_PLUGINS[lang].name, binary=LSP_PLUGINS[lang].binary)
@@ -321,7 +322,8 @@ def _update_notice() -> str:
         return ''
     playbook_update.mark_announced(latest, STATE_DIR)
     current = playbook_update.status(STATE_DIR)
-    return playbook_i18n.text(playbook_i18n.resolve(prefs['language']), 'update_available',
+    language = playbook_i18n.resolve(prefs['language'], state_dir=STATE_DIR)
+    return playbook_i18n.text(language, 'update_available',
                               latest=latest, installed=current.installed or '?')
 
 

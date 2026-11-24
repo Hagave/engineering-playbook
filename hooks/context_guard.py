@@ -898,7 +898,7 @@ def _destructive_verdict(hit: dict, input_data: dict, command: str, prefs: dict)
             f'No permission dialog can be trusted to reach the user here ({why}), so the '
             'playbook denies it: ask the user to run the command themselves. Nothing typed in '
             'the chat lifts this block.'))}
-    language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'))
+    language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'), state_dir=STATE_DIR)
     # The part that destroys stands in for the command only in a longer one:
     # a single command is shown as typed, quotes and all.
     part = str(hit.get('part') or '')
@@ -951,8 +951,8 @@ def _recover_discards(runnable: str, command: str, prefs: dict) -> tuple[dict | 
                                   disposable_root=_session_scratchpad()), None
     if not snapshots:
         return None, None
-    language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'))
-    saved = '; '.join(f'{item.repo} -> {item.sha[:12]} ({item.ref})' for item in snapshots)
+    language = playbook_i18n.resolve(str(prefs.get('language') or 'auto'), state_dir=STATE_DIR)
+    saved ='; '.join(f'{item.repo} -> {item.sha[:12]} ({item.ref})' for item in snapshots)
     return None, {'msg': playbook_i18n.text(language, 'snapshot_saved', saved=saved),
                   'to_model': True}
 
@@ -1557,12 +1557,14 @@ def _waiting_notice() -> str:
     if _AGENT_ID or not _SESSION_ID:
         return ''
     try:
+        playbook_core.consent_drop_superseded(STATE_DIR, _SESSION_ID)
         fresh = playbook_core.consent_unannounced(STATE_DIR, _SESSION_ID)
     except OSError:
         return ''
     if not fresh:
         return ''
-    language = playbook_i18n.resolve(str(playbook_core.load_prefs(STATE_DIR).get('language') or 'auto'))
+    language = playbook_i18n.resolve(
+        str(playbook_core.load_prefs(STATE_DIR).get('language') or 'auto'), state_dir=STATE_DIR)
     listed = '; '.join(
         f"#{entry.get('id')} `{playbook_core.shown_command(str(entry.get('command') or ''))}`"
         for entry in fresh)

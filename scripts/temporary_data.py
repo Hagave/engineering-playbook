@@ -33,6 +33,7 @@ cut (`is_cut`) is never run from the button: the person answers in the chat.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -95,7 +96,7 @@ def _effect_text(language: str, effect: object) -> str:
 
 
 def _language() -> str:
-    return playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
+    return playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'], state_dir=STATE_DIR)
 
 
 def _still_there(item: dict, deadline: float) -> bool:
@@ -130,12 +131,49 @@ def _is_released(item: dict, session_id: str, turn_end: float) -> bool:
     return item['ts'] <= turn_end
 
 
+def _orphan_worktree(item: dict) -> str | None:
+    """The folder of a worktree git no longer tracks: its `.git` file points
+    at an administrative folder that is gone (a removal that took only the
+    registration), so `git worktree remove` can never succeed on it. Read from
+    the folder itself, never from git's message, which is translated. A folder
+    that is a link, has a real `.git` directory or has no `.git` is not one."""
+    target = item.get('target') if isinstance(item.get('target'), dict) else {}
+    what = item.get('what') if isinstance(item.get('what'), dict) else {}
+    path = target.get('value')
+    if what.get('key') != 'tmp_what_worktree' or target.get('kind') != 'path' or not isinstance(path, str):
+        return None
+    pointer = os.path.join(path, '.git')
+    if (os.path.islink(path) or not os.path.isdir(path)
+            or os.path.islink(pointer) or not os.path.isfile(pointer)):
+        return None
+    try:
+        with open(pointer, encoding='utf-8') as handle:
+            first = handle.readline().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not first.startswith('gitdir:'):
+        return None
+    return None if os.path.exists(os.path.join(path, first[len('gitdir:'):].strip())) else path
+
+
+def _removal_command(item: dict) -> str:
+    """What a press on Remove runs, as the person is shown it."""
+    orphan = _orphan_worktree(item)
+    if orphan is not None:
+        return f'rm -rf {shlex.quote(orphan)}'
+    return playbook_core.shown_command(item['command'])
+
+
+def _what_key(item: dict, key: object) -> object:
+    return 'tmp_what_orphan' if _orphan_worktree(item) is not None else key
+
+
 def _item_text(language: str, item: dict) -> str:
     say = playbook_i18n.text
     when = time.strftime('%Y-%m-%d %H:%M', time.localtime(item['ts']))
-    command = playbook_core.shown_command(item['command'])
+    command = _removal_command(item)
     what = item.get('what') if isinstance(item.get('what'), dict) else {}
-    key, name, text = what.get('key'), what.get('name'), what.get('text')
+    key, name, text = _what_key(item, what.get('key')), what.get('name'), what.get('text')
     if isinstance(key, str) and key in playbook_i18n.STRINGS and isinstance(name, str):
         label = say(language, key, name=name)
     elif isinstance(text, str) and text:
@@ -147,9 +185,60 @@ def _item_text(language: str, item: dict) -> str:
     return say(language, template, effect=label, command=command, when=when)
 
 
+def _item_label(language: str, item: dict) -> tuple[str, str]:
+    """What an item removes, as a short name and the full path when the name
+    only shows its last folder: the list draws them on two lines."""
+    what = item.get('what') if isinstance(item.get('what'), dict) else {}
+    key, name, text = _what_key(item, what.get('key')), what.get('name'), what.get('text')
+    if isinstance(key, str) and key in playbook_i18n.STRINGS and isinstance(name, str):
+        short = os.path.basename(name.rstrip('/')) or name
+        return playbook_i18n.text(language, key, name=short), name if short != name else ''
+    if isinstance(text, str) and text:
+        return text[:WHAT_SHOWN_CHARS], ''
+    return _effect_text(language, item.get('effect')), ''
+
+
+def _item_origin(language: str, item: dict) -> str:
+    when = time.strftime('%Y-%m-%d %H:%M', time.localtime(item['ts']))
+    kind = item.get('kind') if item.get('kind') in ('created', 'registered') else 'declined'
+    return playbook_i18n.text(language, f'tmp_origin_{kind}', when=when)
+
+
+def _item_view(language: str, item: dict) -> dict:
+    title, detail = _item_label(language, item)
+    return {
+        'id': item['id'],
+        'title': title,
+        'detail': detail,
+        'origin': _item_origin(language, item),
+        'text': _item_text(language, item),
+        'confirm': playbook_i18n.text(language, 'tmp_confirm', cwd=item['cwd']),
+        'command': _removal_command(item),
+    }
+
+
+def _age(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return '<1 min'
+    if minutes < 60:
+        return f'{minutes} min'
+    if minutes < 60 * 24:
+        return f'{minutes // 60} h'
+    return f'{minutes // (60 * 24)} d'
+
+
+def _queued_for(language: str, entry: dict) -> str:
+    ts = entry.get('ts')
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return ''
+    return playbook_i18n.text(language, 'tmp_age', age=_age(max(0.0, time.time() - ts)))
+
+
 def show(session_id: str, project_dir: str) -> dict:
     language = _language()
     say = playbook_i18n.text
+    playbook_core.consent_drop_superseded(STATE_DIR, session_id)
     pending = playbook_core.consent_pending(STATE_DIR, session_id)
     turn_end = playbook_core.consent_turn_end(STATE_DIR, session_id)
     items = []
@@ -165,18 +254,14 @@ def show(session_id: str, project_dir: str) -> dict:
             'id': entry.get('id'),
             'text': say(language, 'tmp_row', id=entry.get('id'),
                         effect=_effect_text(language, entry.get('effect')),
-                        command=playbook_core.shown_command(str(entry.get('command') or ''))),
+                        age=_queued_for(language, entry)),
+            'command': playbook_core.shown_command(str(entry.get('command') or '')),
             'cut': say(language, 'tmp_cut', id=entry.get('id')) if entry.get('is_cut') else '',
         } for entry in pending[:PENDING_SHOWN]],
         'more': (say(language, 'tmp_more', count=len(pending) - PENDING_SHOWN)
                  if len(pending) > PENDING_SHOWN else ''),
         'open': say(language, 'tmp_open', count=len(items)) if items else '',
-        'items': [{
-            'id': item['id'],
-            'text': _item_text(language, item),
-            'confirm': say(language, 'tmp_confirm', cwd=item['cwd']),
-            'command': playbook_core.shown_command(item['command']),
-        } for item in items],
+        'items': [_item_view(language, item) for item in items],
     }
 
 
@@ -198,6 +283,12 @@ def _run(command: str, cwd: str) -> tuple[int, str]:
 def approve(session_id: str, project_dir: str, number: int) -> dict:
     language = _language()
     say = playbook_i18n.text
+    if any(entry.get('id') == number
+           for entry in playbook_core.consent_drop_superseded(STATE_DIR, session_id)):
+        return {'text': say(language, 'tmp_superseded', id=number),
+                'note': (f'[playbook:consent] The user pressed Approve on #{number}, but what it '
+                         'removes is already gone, so nothing ran. Do not run it.'),
+                'is_error': False}
     waiting = next((one for one in playbook_core.consent_pending(STATE_DIR, session_id)
                     if one.get('id') == number), None)
     if waiting is not None and waiting.get('is_cut'):
@@ -257,6 +348,15 @@ def remove(project_dir: str, item_id: str) -> dict:
                  if one['id'] == item_id), None)
     if item is None:
         return {'text': say(language, 'tmp_gone'), 'note': '', 'is_error': False}
+    orphan = _orphan_worktree(item)
+    if orphan is not None:
+        try:
+            shutil.rmtree(orphan)
+        except OSError as error:
+            return {'text': say(language, 'tmp_failed', code=1, error=str(error)[-ERROR_SHOWN_CHARS:]),
+                    'note': '', 'is_error': True}
+        playbook_core.temporary_data_drop(STATE_DIR, project_dir, item_id)
+        return {'text': say(language, 'tmp_removed'), 'note': '', 'is_error': False}
     code, error = _run(item['command'], item['cwd'])
     if code != 0:
         return {'text': say(language, 'tmp_failed', code=code, error=error), 'note': '',

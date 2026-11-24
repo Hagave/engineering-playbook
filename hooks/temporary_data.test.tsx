@@ -32,6 +32,9 @@ const UI = {
 
 const ITEM = {
   id: 'a1b2c3d4e5f6',
+  title: 'git worktree app',
+  detail: '/work/app',
+  origin: 'asked by Claude on 2026-11-21 20:00',
   text: 'deletes files and directories recursively: rm -rf build (asked by Claude on 2026-11-21 20:00)',
   confirm: 'Remove it? This runs, in /work/app:',
   command: 'rm -rf build',
@@ -39,7 +42,9 @@ const ITEM = {
 
 const WAITING = {
   ui: UI,
-  pending: [{ id: 3, text: '#3 deletes files and directories recursively: rm -rf build', cut: '' }],
+  pending: [
+    { id: 3, text: '#3 deletes files and directories recursively (queued 2 min ago)', command: 'rm -rf build', cut: '' },
+  ],
   more: '',
   open: '',
   items: [],
@@ -100,12 +105,18 @@ test('a queued command shows Decline first, focused, and Approve, with no digit 
   await $.session.start({ cwd: '/work/app', surface: 'terminal', isInteractive: true })
 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await band.find({ type: 'Text', text: /#3 deletes/ }))?.text).toContain('rm -rf build')
+  const headline = await band.find({ type: 'Text', text: /#3 deletes/ })
+  expect(headline?.text).not.toContain('rm -rf build')
+  expect(headline?.props.bold).toBe(true)
+  expect((await band.find({ type: 'Text', text: 'rm -rf build' }))?.props.dimColor).toBe(true)
+  expect((await band.find({ type: 'Box', key: 'queued-3' }))?.props.borderStyle).toBe('round')
   const decline = await band.find({ type: 'Button', key: 'decline-3' })
   const approve = await band.find({ type: 'Button', key: 'approve-3' })
   expect(decline?.props.autoFocus).toBe(true)
   expect(decline?.props.hotkey).toBeUndefined()
   expect(approve?.props.hotkey).toBeUndefined()
+  expect((await band.find({ type: 'Text', text: 'Decline' }))?.props.color).toBe('red')
+  expect((await band.find({ type: 'Text', text: 'Approve' }))?.props.color).toBe('green')
   await band.unmount()
 })
 
@@ -149,6 +160,12 @@ test('the panel says what it is, puts Close first, and removing takes a second p
 
   const list = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await list.find({ type: 'Text', text: /Deletions of this project/ }))?.text).toBeTruthy()
+  expect((await list.find({ type: 'Text', text: 'Temporary data' }))?.props.bold).toBe(true)
+  expect((await list.find({ type: 'Box', key: `card-${ITEM.id}` }))?.props.borderStyle).toBe('round')
+  expect((await list.find({ type: 'Button', key: `item-${ITEM.id}` }))?.props.label).toBe(ITEM.title)
+  expect((await list.find({ type: 'Text', text: ITEM.detail }))?.props.dimColor).toBe(true)
+  expect((await list.find({ type: 'Text', text: ITEM.origin }))?.props.dimColor).toBe(true)
+  expect(await list.find({ type: 'Text', text: /rm -rf build/ })).toBeUndefined()
   const closeButton = await list.find({ type: 'Button', key: 'close' })
   expect(closeButton?.props.hotkey).toBe('0')
   expect(closeButton?.props.autoFocus).toBe(true)

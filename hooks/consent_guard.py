@@ -29,6 +29,14 @@ def _shown(entry: dict) -> str:
     return f"#{entry.get('id')} `{playbook_core.shown_command(str(entry.get('command') or ''))}`"
 
 
+def _superseded_note(gone: list[dict]) -> str:
+    if not gone:
+        return ''
+    return ('[playbook:consent] Taken out of the queue because what they remove is already '
+            'gone; do not run or ask about them: '
+            + ', '.join(_shown(entry) for entry in gone) + '.')
+
+
 def _context(answer: playbook_core.ConsentAnswer) -> str:
     if answer.ambiguous:
         waiting = ', '.join(_shown(entry) for entry in answer.still_pending)
@@ -62,7 +70,9 @@ def main() -> None:
         sys.exit(0)
     try:
         words = playbook_core.typed_words(str(data.get('prompt') or ''))
-        text = _context(playbook_core.consent_answer(STATE_DIR, session_id, words))
+        gone = playbook_core.consent_drop_superseded(STATE_DIR, session_id)
+        answer = playbook_core.consent_answer(STATE_DIR, session_id, words)
+        text = '\n'.join(part for part in (_superseded_note(gone), _context(answer)) if part)
     except Exception:
         sys.exit(0)  # an error approves nothing: the queue stays as it was
     if text:

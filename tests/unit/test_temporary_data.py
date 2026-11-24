@@ -67,7 +67,7 @@ class TestApprove(_Case):
         self.assertEqual(again['note'], '')
 
     def test_a_failure_is_reported_to_both(self):
-        number = self._queue('rm -r /nonexistent-path-for-the-test')
+        number = self._queue('rm -r "$UNSET_FOR_THE_TEST"')
         answer = temporary_data.approve(SESSION, self.project, number)
         self.assertTrue(answer['is_error'])
         self.assertIn('failed', answer['note'])
@@ -169,6 +169,7 @@ class TestShow(_Case):
     def test_lists_three_waiting_and_counts_the_rest_in_the_language(self):
         self._prefs({'language': 'pt-br'})
         for index in range(5):
+            os.makedirs(os.path.join(self.project, f'build{index}'))
             self._queue(f'rm -rf build{index}')
         temporary_data.decline(SESSION, self.project, 5)
         view = temporary_data.show(SESSION, self.project)
@@ -177,6 +178,293 @@ class TestShow(_Case):
         self.assertEqual(view['open'], 'Temporary data (1)')
         self.assertEqual(view['ui']['tmp_approve'], 'Aprovar')
         self.assertIn('apaga arquivos e diretórios recursivamente', view['pending'][0]['text'])
+
+    def test_a_waiting_row_keeps_the_command_apart_from_its_headline(self):
+        self._build()
+        self._queue('rm -rf build')
+        row = temporary_data.show(SESSION, self.project)['pending'][0]
+        self.assertEqual(row['command'], 'rm -rf build')
+        self.assertNotIn('rm -rf build', row['text'])
+        self.assertTrue(row['text'].startswith('#1 deletes files and directories recursively ('))
+
+    def test_a_row_says_how_long_it_has_been_waiting(self):
+        self._build()
+        self._queue('rm -rf build')
+        queued = playbook_core.consent_pending(self.state, SESSION)[0]['ts']
+        for seconds, shown in ((5, '(queued <1 min ago)'), (90, '(queued 1 min ago)'),
+                               (59 * 60, '(queued 59 min ago)'), (3 * 3600 + 5, '(queued 3 h ago)'),
+                               (2 * 86400 + 5, '(queued 2 d ago)')):
+            with self.subTest(seconds=seconds), mock.patch.object(
+                    temporary_data.time, 'time', return_value=queued + seconds):
+                self.assertTrue(temporary_data.show(SESSION, self.project)['pending'][0]['text']
+                                .endswith(shown))
+
+    def test_the_age_follows_the_language(self):
+        self._build()
+        self._queue('rm -rf build')
+        for language, expected in (('pt-br', 'na fila há'), ('es', 'en cola hace')):
+            with self.subTest(language=language):
+                self._prefs({'language': language})
+                self.assertIn(expected, temporary_data.show(SESSION, self.project)['pending'][0]['text'])
+
+    def test_a_row_with_no_readable_time_shows_no_age(self):
+        self.assertEqual(temporary_data._queued_for('en', {'ts': 'yesterday'}), '')
+        self.assertEqual(temporary_data._queued_for('en', {}), '')
+        self.assertEqual(temporary_data._queued_for('en', {'ts': True}), '')
+
+
+class TestSuperseded(_Case):
+    """A queued removal whose targets are all gone was resolved another way."""
+
+    def _gone(self, command: str, effect: str = 'delete_tree') -> bool:
+        number = self._queue(command, effect)
+        temporary_data.show(SESSION, self.project)
+        return number not in self._pending_ids()
+
+    def test_a_deletion_of_what_is_already_gone_leaves_the_queue(self):
+        for command in ('rm -rf build', 'rm -r build/out', 'rm -rf -- build', 'sudo rm -rf build',
+                        'rm -rf build cache', f'rm -rf {os.path.join("/", "no", "such", "dir")}',
+                        'rm -rf ./build/../build', 'rm -rf build && rm -rf cache'):
+            with self.subTest(command=command):
+                self.assertTrue(self._gone(command))
+
+    def test_a_removed_worktree_leaves_the_queue(self):
+        wt = os.path.join(self.project, 'wt')
+        self.assertTrue(self._gone(f'git worktree remove --force {wt}', 'worktree_remove'))
+        self.assertTrue(self._gone('git worktree remove ../no-such-worktree', 'worktree_remove'))
+
+    def test_one_target_still_there_keeps_it_waiting(self):
+        self._build()
+        for command in ('rm -rf build', 'rm -rf build cache', 'rm -rf cache build', 'rm -rf -- build'):
+            with self.subTest(command=command):
+                self.assertFalse(self._gone(command))
+
+    def test_dot_dot_through_a_link_is_read_the_way_the_shell_reads_it(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        os.makedirs(os.path.join(base, 'sub', 'inner'))
+        os.makedirs(os.path.join(base, 'marker'))
+        os.symlink(os.path.join(base, 'sub', 'inner'), os.path.join(self.project, 'link'))
+        self.assertFalse(self._gone('rm -rf link/../../marker'))
+
+    def test_a_dangling_symlink_still_counts_as_there(self):
+        os.symlink(os.path.join(self.project, 'nowhere'), os.path.join(self.project, 'link'))
+        self.assertFalse(self._gone('rm -rf link'))
+
+    def test_what_the_words_do_not_name_is_never_superseded(self):
+        for command in ('rm -rf $BUILD_DIR', 'rm -rf "$(pwd)/build"', 'rm -rf build/*', 'rm -rf bu?ld',
+                        'rm -rf ~/no-such-thing-for-the-test/*', 'rm -rf build[12]',
+                        'find . -name build -exec rm -rf {} +', 'ls build | xargs rm -rf',
+                        'cd build && rm -rf out', 'rm -rf build && echo done',
+                        'git -C other worktree remove wt', 'rm -rf'):
+            with self.subTest(command=command):
+                self.assertFalse(self._gone(command))
+
+    def test_only_a_deletion_can_be_superseded(self):
+        for effect in ('reset_hard', 'force_push', 'clean', 'sql'):
+            with self.subTest(effect=effect):
+                self.assertFalse(self._gone('rm -rf build', effect))
+
+    def test_a_cut_command_stays(self):
+        self.assertFalse(self._gone('rm -rf build ' + ' '.join(['x'] * 1200)))
+
+    def test_a_queue_entry_with_no_folder_is_never_superseded(self):
+        playbook_core.consent_request(self.state, SESSION, 'rm -rf build', 'delete_tree', '')
+        playbook_core.consent_request(self.state, SESSION, 'rm -rf cache', 'delete_tree', 'relative')
+        self.assertEqual(playbook_core.consent_drop_superseded(self.state, SESSION), [])
+        self.assertEqual(len(self._pending_ids()), 2)
+
+    def test_pressing_approve_on_one_runs_nothing_and_says_why(self):
+        number = self._queue('rm -rf build')
+        answer = temporary_data.approve(SESSION, self.project, number)
+        self.assertFalse(answer['is_error'])
+        self.assertIn('already gone', answer['text'])
+        self.assertIn('nothing ran', answer['note'])
+        self.assertEqual(self._pending_ids(), [])
+
+    def test_an_approve_that_came_after_the_target_returned_still_runs(self):
+        build = self._build()
+        number = self._queue('rm -rf build')
+        answer = temporary_data.approve(SESSION, self.project, number)
+        self.assertFalse(os.path.exists(build))
+        self.assertIn('ran it', answer['note'])
+
+    def test_only_the_superseded_ones_are_dropped(self):
+        self._build()
+        gone = self._queue('rm -rf cache')
+        kept = self._queue('rm -rf build')
+        self.assertEqual([e['id'] for e in playbook_core.consent_drop_superseded(self.state, SESSION)], [gone])
+        self.assertEqual(self._pending_ids(), [kept])
+
+    def test_the_stop_notice_does_not_announce_one(self):
+        import context_guard as cg
+        self._queue('rm -rf cache')
+        self._build()
+        kept = self._queue('rm -rf build')
+        with mock.patch.object(cg, 'STATE_DIR', self.state), \
+                mock.patch.object(cg, '_SESSION_ID', SESSION), mock.patch.object(cg, '_AGENT_ID', ''):
+            notice = cg._waiting_notice()
+        self.assertIn(f'#{kept}', notice)
+        self.assertNotIn('cache', notice)
+
+    def test_the_prompt_hook_tells_the_model_what_it_took_out(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        state = os.path.join(home, '.claude', 'hooks')
+        os.makedirs(state)
+        number = playbook_core.consent_request(state, SESSION, 'rm -rf cache', 'delete_tree', self.project)
+        ran = subprocess.run(
+            [sys.executable, os.path.join(_ROOT, 'hooks', 'consent_guard.py')],
+            input=json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': SESSION,
+                              'prompt': 'continue'}),
+            capture_output=True, text=True, env={**os.environ, 'HOME': home}, check=False)
+        context = json.loads(ran.stdout)['hookSpecificOutput']['additionalContext']
+        self.assertIn(f'#{number} `rm -rf cache`', context)
+        self.assertIn('already gone', context)
+        self.assertEqual(playbook_core.consent_pending(state, SESSION), [])
+
+
+_GIT_ENV = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.com',
+            'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.com'}
+
+
+class TestOrphanWorktree(_Case):
+    """A worktree folder git no longer tracks: `git worktree remove` can never
+    succeed on it, so the panel deletes the folder, and says so."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = os.path.join(self.project, 'repo')
+        self.wt = os.path.join(self.project, 'wt')
+        os.makedirs(self.repo)
+        self._git('init', '-q')
+        self._git('commit', '-q', '--allow-empty', '-m', 'first')
+        self._git('worktree', 'add', '-q', self.wt)
+
+    def _git(self, *args: str, cwd: str = '') -> subprocess.CompletedProcess:
+        return subprocess.run(['git', *args], cwd=cwd or self.repo, capture_output=True, text=True,
+                              env=_GIT_ENV, check=False)
+
+    def _item(self, path: str = '', key: str = 'tmp_what_worktree') -> dict:
+        path = path or self.wt
+        return playbook_core.temporary_data_add(
+            self.state, self.project, command=f'git worktree remove --force {path}', cwd=self.repo,
+            effect='worktree_remove', origin='model', kind='registered',
+            what={'key': key, 'name': path}, target={'kind': 'path', 'value': path})
+
+    def _lose_the_registration(self) -> None:
+        shutil.rmtree(os.path.join(self.repo, '.git', 'worktrees', 'wt'))
+
+    def test_git_really_refuses_a_folder_it_lost_track_of(self):
+        self._lose_the_registration()
+        refused = self._git('worktree', 'remove', '--force', self.wt)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertTrue(os.path.isdir(self.wt))
+
+    def test_a_registered_worktree_is_removed_by_git(self):
+        item = self._item()
+        self.assertIsNone(temporary_data._orphan_worktree(item))
+        self.assertTrue(temporary_data.show(SESSION, self.project)['items'][0]['title']
+                        .startswith('git worktree wt'))
+        self.assertEqual(temporary_data.show(SESSION, self.project)['items'][0]['command'],
+                         item['command'])
+        self.assertEqual(temporary_data.remove(self.project, item['id'])['text'], 'Removed.')
+        self.assertFalse(os.path.exists(self.wt))
+        self.assertEqual(self._git('worktree', 'list', '--porcelain').stdout.count('worktree '), 1)
+
+    def test_an_orphan_is_shown_as_what_it_is_and_the_command_shown_is_what_runs(self):
+        item = self._item()
+        self._lose_the_registration()
+        self.assertEqual(temporary_data._orphan_worktree(item), self.wt)
+        shown = temporary_data.show(SESSION, self.project)['items'][0]
+        self.assertEqual(shown['title'], 'git worktree wt, no longer tracked by git')
+        self.assertEqual(shown['detail'], self.wt)
+        self.assertEqual(shown['command'], f'rm -rf {self.wt}')
+        self.assertIn('no longer tracked by git', shown['text'])
+        self.assertIn(f'rm -rf {self.wt}', shown['text'])
+
+    def test_pressing_remove_deletes_the_folder_and_the_item(self):
+        item = self._item()
+        self._lose_the_registration()
+        answer = temporary_data.remove(self.project, item['id'])
+        self.assertEqual((answer['text'], answer['is_error']), ('Removed.', False))
+        self.assertFalse(os.path.exists(self.wt))
+        self.assertEqual(playbook_core.temporary_data_items(self.state, self.project), [])
+
+    def test_a_folder_that_cannot_be_deleted_is_reported_and_kept(self):
+        item = self._item()
+        self._lose_the_registration()
+        with mock.patch.object(temporary_data.shutil, 'rmtree', side_effect=OSError('denied')):
+            answer = temporary_data.remove(self.project, item['id'])
+        self.assertTrue(answer['is_error'])
+        self.assertIn('denied', answer['text'])
+        self.assertEqual(len(playbook_core.temporary_data_items(self.state, self.project)), 1)
+
+    def test_the_pointer_may_be_relative_to_the_folder(self):
+        self._lose_the_registration()
+        with open(os.path.join(self.wt, '.git'), 'w') as pointer:
+            pointer.write('gitdir: ../repo/.git/worktrees/wt\n')
+        self.assertEqual(temporary_data._orphan_worktree(self._item()), self.wt)
+        os.makedirs(os.path.join(self.repo, '.git', 'worktrees', 'wt'))
+        self.assertIsNone(temporary_data._orphan_worktree(self._item()))
+
+    def test_only_a_folder_that_is_shown_to_be_orphan_is_ever_deleted(self):
+        self._lose_the_registration()
+        pointer = os.path.join(self.wt, '.git')
+        os.remove(pointer)
+
+        def write(text: str) -> None:
+            with open(pointer, 'w') as handle:
+                handle.write(text)
+
+        def leave_nothing() -> None:
+            pass
+
+        def make_a_directory() -> None:
+            os.makedirs(pointer)
+
+        def make_a_link() -> None:
+            os.symlink(os.path.join(self.repo, 'nowhere'), pointer)
+
+        cases = {
+            'a real .git directory': make_a_directory,
+            'no .git at all': leave_nothing,
+            'a .git that is no gitdir pointer': lambda: write('hello\n'),
+            'a pointer to a folder that exists': lambda: write(f'gitdir: {self.repo}\n'),
+            'an empty pointer': lambda: write('gitdir:\n'),
+            'a .git that is a link': make_a_link,
+        }
+        for name, make in cases.items():
+            with self.subTest(case=name):
+                if os.path.isdir(pointer) and not os.path.islink(pointer):
+                    shutil.rmtree(pointer)
+                elif os.path.lexists(pointer):
+                    os.remove(pointer)
+                make()
+                self.assertIsNone(temporary_data._orphan_worktree(self._item()))
+                temporary_data.remove(self.project, self._item()['id'])
+                self.assertTrue(os.path.isdir(self.wt))
+
+    def test_a_link_to_an_orphan_is_never_followed(self):
+        self._lose_the_registration()
+        link = os.path.join(self.project, 'link')
+        os.symlink(self.wt, link)
+        self.assertIsNone(temporary_data._orphan_worktree(self._item(link)))
+
+    def test_only_a_worktree_item_can_be_an_orphan(self):
+        self._lose_the_registration()
+        self.assertIsNone(temporary_data._orphan_worktree(self._item(key='tmp_what_tempdir')))
+        self.assertIsNone(temporary_data._orphan_worktree({'what': {}, 'target': {}}))
+        item = self._item()
+        item['target'] = {'kind': 'container', 'value': self.wt}
+        self.assertIsNone(temporary_data._orphan_worktree(item))
+
+    def test_the_orphan_text_exists_in_every_language(self):
+        item = {'ts': 0, 'what': {'key': 'tmp_what_orphan', 'name': '/a/wt'}}
+        for language in ('en', 'pt-br', 'es'):
+            with self.subTest(language=language):
+                title, _detail = temporary_data._item_label(language, item)
+                self.assertIn('wt', title)
 
 
 class TestCreatedTemporaries(unittest.TestCase):
@@ -239,6 +527,40 @@ class TestCreatedInThePanel(_Case):
         self.assertEqual(len(items), 1)
         self.assertIn(f'git worktree {wt}', items[0]['text'])
         self.assertIn('made by Claude', items[0]['text'])
+
+    def test_the_list_gets_a_short_title_the_full_path_and_the_origin_apart(self):
+        wt = os.path.join(self.project, 'wt')
+        os.makedirs(wt)
+        self._note('git worktree add wt')
+        playbook_core.consent_mark_turn_end(self.state, SESSION)
+        item = temporary_data.show(SESSION, self.project)['items'][0]
+        self.assertEqual(item['title'], 'git worktree wt')
+        self.assertEqual(item['detail'], wt)
+        self.assertRegex(item['origin'], r'^made by Claude on \d{4}-\d\d-\d\d \d\d:\d\d$')
+        self.assertNotIn(wt, item['title'])
+        self.assertNotIn(wt, item['origin'])
+
+    def test_a_name_with_no_folder_has_no_detail(self):
+        item = {'ts': 0, 'kind': 'created', 'what': {'key': 'tmp_what_container', 'name': 'db-1'}}
+        self.assertEqual(temporary_data._item_label('en', item), ('Docker container db-1', ''))
+
+    def test_a_trailing_slash_does_not_hide_the_folder_name(self):
+        item = {'ts': 0, 'what': {'key': 'tmp_what_tempdir', 'name': '/tmp/work/out/'}}
+        self.assertEqual(temporary_data._item_label('en', item),
+                         ('temporary folder out', '/tmp/work/out/'))
+
+    def test_the_label_falls_back_to_the_text_and_then_to_the_effect(self):
+        self.assertEqual(temporary_data._item_label('en', {'what': {'text': 'build output'}}),
+                         ('build output', ''))
+        title, detail = temporary_data._item_label('en', {'effect': 'delete_tree'})
+        self.assertEqual((title, detail), ('deletes files and directories recursively', ''))
+
+    def test_every_kind_has_its_own_origin_in_every_language(self):
+        for language in ('en', 'pt-br', 'es'):
+            seen = {temporary_data._item_origin(language, {'ts': 0, 'kind': kind})
+                    for kind in ('declined', 'created', 'registered', 'something-else')}
+            with self.subTest(language=language):
+                self.assertEqual(len(seen), 3)
 
     def test_an_item_whose_target_is_gone_leaves_the_panel(self):
         wt = os.path.join(self.project, 'wt')

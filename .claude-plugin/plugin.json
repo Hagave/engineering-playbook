@@ -1,7 +1,7 @@
 {
   "name": "engineering-playbook",
   "description": "Engineering governance system for backend projects. Enforces evidence-based development, reuse-first policies, architectural boundaries, and quality standards across multiple language ecosystems (TypeScript, Python, Java, Go, Rust, C#, C++, Kotlin, Ruby).",
-  "version": "4.3.0",
+  "version": "4.4.0",
   "author": {
     "name": "hagave"
   },

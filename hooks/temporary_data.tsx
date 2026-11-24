@@ -275,8 +275,9 @@ export function registerTemporaryData(on: On): void {
             {ui.tmp_waiting} <Text dimColor>{ui.tmp_hint}</Text>
           </Text>
           {loaded.pending.map((entry: TemporaryPending, index: number) => (
-            <Box key={`queued-${entry.id}`} flexDirection="column">
-              <Text>{entry.text}</Text>
+            <Box key={`queued-${entry.id}`} flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
+              <Text bold>{entry.text}</Text>
+              <Text dimColor>{entry.command}</Text>
               {entry.cut !== '' && <Text dimColor>{entry.cut}</Text>}
               {running === entry.id ? (
                 <Text dimColor>…</Text>
@@ -287,15 +288,18 @@ export function registerTemporaryData(on: On): void {
                     label={ui.tmp_decline}
                     {...(index === 0 ? { autoFocus: true as const } : {})}
                     onPress={() => void answerQueued($, entry.id, 'decline')}
-                  />
+                  >
+                    <Text color="red">{ui.tmp_decline}</Text>
+                  </Button>
                   <Text> </Text>
                   {entry.cut === '' && (
                     <Button
                       key={`approve-${entry.id}`}
                       label={ui.tmp_approve}
-                      variant="primary"
                       onPress={() => void answerQueued($, entry.id, 'approve')}
-                    />
+                    >
+                      <Text color="green">{ui.tmp_approve}</Text>
+                    </Button>
                   )}
                 </Box>
               )}
@@ -327,19 +331,22 @@ export function registerTemporaryData(on: On): void {
     if (current !== null) {
       return (
         <Box flexDirection="column">
-          <Text bold>
-            {ui.tmp_title} <Text dimColor>{ui.tmp_help}</Text>
-          </Text>
+          <Text bold>{ui.tmp_title}</Text>
+          <Text dimColor>{ui.tmp_help}</Text>
           <Button key="close" plain hotkey={CLOSE} label={ui.tmp_close} autoFocus onPress={() => void choose($, CLOSE)} />
           {loaded.items.length === 0 && <Text dimColor>{ui.tmp_empty}</Text>}
           {loaded.items.slice(0, MAX_ITEMS).map((one: TemporaryItem, index: number) => (
-            <Button
-              key={`item-${one.id}`}
-              plain
-              hotkey={String(index + 1)}
-              label={one.text}
-              onPress={() => void choose($, String(index + 1))}
-            />
+            <Box key={`card-${one.id}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+              <Button
+                key={`item-${one.id}`}
+                plain
+                hotkey={String(index + 1)}
+                label={one.title}
+                onPress={() => void choose($, String(index + 1))}
+              />
+              {one.detail !== '' && <Text dimColor>{one.detail}</Text>}
+              <Text dimColor>{one.origin}</Text>
+            </Box>
           ))}
           {notice}
         </Box>

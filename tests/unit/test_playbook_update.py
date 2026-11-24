@@ -415,6 +415,8 @@ class TestWaitingNotice(Case):
             self.addCleanup(patcher.stop)
         with open(playbook_core.prefs_path(self.state), 'w') as handle:
             json.dump({'language': 'en'}, handle)
+        for name in ('build', 'a', 'b'):
+            os.makedirs(os.path.join(self.root, name))
 
     def test_a_queued_command_is_shown_to_the_person_once(self) -> None:
         playbook_core.consent_request(self.state, 'sess-1', 'rm -rf build', 'delete_tree', self.root)

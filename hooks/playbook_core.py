@@ -277,7 +277,13 @@ DESTRUCTIVE_RULES = [
      r'|(?-i:-[a-zA-Z]*(?:d[a-zA-Z]*f|f[a-zA-Z]*d)[a-zA-Z]*)\b'
      r'|(?:--delete|-d)\b[^\n;&|]*\s(?:--force|-f)\b'
      r'|(?:--force|-f)\b[^\n;&|]*\s(?:--delete|-d)\b)', 'branch_delete'),
-    (r'\bgit\s+checkout\s+--\s', 'discard_changes'),
+    # `git checkout` overwrites the working tree with any ref's content when it
+    # names paths (`-- f`, `HEAD -- f`, `main -- f`, `.`), and `-f`/`--force`
+    # (also `git switch`) throws local changes away on a switch.
+    (r'\bgit\s+checkout\b[^\n;&|]*\s--(?:\s|$)', 'discard_changes'),
+    (r'\bgit\s+checkout\b[^\n;&|]*\s\.(?:\s|$)', 'discard_changes'),
+    (r'\bgit\s+(?:checkout|switch)\b[^\n;&|]*\s(?:(?-i:-[a-zA-Z]*f[a-zA-Z]*)|--force|--discard-changes)(?:\s|$)',
+     'discard_changes'),
     # `git restore` discards working-tree changes unless it only unstages.
     # Short flags case-sensitive: under IGNORECASE `-s` (--source, which
     # overwrites the working tree) read as `-S` (--staged, which only unstages).
@@ -370,6 +376,10 @@ _SHELL_CONSUMERS = frozenset({'sh', 'bash', 'zsh', 'ksh', 'dash', 'ash',
                               'eval', 'source', '.', 'ssh', 'sudo', 'doas'})
 
 
+_PIPED_INTO_SHELL_RE = re.compile(
+    r'\|\s*(?:(?:sudo|doas)\s+)?(?:\S*/)?(?:sh|bash|zsh|ksh|dash|ash)\b(?!\s+(?:-\S*c|[^-\s;&|)<>]))')
+
+
 def _segment_command_word(command: str, upto: int) -> str:
     """The command word of the pipeline segment ending at `upto`."""
     start = 0
@@ -410,9 +420,12 @@ def strip_heredoc_bodies(command: str, keep_for: frozenset | set = frozenset()) 
         if not match:
             return result
         pos = match.end()
-        if _segment_command_word(result, match.start()) in consumers:
+        line_end = result.find('\n', match.end())
+        opener_tail = result[match.end():line_end if line_end != -1 else len(result)]
+        if (_segment_command_word(result, match.start()) in consumers
+                or _PIPED_INTO_SHELL_RE.search(opener_tail)):
             continue
-        body = _heredoc_body_re(match).match(result, match.start())
+        body =_heredoc_body_re(match).match(result, match.start())
         if not body:
             continue
         replacement = body.group(1) + '[heredoc body omitted]' + body.group(3)
@@ -1307,6 +1320,67 @@ def _nested_scripts(words: list[str]) -> list[str]:
                        if re.fullmatch(r'-[a-z]*c[a-z]*', words[j])), None)
         if script is not None:
             scripts.append(script)
+        else:
+            scripts += _here_string(words[at + 1:])
+    return scripts
+
+
+def _here_string(words: list[str]) -> list[str]:
+    """The text a here-string (`<<< text`, `<<<text`) among `words` feeds in."""
+    for at, word in enumerate(words):
+        if word == '<<<' and at + 1 < len(words):
+            return [words[at + 1]]
+        if word.startswith('<<<') and len(word) > 3:
+            return [word[3:]]
+    return []
+
+
+_REDIRECT_WORD_RE = re.compile(r'(?:\d*>>?|&>>?|\d*<)')
+
+
+def _reads_script_from_stdin(words: list[str]) -> bool:
+    """Whether a shell with these words has no `-c` and no script file, so it
+    reads its script from stdin."""
+    if not words or words[0].rsplit('/', 1)[-1] not in _SHELL_WORDS:
+        return False
+    skip = False
+    for word in words[1:]:
+        if skip:
+            skip = False
+        elif word in ('-o', '+o', '-O', '+O'):
+            skip = True
+        elif _REDIRECT_WORD_RE.fullmatch(word):
+            skip = True
+        elif _REDIRECT_WORD_RE.match(word) or word.startswith(('--', '+')):
+            continue
+        elif word.startswith('-') and len(word) > 1:
+            if 'c' in word:
+                return False
+            if 's' in word:
+                return True
+        else:
+            return False
+    return True
+
+
+def _piped_shell_scripts(command: str) -> list[str]:
+    """What `echo` or `printf` pipes into a shell that reads its script from
+    stdin (`echo "rm -rf build" | sh`), as the script that shell runs. Only
+    text the command shows: the output of another producer (`cat f`,
+    `curl ...`) is a program it does not show, and is not read."""
+    outer, _inner = _lift_substitutions(command.replace('\\\n', ' '))
+    statements = _statements(re.sub(r'\d*>&\d+|&>>?', ' ', outer)) or []
+    scripts: list[str] = []
+    for (_, producer), (separator, consumer) in zip(statements, statements[1:]):
+        words = command_words(producer)
+        if (separator not in ('|', '|&') or not words
+                or words[0].rsplit('/', 1)[-1] not in ('echo', 'printf')
+                or not _reads_script_from_stdin(command_words(consumer))):
+            continue
+        args = [w for w in words[1:] if not re.fullmatch(r'-[neE]+', w)]
+        if words[0].rsplit('/', 1)[-1] == 'printf' and args and '%' in args[0]:
+            args = args[1:]
+        scripts.append('\n'.join(args).replace('\\n', '\n'))
     return scripts
 
 
@@ -1326,16 +1400,18 @@ def _raw_simple_commands(command: str
         return None
     found: list[tuple[list[str], bool]] = []
     opaque: list[str] = []
+    scripts = _piped_shell_scripts(command)
     for segment in segments:
         found.append((segment, False))
         words = command_words(segment)
-        for script in _nested_scripts(words) if words else ():
-            nested = _raw_simple_commands(script)
-            if nested is None:
-                opaque.append(script)
-            else:
-                found += [(inner, True) for inner, _ in nested[0]]
-                opaque += nested[1]
+        scripts += _nested_scripts(words) if words else []
+    for script in scripts:
+        nested = _raw_simple_commands(script)
+        if nested is None:
+            opaque.append(script)
+        else:
+            found += [(inner, True) for inner, _ in nested[0]]
+            opaque += nested[1]
     return found, opaque
 
 
@@ -2382,13 +2458,9 @@ def _searches_only(words: list[str]) -> bool:
     return base in _SEARCH_TOOLS
 
 
-def removes_only_under(words: list[str], root: str) -> bool:
-    """Whether `words` is an `rm` whose every operand is a literal absolute
-    path inside `root` (the session scratchpad), resolved through symlinks:
-    `rm -rf <scratchpad>/link/` follows the link and is not inside. A glob, a
-    variable, a relative path or no operand at all is never inside."""
-    if not root or words[0].rsplit('/', 1)[-1] != 'rm':
-        return False
+def _rm_operands(words: list[str]) -> list[str]:
+    """The operands of the `rm` in `words`: what is left once its options
+    (anything dashed before `--`) are set aside."""
     operands: list[str] = []
     options_done = False
     for word in words[1:]:
@@ -2398,6 +2470,43 @@ def removes_only_under(words: list[str], root: str) -> bool:
             continue
         else:
             operands.append(word)
+    return operands
+
+
+def deletion_targets(command: str, cwd: str) -> list[str] | None:
+    """The absolute paths `command` removes, when it is nothing but `rm` and
+    `git worktree remove` with literal operands (relative ones read from
+    `cwd`). None when any part is something else: a glob, a variable, a
+    substitution, another program, an `rm` run as an argument (`xargs`,
+    `find -exec`), or a `git` with options before `worktree`."""
+    if not os.path.isabs(cwd):
+        return None
+    read = _simple_commands(strip_heredoc_bodies(command))
+    if read is None or read[1]:
+        return None
+    targets: list[str] = []
+    for words in read[0]:
+        base = words[0].rsplit('/', 1)[-1]
+        if base == 'rm':
+            operands = _rm_operands(words)
+        elif base == 'git' and words[1:3] == ['worktree', 'remove']:
+            operands = [word for word in words[3:] if not word.startswith('-')]
+        else:
+            return None
+        if not operands or not all(map(_is_literal_path, operands)):
+            return None
+        targets += [os.path.join(cwd, os.path.expanduser(one)) for one in operands]
+    return targets or None
+
+
+def removes_only_under(words: list[str], root: str) -> bool:
+    """Whether `words` is an `rm` whose every operand is a literal absolute
+    path inside `root` (the session scratchpad), resolved through symlinks:
+    `rm -rf <scratchpad>/link/` follows the link and is not inside. A glob, a
+    variable, a relative path or no operand at all is never inside."""
+    if not root or words[0].rsplit('/', 1)[-1] != 'rm':
+        return False
+    operands = _rm_operands(words)
     real_root = os.path.realpath(root)
     for operand in operands:
         if not (_is_literal_path(operand) and os.path.isabs(operand)):
@@ -4157,6 +4266,34 @@ def consent_unannounced(state_dir: str, session_id: str) -> list[dict]:
             data['pending'] = pending
             save_state(path, data)
     return fresh
+
+
+def _is_superseded(entry: dict) -> bool:
+    """Whether a queued removal has nothing left to remove: a deletion whose
+    every target, all read literally, is already gone. A command that is cut,
+    names something the words do not (see `deletion_targets`) or is not a
+    deletion stays: only a known absence supersedes it."""
+    if entry.get('effect') not in DELETION_EFFECTS or entry.get('is_cut'):
+        return False
+    targets = deletion_targets(str(entry.get('command') or ''), str(entry.get('cwd') or ''))
+    return bool(targets) and not any(os.path.lexists(target) for target in targets)
+
+
+def consent_drop_superseded(state_dir: str, session_id: str) -> list[dict]:
+    """Take out of the queue the removals that were resolved another way (the
+    model or the user already removed what they name), and return them: asking
+    to approve what is gone only ends in a failed command."""
+    path = consent_path(state_dir, session_id)
+    if not os.path.exists(path):
+        return []
+    with _file_lock(path):
+        data = load_state(path)
+        pending = _consent_entries(data, 'pending')
+        gone = [entry for entry in pending if _is_superseded(entry)]
+        if gone:
+            data['pending'] = [entry for entry in pending if entry not in gone]
+            save_state(path, data)
+    return gone
 
 
 def consent_decide(state_dir: str, session_id: str, number: int) -> dict | None:
