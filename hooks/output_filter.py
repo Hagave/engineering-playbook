@@ -396,7 +396,8 @@ def report(language: str | None = None) -> str:
     """The latest session's totals, for /playbook-config (Status), in the
     language the `language` preference resolves to."""
     if language is None:
-        language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
+        language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'],
+                                         state_dir=STATE_DIR)
     ledgers = glob.glob(os.path.join(STATE_DIR, LEDGER_GLOB))
     if not ledgers:
         return playbook_i18n.text(language, 'filter_empty')

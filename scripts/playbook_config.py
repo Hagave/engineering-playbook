@@ -140,7 +140,7 @@ def snapshot(prefs: dict, harness: str = 'claude', environ: dict | None = None) 
     """Every setting `harness` acts on, as the panel draws it, plus the panel's
     own strings: everything in the language `prefs['language']` resolves to.
     Settings come in the order DESCRIPTIONS lists them."""
-    language = playbook_i18n.resolve(prefs['language'], environ)
+    language = playbook_i18n.resolve(prefs['language'], environ, STATE_DIR)
     current = playbook_update.status(STATE_DIR)
     return {
         'language': language,
@@ -261,7 +261,8 @@ def main(argv: list[str]) -> int:
         if len(argv) < 2 or argv[1].lower() not in ('check', 'apply'):
             print('usage: playbook_config.py update check|apply [--json]', file=sys.stderr)
             return 2
-        language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'])
+        language = playbook_i18n.resolve(playbook_core.load_prefs(STATE_DIR)['language'],
+                                         state_dir=STATE_DIR)
         answer = update_answer(argv[1].lower(), language)
         print(json.dumps(answer) if '--json' in argv[2:] else answer['text'])
         return 1 if answer['is_error'] and '--json' not in argv[2:] else 0
@@ -295,7 +296,7 @@ def main(argv: list[str]) -> int:
         value = prefs[key]
         shown = ('on' if value else 'off') if isinstance(value, bool) else value
         print(f'[playbook:config] {key} = {shown}')
-        print(effect_note(key, value, playbook_i18n.resolve(prefs['language'])))
+        print(effect_note(key, value, playbook_i18n.resolve(prefs['language'], state_dir=STATE_DIR)))
         return 0
 
     print(f'unknown action {action!r} — use show, get, set, session or update', file=sys.stderr)
