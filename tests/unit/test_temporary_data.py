@@ -179,6 +179,14 @@ class TestShow(_Case):
         self.assertEqual(view['ui']['tmp_approve'], 'Aprovar')
         self.assertIn('apaga arquivos e diretórios recursivamente', view['pending'][0]['text'])
 
+    def test_a_waiting_row_keeps_the_command_apart_from_its_headline(self):
+        self._build()
+        self._queue('rm -rf build')
+        row = temporary_data.show(SESSION, self.project)['pending'][0]
+        self.assertEqual(row['command'], 'rm -rf build')
+        self.assertNotIn('rm -rf build', row['text'])
+        self.assertTrue(row['text'].startswith('#1 deletes files and directories recursively ('))
+
     def test_a_row_says_how_long_it_has_been_waiting(self):
         self._build()
         self._queue('rm -rf build')
@@ -376,6 +384,40 @@ class TestCreatedInThePanel(_Case):
         self.assertEqual(len(items), 1)
         self.assertIn(f'git worktree {wt}', items[0]['text'])
         self.assertIn('made by Claude', items[0]['text'])
+
+    def test_the_list_gets_a_short_title_the_full_path_and_the_origin_apart(self):
+        wt = os.path.join(self.project, 'wt')
+        os.makedirs(wt)
+        self._note('git worktree add wt')
+        playbook_core.consent_mark_turn_end(self.state, SESSION)
+        item = temporary_data.show(SESSION, self.project)['items'][0]
+        self.assertEqual(item['title'], 'git worktree wt')
+        self.assertEqual(item['detail'], wt)
+        self.assertRegex(item['origin'], r'^made by Claude on \d{4}-\d\d-\d\d \d\d:\d\d$')
+        self.assertNotIn(wt, item['title'])
+        self.assertNotIn(wt, item['origin'])
+
+    def test_a_name_with_no_folder_has_no_detail(self):
+        item = {'ts': 0, 'kind': 'created', 'what': {'key': 'tmp_what_container', 'name': 'db-1'}}
+        self.assertEqual(temporary_data._item_label('en', item), ('Docker container db-1', ''))
+
+    def test_a_trailing_slash_does_not_hide_the_folder_name(self):
+        item = {'ts': 0, 'what': {'key': 'tmp_what_tempdir', 'name': '/tmp/work/out/'}}
+        self.assertEqual(temporary_data._item_label('en', item),
+                         ('temporary folder out', '/tmp/work/out/'))
+
+    def test_the_label_falls_back_to_the_text_and_then_to_the_effect(self):
+        self.assertEqual(temporary_data._item_label('en', {'what': {'text': 'build output'}}),
+                         ('build output', ''))
+        title, detail = temporary_data._item_label('en', {'effect': 'delete_tree'})
+        self.assertEqual((title, detail), ('deletes files and directories recursively', ''))
+
+    def test_every_kind_has_its_own_origin_in_every_language(self):
+        for language in ('en', 'pt-br', 'es'):
+            seen = {temporary_data._item_origin(language, {'ts': 0, 'kind': kind})
+                    for kind in ('declined', 'created', 'registered', 'something-else')}
+            with self.subTest(language=language):
+                self.assertEqual(len(seen), 3)
 
     def test_an_item_whose_target_is_gone_leaves_the_panel(self):
         wt = os.path.join(self.project, 'wt')
